@@ -1,4 +1,5 @@
 numpy
-librosa
+pandas
 tensorflow
-gradio
+logging
+unittest
