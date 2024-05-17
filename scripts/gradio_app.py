@@ -1,29 +1,20 @@
 import gradio as gr
-import librosa
-import numpy as np
-import tensorflow as tf
+from scripts.audio_stem_separation import load_audio, separate_stems, save_stems
 
-# Load your trained model
-model = tf.keras.models.load_model('path_to_your_trained_model')
+def process_audio(file):
+    audio, sr = load_audio(file.name)
+    stems = separate_stems(audio)
+    output_dir = "output"
+    save_stems(stems, sr, output_dir)
+    return [f"{output_dir}/vocals.wav", f"{output_dir}/accompaniment.wav"]
 
-def separate_stems(audio_file):
-    # Load and preprocess the audio file
-    audio, sr = librosa.load(audio_file, sr=44100)
-    audio = librosa.util.normalize(audio)
-    stft_features = librosa.stft(audio, n_fft=2048, hop_length=512)
-    stft_db = librosa.amplitude_to_db(abs(stft_features))
-    
-    # Predict stems
-    stft_db = np.expand_dims(stft_db, axis=-1)
-    stft_db = np.expand_dims(stft_db, axis=0)
-    predicted_stems = model.predict(stft_db)
-    
-    # Process and return the separated stems
-    # Note: Add your post-processing code here
-    return predicted_stems
+interface = gr.Interface(
+    fn=process_audio,
+    inputs=gr.inputs.Audio(source="upload", type="file"),
+    outputs=[gr.outputs.Audio(type="file"), gr.outputs.Audio(type="file")],
+    title="KAN-Stem Audio Separation",
+    description="Upload an audio file to separate its stems using KANs."
+)
 
-# Define Gradio interface
-inputs = gr.inputs.Audio(source="upload", type="filepath")
-outputs = gr.outputs.Textbox()
-
-gr.Interface(fn=separate_stems, inputs=inputs, outputs=outputs, title="KAN Stem Separation", description="Upload an audio file to separate its stems using KAN").launch()
+if __name__ == "__main__":
+    interface.launch()
