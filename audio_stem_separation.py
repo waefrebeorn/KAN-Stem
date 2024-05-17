@@ -2,12 +2,17 @@ import os
 import librosa
 import numpy as np
 import tensorflow as tf
+import gradio as gr
 
 # 1. Load and preprocess audio files
 def load_and_preprocess_audio(file_path, sr=44100):
-    audio, _ = librosa.load(file_path, sr=sr)
-    audio = librosa.util.normalize(audio)
-    return audio
+    try:
+        audio, _ = librosa.load(file_path, sr=sr)
+        audio = librosa.util.normalize(audio)
+        return audio
+    except Exception as e:
+        print(f"Error loading {file_path}: {e}")
+        return None
 
 def extract_stft_features(audio, n_fft=2048, hop_length=512):
     stft = librosa.stft(audio, n_fft=n_fft, hop_length=hop_length)
@@ -22,9 +27,10 @@ def prepare_dataset(dataset_path):
             if file.endswith('.wav'):
                 file_path = os.path.join(root, file)
                 audio = load_and_preprocess_audio(file_path)
-                stft_features = extract_stft_features(audio)
-                data.append(stft_features)
-                labels.append(root)  # Assuming folder names are labels
+                if audio is not None:
+                    stft_features = extract_stft_features(audio)
+                    data.append(stft_features)
+                    labels.append(os.path.basename(root))  # Assuming folder names are labels
     return np.array(data), np.array(labels)
 
 # 2. Define the KAN model layers
@@ -104,16 +110,35 @@ def create_tf_dataset(data, labels, batch_size=32):
 
 # Paths
 dataset_path = 'path/to/your/handpicked_dataset'
+validation_dataset_path = 'path/to/your/validation_dataset'
+test_dataset_path = 'path/to/your/test_dataset'
 
 # Prepare the dataset
 data, labels = prepare_dataset(dataset_path)
+val_data, val_labels = prepare_dataset(validation_dataset_path)
+test_data, test_labels = prepare_dataset(test_dataset_path)
+
+# Encode labels as integers
+label_to_int = {label: i for i, label in enumerate(np.unique(labels))}
+labels = np.array([label_to_int[label] for label in labels])
+val_labels = np.array([label_to_int[label] for label in val_labels])
+test_labels = np.array([label_to_int[label] for label in test_labels])
 
 # Ensure the data has the right shape for the model
 data = np.expand_dims(data, axis=-1)  # Add channel dimension if necessary
-labels = tf.keras.utils.to_categorical(labels, num_classes=10)  # Adjust number of classes as necessary
+val_data = np.expand_dims(val_data, axis=-1)
+test_data = np.expand_dims(test_data, axis=-1)
+
+# Convert labels to one-hot encoding
+num_classes = len(label_to_int)
+labels = tf.keras.utils.to_categorical(labels, num_classes)
+val_labels = tf.keras.utils.to_categorical(val_labels, num_classes)
+test_labels = tf.keras.utils.to_categorical(test_labels, num_classes)
 
 # Create TensorFlow Dataset
 train_dataset = create_tf_dataset(data, labels)
+val_dataset = create_tf_dataset(val_data, val_labels)
+test_dataset = create_tf_dataset(test_data, test_labels)
 
 # Define KAN layers
 kan_layers = [KANLayer(input_dim=256, output_dim=128, num_splines=10, grid_size=50),
@@ -121,30 +146,55 @@ kan_layers = [KANLayer(input_dim=256, output_dim=128, num_splines=10, grid_size=
 
 # Define and compile the model
 input_shape = (data.shape[1], data.shape[2], 1)  # Adjust input shape as necessary
-num_classes = 10  # Adjust number of classes as necessary
 hybrid_model = HybridKANModel(input_shape=input_shape, kan_layers=kan_layers, num_classes=num_classes)
 hybrid_model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
 
+# Add Model Checkpoints and Early Stopping
+checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
+    filepath='checkpoints/kan_model_{epoch}',
+    save_weights_only=True,
+    monitor='val_accuracy',
+    mode='max',
+    save_best_only=True)
+
+early_stopping_callback = tf.keras.callbacks.EarlyStopping(
+    monitor='val_loss',
+    patience=10,
+    restore_best_weights=True)
+
 # Train the model
-hybrid_model.fit(train_dataset, epochs=100)
+hybrid_model.fit(train_dataset, epochs=100, validation_data=val_dataset, callbacks=[checkpoint_callback, early_stopping_callback])
 
-# Evaluation (Optional)
-# If you have a validation dataset, you can evaluate the model as follows:
-# val_data, val_labels = prepare_dataset(validation_dataset_path)
-# val_data = np.expand_dims(val_data, axis=-1)
-# val_labels = tf.keras.utils.to_categorical(val_labels, num_classes=num_classes)
-# val_dataset = create_tf_dataset(val_data, val_labels)
-# hybrid_model.evaluate(val_dataset)
+# Evaluate the model performance on the test dataset
+test_loss, test_accuracy = hybrid_model.evaluate(test_dataset)
+print(f'Test accuracy: {test_accuracy:.4f}')
 
-# Test the model (Optional)
-# If you have a test dataset, you can test the model as follows:
-# test_data, test_labels = prepare_dataset(test_dataset_path)
-# test_data = np.expand_dims(test_data, axis=-1)
-# test_labels = tf.keras.utils.to_categorical(test_labels, num_classes=num_classes)
-# test_dataset = create_tf_dataset(test_data, test_labels)
-# hybrid_model.evaluate(test_dataset)
+# Predict stems and evaluate performance
+predicted_stems = hybrid_model.predict(test_dataset)
 
-# Predictions (Optional)
-# predicted_stems = hybrid_model.predict(test_dataset)
-# You can implement a function to evaluate the predicted stems and compare them with the ground truth
-# evaluate_performance(predicted_stems, test_labels)
+# Function to evaluate performance
+def evaluate_performance(predictions, true_labels):
+    accuracy = np.mean(np.argmax(predictions, axis=1) == np.argmax(true_labels, axis=1))
+    print(f'Prediction accuracy: {accuracy:.4f}')
+
+# Evaluate the predictions
+evaluate_performance(predicted_stems, test_labels)
+
+# 7. Gradio App
+def separate_stems(audio_file):
+    audio, sr = librosa.load(audio_file, sr=44100)
+    audio = librosa.util.normalize(audio)
+    stft_features = librosa.stft(audio, n_fft=2048, hop_length=512)
+    stft_db = librosa.amplitude_to_db(abs(stft_features))
+    
+    stft_db = np.expand_dims(stft_db, axis=-1)
+    stft_db = np.expand_dims(stft_db, axis=0)
+    predicted_stems = hybrid_model.predict(stft_db)
+    
+    return predicted_stems
+
+# Define Gradio interface
+inputs = gr.inputs.Audio(source="upload", type="filepath")
+outputs = gr.outputs.Textbox()
+
+gr.Interface(fn=separate_stems, inputs=inputs, outputs=outputs, title="KAN Stem Separation", description="Upload an audio file to separate its stems using KAN").launch()
