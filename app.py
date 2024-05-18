@@ -144,4 +144,4 @@ with gr.Blocks() as app:
         separate_button.click(separate_audio, inputs=[input_audio, model_checkpoint, checkpoint_path], outputs=output_stems)
 
 if __name__ == '__main__':
-    app.launch()
+    app.launch(server_name="0.0.0.0", server_port=7860)
