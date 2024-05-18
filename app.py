@@ -82,6 +82,7 @@ def get_model_checkpoints(checkpoint_path):
 
 # Preprocess function for input audio
 def preprocess(audio, max_duration):
+    print(f"Input audio: {audio}")  # Debug statement
     if isinstance(audio, tuple):
         y, sr = audio
         y = np.array(y, dtype=np.float32)  # Ensure audio data is floating-point
