@@ -117,6 +117,10 @@ def separate_audio(input_audio, model_checkpoint):
     output_stems = postprocess(separated_stems)
     return output_stems
 
+# Refresh function to update model checkpoints
+def refresh_checkpoints():
+    return gr.Dropdown.update(choices=get_model_checkpoints())
+
 # Gradio interfaces
 train_interface = gr.Interface(
     fn=train_model,
@@ -135,12 +139,12 @@ separate_interface = gr.Interface(
     fn=separate_audio,
     inputs=[
         gr.Audio(type='numpy'),
-        gr.Dropdown(label='Model Checkpoint', choices=get_model_checkpoints(), value='model.ckpt', interactive=True)
+        gr.Dropdown(label='Model Checkpoint', choices=get_model_checkpoints(), value='model.ckpt', interactive=True),
+        gr.Button('Refresh Checkpoints', on_click=refresh_checkpoints)
     ],
     outputs=[gr.Audio(type='numpy') for _ in range(4)],
     title='KAN Audio Stem Separation',
-    description='Upload an audio file and get separated stems using Kolmogorov-Arnold Networks (KANs).',
-    refresh_button=True
+    description='Upload an audio file and get separated stems using Kolmogorov-Arnold Networks (KANs).'
 )
 
 app = gr.TabbedInterface(
