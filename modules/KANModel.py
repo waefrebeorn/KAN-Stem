@@ -21,9 +21,7 @@ class KANModel(nn.Module):
         x = self.pool(x)
         x = torch.relu(self.conv4(x))
         x = self.pool(x)
-        print(f'Shape before flattening: {x.shape}')  # Debug statement
         x = x.view(x.size(0), -1)
-        print(f'Shape after flattening: {x.shape}')  # Debug statement
         x = torch.relu(self.fc1(x))
         x = self.fc2(x)
         x = x.view(x.size(0), 4, 44100)  # Reshape to match target shape

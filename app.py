@@ -6,6 +6,7 @@ import numpy as np
 from modules.KANModel import KANModel  # Ensure correct import
 import torch.optim as optim
 import torch.nn as nn
+from torch.utils.tensorboard import SummaryWriter
 
 # Function to load data from a given directory
 def load_stem_data(dataset_path):
@@ -49,6 +50,9 @@ def train_model(epochs, learning_rate, batch_size, dataset_path):
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     criterion = nn.MSELoss()
 
+    # TensorBoard writer
+    writer = SummaryWriter()
+
     for epoch in range(epochs):
         model.train()
         total_loss = 0
@@ -63,16 +67,38 @@ def train_model(epochs, learning_rate, batch_size, dataset_path):
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
-        print(f'Epoch {epoch + 1}/{epochs}, Loss: {total_loss / (len(inputs) // batch_size)}')
+        avg_loss = total_loss / (len(inputs) // batch_size)
+        print(f'Epoch {epoch + 1}/{epochs}, Loss: {avg_loss}')
+        writer.add_scalar('Loss/train', avg_loss, epoch)
 
+    writer.close()
     torch.save(model.state_dict(), 'checkpoints/model.ckpt')
     return 'Model trained and saved at checkpoints/model.ckpt'
 
+# Preprocess function for input audio
+def preprocess(audio):
+    y, sr = librosa.load(audio, sr=None)
+    spectrogram = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128)
+    log_spectrogram = librosa.power_to_db(spectrogram, ref=np.max)
+    log_spectrogram = log_spectrogram[:, :128 * 128]  # Ensure the correct shape
+    log_spectrogram = np.pad(log_spectrogram, ((0, 0), (0, 128 * 128 - log_spectrogram.shape[1])), 'constant')
+    log_spectrogram = log_spectrogram[np.newaxis, np.newaxis, :, :]  # Add batch and channel dimensions
+    return torch.tensor(log_spectrogram, dtype=torch.float32)
+
+# Postprocess function for output stems
+def postprocess(stems):
+    stems = stems.detach().cpu().numpy()
+    return [stems[0, i, :] for i in range(stems.shape[1])]
+
 # Audio separation function
 def separate_audio(input_audio):
-    model = KANModel().load_from_checkpoint('checkpoints/model.ckpt')
-    input_data = preprocess(input_audio)
-    separated_stems = model(input_data)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = KANModel().to(device)
+    model.load_state_dict(torch.load('checkpoints/model.ckpt', map_location=device))
+    model.eval()
+    input_data = preprocess(input_audio).to(device)
+    with torch.no_grad():
+        separated_stems = model(input_data)
     output_stems = postprocess(separated_stems)
     return output_stems
 
