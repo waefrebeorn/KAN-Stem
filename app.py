@@ -1,20 +1,32 @@
 import os
 import gradio as gr
 import torch
+import librosa
+import numpy as np
 from modules import KANModel, preprocess, postprocess
 import torch.optim as optim
 import torch.nn as nn
-import numpy as np
 
 # Function to load data from a given directory
 def load_stem_data(dataset_path):
-    png_files = [os.path.join(dataset_path, 'png', f) for f in os.listdir(os.path.join(dataset_path, 'png')) if f.endswith('.png')]
-    wav_files = [os.path.join(dataset_path, 'wav', f) for f in os.listdir(os.path.join(dataset_path, 'wav')) if f.endswith('.wav')]
+    wav_path = os.path.join(dataset_path, 'wav')
+    wav_files = [os.path.join(wav_path, f) for f in os.listdir(wav_path) if f.endswith('.wav')]
 
-    # Placeholder logic to match PNGs with WAVs
-    inputs = [np.random.randn(1, 44100) for _ in wav_files]  # Example inputs
-    targets = [np.random.randn(4, 44100) for _ in wav_files]  # Example targets
+    inputs = []
+    targets = []
 
+    for wav_file in wav_files:
+        y, sr = librosa.load(wav_file, sr=None)
+        spectrogram = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128)
+        log_spectrogram = librosa.power_to_db(spectrogram, ref=np.max)
+        inputs.append(log_spectrogram)
+        
+        # Example targets, in practice, load actual target data
+        target = np.random.randn(4, log_spectrogram.shape[1])  # Example target with 4 stems
+        targets.append(target)
+    
+    inputs = np.array(inputs)
+    targets = np.array(targets)
     return inputs, targets
 
 # Training function
