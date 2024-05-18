@@ -110,7 +110,7 @@ def get_model_checkpoints(checkpoint_path):
 #         f.write(response.content)
 
 # Preprocess function for input audio
-def preprocess(audio, max_duration):
+def preprocess(audio, max_duration):`n    print(f"Input audio shape: {audio.shape}")
 # Preprocess function for input audio
 
 #         f.write(response.content)
@@ -330,7 +330,7 @@ def get_model_checkpoints(checkpoint_path):
 #         f.write(response.content)
 
 # Preprocess function for input audio
-def preprocess(audio, max_duration):
+def preprocess(audio, max_duration):`n    print(f"Input audio shape: {audio.shape}")
     try:
         print(f"Input audio: {audio}")  # Debug statement
         if isinstance(audio, tuple):
