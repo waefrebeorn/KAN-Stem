@@ -11,75 +11,87 @@ from torch.utils.tensorboard import SummaryWriter
 
 # Function to load data from a given directory
 def load_stem_data(dataset_path):
-    wav_path = os.path.join(dataset_path, 'wav')
-    wav_files = [os.path.join(wav_path, f) for f in os.listdir(wav_path) if f.endswith('.wav')]
+    try:
+        wav_path = os.path.join(dataset_path, 'wav')
+        wav_files = [os.path.join(wav_path, f) for f in os.listdir(wav_path) if f.endswith('.wav')]
 
-    inputs = []
-    targets = []
+        inputs = []
+        targets = []
 
-    for wav_file in wav_files:
-        y, sr = librosa.load(wav_file, sr=None)
-        y = y.astype(np.float32)  # Ensure audio data is floating-point
-        spectrogram = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128)
-        log_spectrogram = librosa.power_to_db(spectrogram, ref=np.max)
+        for wav_file in wav_files:
+            y, sr = librosa.load(wav_file, sr=None)
+            y = y.astype(np.float32)  # Ensure audio data is floating-point
+            spectrogram = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128)
+            log_spectrogram = librosa.power_to_db(spectrogram, ref=np.max)
 
-        # Ensure the log_spectrogram has the correct shape
-        target_shape = (128, 128 * 128)
-        if log_spectrogram.shape[1] < target_shape[1]:
-            log_spectrogram = np.pad(log_spectrogram, ((0, 0), (0, target_shape[1] - log_spectrogram.shape[1])), 'constant')
-        else:
-            log_spectrogram = log_spectrogram[:, :target_shape[1]]
+            # Ensure the log_spectrogram has the correct shape
+            target_shape = (128, 128 * 128)
+            if log_spectrogram.shape[1] < target_shape[1]:
+                log_spectrogram = np.pad(log_spectrogram, ((0, 0), (0, target_shape[1] - log_spectrogram.shape[1])), 'constant')
+            else:
+                log_spectrogram = log_spectrogram[:, :target_shape[1]]
 
-        inputs.append(log_spectrogram)
+            inputs.append(log_spectrogram)
 
-        # Example targets, in practice, load actual target data
-        target = np.random.randn(4, 44100)  # Example target with 4 stems
-        targets.append(target)
+            # Example targets, in practice, load actual target data
+            target = np.random.randn(4, 44100)  # Example target with 4 stems
+            targets.append(target)
 
-    inputs = np.array(inputs)
-    targets = np.array(targets)
+        inputs = np.array(inputs)
+        targets = np.array(targets)
 
-    # Ensure inputs have the correct shape
-    inputs = inputs[:, np.newaxis, :, :]  # Add a channel dimension
+        # Ensure inputs have the correct shape
+        inputs = inputs[:, np.newaxis, :, :]  # Add a channel dimension
 
-    return inputs, targets
+        return inputs, targets
+    except Exception as e:
+        print(f"Error in load_stem_data: {e}")
+        raise
 
 # Training function
 def train_model(epochs, learning_rate, batch_size, dataset_path):
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    inputs, targets = load_stem_data(dataset_path)
-    model = KANModel().to(device)
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    criterion = nn.MSELoss()
+    try:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        inputs, targets = load_stem_data(dataset_path)
+        model = KANModel().to(device)
+        optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+        criterion = nn.MSELoss()
 
-    # TensorBoard writer
-    writer = SummaryWriter()
+        # TensorBoard writer
+        writer = SummaryWriter()
 
-    for epoch in range(epochs):
-        model.train()
-        total_loss = 0
-        for i in range(0, len(inputs), batch_size):
-            input_batch = inputs[i:i + batch_size]
-            target_batch = targets[i:i + batch_size]
-            input_batch = torch.tensor(input_batch, dtype=torch.float32).to(device)
-            target_batch = torch.tensor(target_batch, dtype=torch.float32).to(device)
-            optimizer.zero_grad()
-            output = model(input_batch)
-            loss = criterion(output, target_batch)
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item()
-        avg_loss = total_loss / (len(inputs) // batch_size)
-        print(f'Epoch {epoch + 1}/{epochs}, Loss: {avg_loss}')
-        writer.add_scalar('Loss/train', avg_loss, epoch)
+        for epoch in range(epochs):
+            model.train()
+            total_loss = 0
+            for i in range(0, len(inputs), batch_size):
+                input_batch = inputs[i:i + batch_size]
+                target_batch = targets[i:i + batch_size]
+                input_batch = torch.tensor(input_batch, dtype=torch.float32).to(device)
+                target_batch = torch.tensor(target_batch, dtype=torch.float32).to(device)
+                optimizer.zero_grad()
+                output = model(input_batch)
+                loss = criterion(output, target_batch)
+                loss.backward()
+                optimizer.step()
+                total_loss += loss.item()
+            avg_loss = total_loss / (len(inputs) // batch_size)
+            print(f'Epoch {epoch + 1}/{epochs}, Loss: {avg_loss}')
+            writer.add_scalar('Loss/train', avg_loss, epoch)
 
-    writer.close()
-    torch.save(model.state_dict(), os.path.join('checkpoints', 'model.ckpt'))
-    return 'Model trained and saved at checkpoints/model.ckpt'
+        writer.close()
+        torch.save(model.state_dict(), os.path.join('checkpoints', 'model.ckpt'))
+        return 'Model trained and saved at checkpoints/model.ckpt'
+    except Exception as e:
+        print(f"Error in train_model: {e}")
+        raise
 
 # Function to get a list of model checkpoints
 def get_model_checkpoints(checkpoint_path):
-    return [f for f in os.listdir(checkpoint_path) if f.endswith('.ckpt')]
+    try:
+        return [f for f in os.listdir(checkpoint_path) if f.endswith('.ckpt')]
+    except Exception as e:
+        print(f"Error in get_model_checkpoints: {e}")
+        raise
 
 # Function to download model checkpoint from Hugging Face
 # def download_checkpoint(url, checkpoint_path):
@@ -91,56 +103,72 @@ def get_model_checkpoints(checkpoint_path):
 
 # Preprocess function for input audio
 def preprocess(audio, max_duration):
-    print(f"Input audio: {audio}")  # Debug statement
-    if isinstance(audio, tuple):
-        y, sr = audio
-        y = np.array(y, dtype=np.float32)  # Ensure audio data is floating-point
-    else:
-        y, sr = librosa.load(audio, sr=None)
-        y = y.astype(np.float32)  # Ensure audio data is floating-point
+    try:
+        print(f"Input audio: {audio}")  # Debug statement
+        if isinstance(audio, tuple):
+            y, sr = audio
+            y = np.array(y, dtype=np.float32)  # Ensure audio data is floating-point
+        else:
+            y, sr = librosa.load(audio, sr=None)
+            y = y.astype(np.float32)  # Ensure audio data is floating-point
 
-    print(f"Audio shape: {y.shape}, Sample rate: {sr}")  # Debug statement
+        print(f"Audio shape: {y.shape}, Sample rate: {sr}")  # Debug statement
 
-    if y.ndim == 0 or y.size == 0:
-        raise ValueError("Audio data must be at least one-dimensional and not empty")
+        if y.ndim == 0 or y.size == 0:
+            raise ValueError("Audio data must be at least one-dimensional and not empty")
 
-    # Truncate or pad the audio to the max_duration
-    max_samples = int(max_duration * sr)
-    if len(y) > max_samples:
-        y = y[:max_samples]
-    else:
-        y = np.pad(y, (0, max_samples - len(y)), 'constant')
+        # Truncate or pad the audio to the max_duration
+        max_samples = int(max_duration * sr)
+        if len(y) > max_samples:
+            y = y[:max_samples]
+        else:
+            y = np.pad(y, (0, max_samples - len(y)), 'constant')
 
-    spectrogram = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128)
-    log_spectrogram = librosa.power_to_db(spectrogram, ref=np.max)
-    log_spectrogram = log_spectrogram[:, :128 * 128]  # Ensure the correct shape
-    log_spectrogram = np.pad(log_spectrogram, ((0, 0), (0, 128 * 128 - log_spectrogram.shape[1])), 'constant')
-    log_spectrogram = log_spectrogram[np.newaxis, np.newaxis, :, :]  # Add batch and channel dimensions
-    return torch.tensor(log_spectrogram, dtype=torch.float32)
+        spectrogram = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128)
+        log_spectrogram = librosa.power_to_db(spectrogram, ref=np.max)
+        log_spectrogram = log_spectrogram[:, :128 * 128]  # Ensure the correct shape
+        log_spectrogram = np.pad(log_spectrogram, ((0, 0), (0, 128 * 128 - log_spectrogram.shape[1])), 'constant')
+        log_spectrogram = log_spectrogram[np.newaxis, np.newaxis, :, :]  # Add batch and channel dimensions
+        return torch.tensor(log_spectrogram, dtype=torch.float32)
+    except Exception as e:
+        print(f"Error in preprocess: {e}")
+        raise
 
 # Postprocess function for output stems
 def postprocess(stems):
-    stems = stems.detach().cpu().numpy()
-    return [stems[0, i, :] for i in range(stems.shape[1])]
+    try:
+        stems = stems.detach().cpu().numpy()
+        return [stems[0, i, :] for i in range(stems.shape[1])]
+    except Exception as e:
+        print(f"Error in postprocess: {e}")
+        raise
 
 # Audio separation function
 def separate_audio(input_audio, model_checkpoint, checkpoint_path, max_duration):
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = KANModel().to(device)
-    model_checkpoint_path = os.path.join(checkpoint_path, model_checkpoint)
-    # if not os.path.exists(model_checkpoint_path):
-    #     download_checkpoint('https://huggingface.co/WaefreBeorn/KAN-Stem/blob/main/model.ckpt', checkpoint_path)
-    model.load_state_dict(torch.load(model_checkpoint_path, map_location=device))
-    model.eval()
-    input_data = preprocess(input_audio, max_duration).to(device)
-    with torch.no_grad():
-        separated_stems = model(input_data)
-    output_stems = postprocess(separated_stems)
-    return output_stems
+    try:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        model = KANModel().to(device)
+        model_checkpoint_path = os.path.join(checkpoint_path, model_checkpoint)
+        # if not os.path.exists(model_checkpoint_path):
+        #     download_checkpoint('https://huggingface.co/WaefreBeorn/KAN-Stem/blob/main/model.ckpt', checkpoint_path)
+        model.load_state_dict(torch.load(model_checkpoint_path, map_location=device))
+        model.eval()
+        input_data = preprocess(input_audio, max_duration).to(device)
+        with torch.no_grad():
+            separated_stems = model(input_data)
+        output_stems = postprocess(separated_stems)
+        return output_stems
+    except Exception as e:
+        print(f"Error in separate_audio: {e}")
+        raise
 
 # Refresh function to update model checkpoints
 def refresh_checkpoints(checkpoint_path):
-    return gr.Dropdown.update(choices=get_model_checkpoints(checkpoint_path))
+    try:
+        return gr.Dropdown.update(choices=get_model_checkpoints(checkpoint_path))
+    except Exception as e:
+        print(f"Error in refresh_checkpoints: {e}")
+        raise
 
 # Gradio layout using Blocks
 with gr.Blocks() as app:
