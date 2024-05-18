@@ -77,7 +77,10 @@ def train_model(epochs, learning_rate, batch_size, dataset_path):
 
 # Preprocess function for input audio
 def preprocess(audio):
-    y, sr = librosa.load(audio, sr=None)
+    if isinstance(audio, tuple):
+        y, sr = audio
+    else:
+        y, sr = librosa.load(audio, sr=None)
     spectrogram = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128)
     log_spectrogram = librosa.power_to_db(spectrogram, ref=np.max)
     log_spectrogram = log_spectrogram[:, :128 * 128]  # Ensure the correct shape
