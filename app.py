@@ -3,7 +3,6 @@ import gradio as gr
 import torch
 import librosa
 import numpy as np
-
 from modules.KANModel import KANModel
 import torch.optim as optim
 import torch.nn as nn
