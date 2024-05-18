@@ -3,6 +3,7 @@ import gradio as gr
 import torch
 import librosa
 import numpy as np
+# import requests  # Commenting out for now
 from modules.KANModel import KANModel  # Ensure correct import
 import torch.optim as optim
 import torch.nn as nn
@@ -80,6 +81,14 @@ def train_model(epochs, learning_rate, batch_size, dataset_path):
 def get_model_checkpoints(checkpoint_path):
     return [f for f in os.listdir(checkpoint_path) if f.endswith('.ckpt')]
 
+# Function to download model checkpoint from Hugging Face
+# def download_checkpoint(url, checkpoint_path):
+#     if not os.path.exists(checkpoint_path):
+#         os.makedirs(checkpoint_path)
+#     response = requests.get(url)
+#     with open(os.path.join(checkpoint_path, 'model.ckpt'), 'wb') as f:
+#         f.write(response.content)
+
 # Preprocess function for input audio
 def preprocess(audio, max_duration):
     print(f"Input audio: {audio}")  # Debug statement
@@ -118,7 +127,10 @@ def postprocess(stems):
 def separate_audio(input_audio, model_checkpoint, checkpoint_path, max_duration):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = KANModel().to(device)
-    model.load_state_dict(torch.load(os.path.join(checkpoint_path, model_checkpoint), map_location=device))
+    model_checkpoint_path = os.path.join(checkpoint_path, model_checkpoint)
+    # if not os.path.exists(model_checkpoint_path):
+    #     download_checkpoint('https://huggingface.co/WaefreBeorn/KAN-Stem/blob/main/model.ckpt', checkpoint_path)
+    model.load_state_dict(torch.load(model_checkpoint_path, map_location=device))
     model.eval()
     input_data = preprocess(input_audio, max_duration).to(device)
     with torch.no_grad():
