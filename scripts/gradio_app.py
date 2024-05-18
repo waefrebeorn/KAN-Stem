@@ -1,6 +1,12 @@
 import gradio as gr
 import subprocess
-from scripts.training import train_model
+import sys
+import os
+
+# Ensure the scripts directory is in the system path
+sys.path.append(os.path.join(os.path.dirname(__file__), 'scripts'))
+
+from training import train_model
 
 def start_tensorboard(log_dir):
     subprocess.Popen(['tensorboard', '--logdir', log_dir])

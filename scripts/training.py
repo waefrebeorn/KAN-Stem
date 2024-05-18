@@ -2,8 +2,8 @@ import datetime
 from tensorflow.keras.callbacks import TensorBoard
 
 def train_model(dataset_path):
-    from scripts.utils import load_and_preprocess_dataset
-    from scripts.model import create_model
+    from .utils import load_and_preprocess_dataset
+    from .model import create_model
     
     dataset = load_and_preprocess_dataset(dataset_path)
     model = create_model()
