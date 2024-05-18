@@ -4,14 +4,17 @@ import torch.nn as nn
 class KANModel(nn.Module):
     def __init__(self):
         super(KANModel, self).__init__()
-        # Define the model layers
+        # Example layers, adjust according to the actual model architecture from efficient-kan
+        self.conv1 = nn.Conv2d(1, 16, kernel_size=3, stride=1, padding=1)
+        self.conv2 = nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1)
+        self.fc1 = nn.Linear(32 * 32 * 32, 1024)
+        self.fc2 = nn.Linear(1024, 4 * 44100)  # Assuming output size matches the target shape
 
     def forward(self, x):
-        # Define the forward pass
+        x = torch.relu(self.conv1(x))
+        x = torch.relu(self.conv2(x))
+        x = x.view(x.size(0), -1)
+        x = torch.relu(self.fc1(x))
+        x = self.fc2(x)
+        x = x.view(x.size(0), 4, 44100)  # Reshape to match target shape
         return x
-
-    @staticmethod
-    def load_from_checkpoint(checkpoint_path):
-        model = KANModel()
-        model.load_state_dict(torch.load(checkpoint_path))
-        return model
