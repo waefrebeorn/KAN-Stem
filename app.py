@@ -81,7 +81,7 @@ def get_model_checkpoints(checkpoint_path):
     return [f for f in os.listdir(checkpoint_path) if f.endswith('.ckpt')]
 
 # Preprocess function for input audio
-def preprocess(audio):
+def preprocess(audio, max_duration):
     if isinstance(audio, tuple):
         y, sr = audio
         y = np.array(y, dtype=np.float32)  # Ensure audio data is floating-point
@@ -91,6 +91,13 @@ def preprocess(audio):
 
     if y.ndim == 0 or y.size == 0:
         raise ValueError("Audio data must be at least one-dimensional and not empty")
+
+    # Truncate or pad the audio to the max_duration
+    max_samples = int(max_duration * sr)
+    if len(y) > max_samples:
+        y = y[:max_samples]
+    else:
+        y = np.pad(y, (0, max_samples - len(y)), 'constant')
 
     spectrogram = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128)
     log_spectrogram = librosa.power_to_db(spectrogram, ref=np.max)
@@ -105,12 +112,12 @@ def postprocess(stems):
     return [stems[0, i, :] for i in range(stems.shape[1])]
 
 # Audio separation function
-def separate_audio(input_audio, model_checkpoint, checkpoint_path):
+def separate_audio(input_audio, model_checkpoint, checkpoint_path, max_duration):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = KANModel().to(device)
     model.load_state_dict(torch.load(os.path.join(checkpoint_path, model_checkpoint), map_location=device))
     model.eval()
-    input_data = preprocess(input_audio).to(device)
+    input_data = preprocess(input_audio, max_duration).to(device)
     with torch.no_grad():
         separated_stems = model(input_data)
     output_stems = postprocess(separated_stems)
@@ -118,7 +125,7 @@ def separate_audio(input_audio, model_checkpoint, checkpoint_path):
 
 # Refresh function to update model checkpoints
 def refresh_checkpoints(checkpoint_path):
-    return get_model_checkpoints(checkpoint_path)
+    return gr.Dropdown.update(choices=get_model_checkpoints(checkpoint_path))
 
 # Gradio layout using Blocks
 with gr.Blocks() as app:
@@ -137,11 +144,12 @@ with gr.Blocks() as app:
         input_audio = gr.Audio(type='numpy')
         checkpoint_path = gr.Textbox(label='Checkpoint Path', value='C:\\projects\\KAN-Stem\\checkpoints', placeholder='Enter checkpoint path')
         model_checkpoint = gr.Dropdown(label='Model Checkpoint', choices=get_model_checkpoints('C:\\projects\\KAN-Stem\\checkpoints'), value='model.ckpt', interactive=True, allow_custom_value=True)
+        max_duration = gr.Number(label='Max Audio Duration (seconds)', value=30)
         refresh_button = gr.Button("Refresh Checkpoints")
         refresh_button.click(fn=lambda: refresh_checkpoints(checkpoint_path.value), inputs=None, outputs=model_checkpoint)
         separate_button = gr.Button("Separate")
         output_stems = [gr.Audio(type='numpy') for _ in range(4)]
-        separate_button.click(separate_audio, inputs=[input_audio, model_checkpoint, checkpoint_path], outputs=output_stems)
+        separate_button.click(separate_audio, inputs=[input_audio, model_checkpoint, checkpoint_path, max_duration], outputs=output_stems)
 
 if __name__ == '__main__':
-    app.launch(server_name="0.0.0.0", server_port=7860)
+    app.launch(server_name="127.0.0.1")
