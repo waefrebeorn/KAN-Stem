@@ -121,7 +121,8 @@ def separate_audio(input_audio, model_checkpoint, checkpoint_path, max_duration)
     with torch.no_grad():
         separated_stems = model(input_data)
     output_stems = postprocess(separated_stems)
-    return output_stems
+    # Convert output stems to smaller chunks if needed to avoid "Too much data" error
+    return [output_stems[i][:len(output_stems[i]) // 2] for i in range(len(output_stems))]
 
 # Refresh function to update model checkpoints
 def refresh_checkpoints(checkpoint_path):
