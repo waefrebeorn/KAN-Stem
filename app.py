@@ -19,7 +19,14 @@ def load_stem_data(dataset_path):
         y, sr = librosa.load(wav_file, sr=None)
         spectrogram = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128)
         log_spectrogram = librosa.power_to_db(spectrogram, ref=np.max)
-        log_spectrogram = np.pad(log_spectrogram, ((0, 0), (0, 128 * 128 - log_spectrogram.shape[1])), 'constant')
+
+        # Ensure the log_spectrogram has the correct shape
+        target_shape = (128, 128 * 128)
+        if log_spectrogram.shape[1] < target_shape[1]:
+            log_spectrogram = np.pad(log_spectrogram, ((0, 0), (0, target_shape[1] - log_spectrogram.shape[1])), 'constant')
+        else:
+            log_spectrogram = log_spectrogram[:, :target_shape[1]]
+
         inputs.append(log_spectrogram)
 
         # Example targets, in practice, load actual target data
