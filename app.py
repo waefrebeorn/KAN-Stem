@@ -89,6 +89,8 @@ def preprocess(audio, max_duration):
         y, sr = librosa.load(audio, sr=None)
         y = y.astype(np.float32)  # Ensure audio data is floating-point
 
+    print(f"Audio shape: {y.shape}, Sample rate: {sr}")  # Debug statement
+
     if y.ndim == 0 or y.size == 0:
         raise ValueError("Audio data must be at least one-dimensional and not empty")
 
