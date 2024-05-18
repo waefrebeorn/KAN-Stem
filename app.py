@@ -1,4 +1,8 @@
 import os
+    app.launch(server_name="127.0.0.1")
+if __name__ == '__main__':
+    app.launch(server_name="127.0.0.1")
+import os
 import gradio as gr
 import torch
 import librosa
