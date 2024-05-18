@@ -109,6 +109,226 @@ def get_model_checkpoints(checkpoint_path):
 
 # Preprocess function for input audio
 def preprocess(audio, max_duration):
+# Preprocess function for input audio
+
+#         f.write(response.content)
+#     with open(os.path.join(checkpoint_path, 'model.ckpt'), 'wb') as f:
+#     response = requests.get(url)
+#         os.makedirs(checkpoint_path)
+#     if not os.path.exists(checkpoint_path):
+# def download_checkpoint(url, checkpoint_path):
+# Function to download model checkpoint from Hugging Face
+
+        raise
+        print(f"Error in get_model_checkpoints: {e}")
+    except Exception as e:
+        return [f for f in os.listdir(checkpoint_path) if f.endswith('.ckpt')]
+    try:
+def get_model_checkpoints(checkpoint_path):
+# Function to get a list of model checkpoints
+
+        raise
+        print(f"Error in train_model: {e}")
+    except Exception as e:
+        return 'Model trained and saved at checkpoints/model.ckpt'
+        torch.save(model.state_dict(), os.path.join('checkpoints', 'model.ckpt'))
+        writer.close()
+
+            writer.add_scalar('Loss/train', avg_loss, epoch)
+            print(f'Epoch {epoch + 1}/{epochs}, Loss: {avg_loss}')
+            avg_loss = total_loss / (len(inputs) // batch_size)
+                total_loss += loss.item()
+                optimizer.step()
+                loss.backward()
+                loss = criterion(output, target_batch)
+                output = model(input_batch)
+                optimizer.zero_grad()
+                target_batch = torch.tensor(target_batch, dtype=torch.float32).to(device)
+                input_batch = torch.tensor(input_batch, dtype=torch.float32).to(device)
+                target_batch = targets[i:i + batch_size]
+                input_batch = inputs[i:i + batch_size]
+            for i in range(0, len(inputs), batch_size):
+            total_loss = 0
+            model.train()
+        for epoch in range(epochs):
+
+        writer = SummaryWriter()
+        # TensorBoard writer
+
+        criterion = nn.MSELoss()
+        optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+        model = KANModel().to(device)
+        inputs, targets = load_stem_data(dataset_path)
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    try:
+def train_model(epochs, learning_rate, batch_size, dataset_path):
+# Training function
+
+        raise
+        print(f"Error in load_stem_data: {e}")
+    except Exception as e:
+        return inputs, targets
+
+        inputs = inputs[:, np.newaxis, :, :]  # Add a channel dimension
+        # Ensure inputs have the correct shape
+
+        targets = np.array(targets)
+        inputs = np.array(inputs)
+
+            targets.append(target)
+            target = np.random.randn(4, 44100)  # Example target with 4 stems
+            # Example targets, in practice, load actual target data
+
+            inputs.append(log_spectrogram)
+
+                log_spectrogram = log_spectrogram[:, :target_shape[1]]
+            else:
+                log_spectrogram = np.pad(log_spectrogram, ((0, 0), (0, target_shape[1] - log_spectrogram.shape[1])), 'constant')
+            if log_spectrogram.shape[1] < target_shape[1]:
+            target_shape = (128, 128 * 128)
+            # Ensure the log_spectrogram has the correct shape
+
+            log_spectrogram = librosa.power_to_db(spectrogram, ref=np.max)
+            spectrogram = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128)
+            y = y.astype(np.float32)  # Ensure audio data is floating-point
+            y, sr = librosa.load(wav_file, sr=None)
+        for wav_file in wav_files:
+
+        targets = []
+        inputs = []
+
+        wav_files = [os.path.join(wav_path, f) for f in os.listdir(wav_path) if f.endswith('.wav')]
+        wav_path = os.path.join(dataset_path, 'wav')
+    try:
+def load_stem_data(dataset_path):
+# Function to load data from a given directory
+
+from torch.utils.tensorboard import SummaryWriter
+import torch.nn as nn
+import torch.optim as optim
+from modules.KANModel import KANModel  # Ensure correct import
+# import requests  # Commenting out for now
+import numpy as np
+import librosa
+import torch
+import gradio as gr
+import os
+    app.launch(server_name="127.0.0.1")
+if __name__ == '__main__':
+    app.launch(server_name="127.0.0.1")
+import os
+    app.launch(server_name="127.0.0.1")
+import os
+    app.launch(server_name="127.0.0.1")
+import os
+    app.launch(server_name="127.0.0.1")
+if __name__ == '__main__':
+    app.launch(server_name="127.0.0.1")
+import os
+import gradio as gr
+import torch
+import librosa
+import numpy as np
+# import requests  # Commenting out for now
+from modules.KANModel import KANModel  # Ensure correct import
+import torch.optim as optim
+import torch.nn as nn
+from torch.utils.tensorboard import SummaryWriter
+
+# Function to load data from a given directory
+def load_stem_data(dataset_path):
+    try:
+        wav_path = os.path.join(dataset_path, 'wav')
+        wav_files = [os.path.join(wav_path, f) for f in os.listdir(wav_path) if f.endswith('.wav')]
+
+        inputs = []
+        targets = []
+
+        for wav_file in wav_files:
+            y, sr = librosa.load(wav_file, sr=None)
+            y = y.astype(np.float32)  # Ensure audio data is floating-point
+            spectrogram = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128)
+            log_spectrogram = librosa.power_to_db(spectrogram, ref=np.max)
+
+            # Ensure the log_spectrogram has the correct shape
+            target_shape = (128, 128 * 128)
+            if log_spectrogram.shape[1] < target_shape[1]:
+                log_spectrogram = np.pad(log_spectrogram, ((0, 0), (0, target_shape[1] - log_spectrogram.shape[1])), 'constant')
+            else:
+                log_spectrogram = log_spectrogram[:, :target_shape[1]]
+
+            inputs.append(log_spectrogram)
+
+            # Example targets, in practice, load actual target data
+            target = np.random.randn(4, 44100)  # Example target with 4 stems
+            targets.append(target)
+
+        inputs = np.array(inputs)
+        targets = np.array(targets)
+
+        # Ensure inputs have the correct shape
+        inputs = inputs[:, np.newaxis, :, :]  # Add a channel dimension
+
+        return inputs, targets
+    except Exception as e:
+        print(f"Error in load_stem_data: {e}")
+        raise
+
+# Training function
+def train_model(epochs, learning_rate, batch_size, dataset_path):
+    try:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        inputs, targets = load_stem_data(dataset_path)
+        model = KANModel().to(device)
+        optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+        criterion = nn.MSELoss()
+
+        # TensorBoard writer
+        writer = SummaryWriter()
+
+        for epoch in range(epochs):
+            model.train()
+            total_loss = 0
+            for i in range(0, len(inputs), batch_size):
+                input_batch = inputs[i:i + batch_size]
+                target_batch = targets[i:i + batch_size]
+                input_batch = torch.tensor(input_batch, dtype=torch.float32).to(device)
+                target_batch = torch.tensor(target_batch, dtype=torch.float32).to(device)
+                optimizer.zero_grad()
+                output = model(input_batch)
+                loss = criterion(output, target_batch)
+                loss.backward()
+                optimizer.step()
+                total_loss += loss.item()
+            avg_loss = total_loss / (len(inputs) // batch_size)
+            print(f'Epoch {epoch + 1}/{epochs}, Loss: {avg_loss}')
+            writer.add_scalar('Loss/train', avg_loss, epoch)
+
+        writer.close()
+        torch.save(model.state_dict(), os.path.join('checkpoints', 'model.ckpt'))
+        return 'Model trained and saved at checkpoints/model.ckpt'
+    except Exception as e:
+        print(f"Error in train_model: {e}")
+        raise
+
+# Function to get a list of model checkpoints
+def get_model_checkpoints(checkpoint_path):
+    try:
+        return [f for f in os.listdir(checkpoint_path) if f.endswith('.ckpt')]
+    except Exception as e:
+        print(f"Error in get_model_checkpoints: {e}")
+        raise
+
+# Function to download model checkpoint from Hugging Face
+# def download_checkpoint(url, checkpoint_path):
+#     if not os.path.exists(checkpoint_path):
+#         os.makedirs(checkpoint_path)
+#     response = requests.get(url)
+#     with open(os.path.join(checkpoint_path, 'model.ckpt'), 'wb') as f:
+#         f.write(response.content)
+
+# Preprocess function for input audio
+def preprocess(audio, max_duration):
     try:
         print(f"Input audio: {audio}")  # Debug statement
         if isinstance(audio, tuple):
