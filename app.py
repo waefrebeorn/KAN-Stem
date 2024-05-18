@@ -19,15 +19,16 @@ def load_stem_data(dataset_path):
         y, sr = librosa.load(wav_file, sr=None)
         spectrogram = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128)
         log_spectrogram = librosa.power_to_db(spectrogram, ref=np.max)
+        log_spectrogram = np.pad(log_spectrogram, ((0, 0), (0, 128 * 128 - log_spectrogram.shape[1])), 'constant')
         inputs.append(log_spectrogram)
 
         # Example targets, in practice, load actual target data
-        target = np.random.randn(4, log_spectrogram.shape[1])  # Example target with 4 stems
+        target = np.random.randn(4, 44100)  # Example target with 4 stems
         targets.append(target)
 
     inputs = np.array(inputs)
     targets = np.array(targets)
-    
+
     # Ensure inputs have the correct shape
     inputs = inputs[:, np.newaxis, :, :]  # Add a channel dimension
 
@@ -74,7 +75,7 @@ train_interface = gr.Interface(
     inputs=[
         gr.Number(label='Epochs', value=10),
         gr.Number(label='Learning Rate', value=0.001),
-        gr.Number(label='Batch Size', value=32),
+        gr.Number(label='Batch Size', value=8),  # Lowered default batch size to reduce memory usage
         gr.Textbox(label='Dataset Path', value='G:\\Music\\badmultitracks-michaeljackson\\dataset', placeholder='Enter dataset path')
     ],
     outputs='text',
