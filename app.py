@@ -135,23 +135,23 @@ train_interface = gr.Interface(
     description='Train the Kolmogorov-Arnold Network model using stem data.'
 )
 
+model_checkpoint_dropdown = gr.Dropdown(label='Model Checkpoint', choices=get_model_checkpoints(), value='model.ckpt', interactive=True)
 separate_interface = gr.Interface(
     fn=separate_audio,
     inputs=[
         gr.Audio(type='numpy'),
-        gr.Dropdown(label='Model Checkpoint', choices=get_model_checkpoints(), value='model.ckpt', interactive=True)
+        model_checkpoint_dropdown
     ],
     outputs=[gr.Audio(type='numpy') for _ in range(4)],
     title='KAN Audio Stem Separation',
-    description='Upload an audio file and get separated stems using Kolmogorov-Arnold Networks (KANs).',
-    live=True
+    description='Upload an audio file and get separated stems using Kolmogorov-Arnold Networks (KANs).'
 )
 
 refresh_button = gr.Button('Refresh Checkpoints')
-refresh_button.click(refresh_checkpoints, outputs=[separate_interface.inputs[1]])
+refresh_button.click(fn=refresh_checkpoints, inputs=None, outputs=model_checkpoint_dropdown)
 
 app = gr.TabbedInterface(
-    [train_interface, separate_interface],
+    [train_interface, gr.Column([separate_interface, refresh_button])],
     ['Train Model', 'Separate Audio']
 )
 
