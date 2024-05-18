@@ -138,7 +138,7 @@ with gr.Blocks() as app:
         train_button = gr.Button("Train")
         train_output = gr.Textbox()
         train_button.click(train_model, inputs=[epochs, learning_rate, batch_size, dataset_path], outputs=train_output)
-    
+
     with gr.Tab("Separate Audio"):
         gr.Markdown("Upload an audio file and get separated stems using Kolmogorov-Arnold Networks (KANs).")
         input_audio = gr.Audio(type='numpy')
