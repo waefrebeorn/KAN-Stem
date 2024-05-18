@@ -82,12 +82,16 @@ def get_model_checkpoints(checkpoint_path):
 
 # Preprocess function for input audio
 def preprocess(audio, max_duration):
+    print("Preprocessing audio...")
+    print(f"Audio type: {type(audio)}")
     if isinstance(audio, tuple):
         y, sr = audio
         y = np.array(y, dtype=np.float32)  # Ensure audio data is floating-point
+        print(f"Audio loaded from tuple, shape: {y.shape}, sample rate: {sr}")
     else:
         y, sr = librosa.load(audio, sr=None)
         y = y.astype(np.float32)  # Ensure audio data is floating-point
+        print(f"Audio loaded from file, shape: {y.shape}, sample rate: {sr}")
 
     if y.ndim == 0 or y.size == 0:
         raise ValueError("Audio data must be at least one-dimensional and not empty")
@@ -117,12 +121,12 @@ def separate_audio(input_audio, model_checkpoint, checkpoint_path, max_duration)
     model = KANModel().to(device)
     model.load_state_dict(torch.load(os.path.join(checkpoint_path, model_checkpoint), map_location=device))
     model.eval()
+    print(f"Input audio: {input_audio}")
     input_data = preprocess(input_audio, max_duration).to(device)
     with torch.no_grad():
         separated_stems = model(input_data)
     output_stems = postprocess(separated_stems)
-    # Convert output stems to smaller chunks if needed to avoid "Too much data" error
-    return [output_stems[i][:len(output_stems[i]) // 2] for i in range(len(output_stems))]
+    return output_stems
 
 # Refresh function to update model checkpoints
 def refresh_checkpoints(checkpoint_path):
