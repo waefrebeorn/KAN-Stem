@@ -3,7 +3,7 @@ import gradio as gr
 import torch
 import librosa
 import numpy as np
-from modules import KANModel, preprocess, postprocess
+from modules.KANModel import KANModel  # Ensure correct import
 import torch.optim as optim
 import torch.nn as nn
 
@@ -20,11 +20,11 @@ def load_stem_data(dataset_path):
         spectrogram = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128)
         log_spectrogram = librosa.power_to_db(spectrogram, ref=np.max)
         inputs.append(log_spectrogram)
-        
+
         # Example targets, in practice, load actual target data
         target = np.random.randn(4, log_spectrogram.shape[1])  # Example target with 4 stems
         targets.append(target)
-    
+
     inputs = np.array(inputs)
     targets = np.array(targets)
     return inputs, targets
