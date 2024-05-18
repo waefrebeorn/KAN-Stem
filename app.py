@@ -84,6 +84,10 @@ def preprocess(audio):
     else:
         y, sr = librosa.load(audio, sr=None)
         y = y.astype(np.float32)  # Ensure audio data is floating-point
+
+    if y.ndim == 0 or y.size == 0:
+        raise ValueError("Audio data must be at least one-dimensional and not empty")
+
     spectrogram = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128)
     log_spectrogram = librosa.power_to_db(spectrogram, ref=np.max)
     log_spectrogram = log_spectrogram[:, :128 * 128]  # Ensure the correct shape
