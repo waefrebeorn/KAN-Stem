@@ -1,41 +1,34 @@
 # KAN-Stem
 
-## Overview
+This project uses Kolmogorov–Arnold Networks (KANs) for audio stem separation.
 
-KAN-Stem is a project for audio stem separation using Kolmogorov-Arnold Networks (KANs).
+## Features
 
-## Setup
+- Train a KAN model on audio stem data
+- Separate audio into different stems using the trained KAN model
 
-1. Clone the repository:
-    ```bash
-    git clone https://github.com/emangamer/KAN-Stem.git
-    cd KAN-Stem
-    ```
+## Installation
 
-2. Install the dependencies:
-    ```bash
-    pip install -r requirements.txt
-    ```
+To set up the environment and install the dependencies, run:
+
+\\\ash
+python -m venv venv
+source venv/bin/activate  # On Windows use \env\Scripts\activate\
+pip install -r requirements.txt
+\\\
 
 ## Usage
 
-1. Prepare your dataset and place it in the `data` directory.
-2. Run the main script:
-    ```bash
-    python modules/main_script.py
-    ```
+To train the model, run:
 
-## Testing
+\\\ash
+python app.py
+\\\
 
-Run the tests:
-    ```bash
-    python -m unittest discover -s tests
-    ```
+## Credits
 
-## Contribution Guidelines
-
-Please refer to `CONTRIBUTING.md` for guidelines on how to contribute to this project.
+This project incorporates code and ideas from the [efficient-kan](https://github.com/Blealtan/efficient-kan) repository. Special thanks to the authors for their contributions to the field.
 
 ## License
 
-This project is licensed under the MIT License.
+[MIT License](LICENSE)
