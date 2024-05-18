@@ -121,41 +121,27 @@ def separate_audio(input_audio, model_checkpoint):
 def refresh_checkpoints():
     return gr.Dropdown.update(choices=get_model_checkpoints())
 
-# Gradio interfaces
-train_interface = gr.Interface(
-    fn=train_model,
-    inputs=[
-        gr.Number(label='Epochs', value=10),
-        gr.Number(label='Learning Rate', value=0.001),
-        gr.Number(label='Batch Size', value=8),  # Lowered default batch size to reduce memory usage
-        gr.Textbox(label='Dataset Path', value='G:\\Music\\badmultitracks-michaeljackson\\dataset', placeholder='Enter dataset path')
-    ],
-    outputs='text',
-    title='Train KAN Model',
-    description='Train the Kolmogorov-Arnold Network model using stem data.'
-)
-
-model_checkpoint_dropdown = gr.Dropdown(label='Model Checkpoint', choices=get_model_checkpoints(), value='model.ckpt', interactive=True)
-separate_interface = gr.Interface(
-    fn=separate_audio,
-    inputs=[
-        gr.Audio(type='numpy'),
-        model_checkpoint_dropdown
-    ],
-    outputs=[gr.Audio(type='numpy') for _ in range(4)],
-    title='KAN Audio Stem Separation',
-    description='Upload an audio file and get separated stems using Kolmogorov-Arnold Networks (KANs).'
-)
-
-refresh_button = gr.Button('Refresh Checkpoints')
-refresh_button.click(fn=refresh_checkpoints, inputs=None, outputs=model_checkpoint_dropdown)
-
-app = gr.TabbedInterface(
-    [train_interface, gr.Column([separate_interface, refresh_button])],
-    ['Train Model', 'Separate Audio']
-)
+# Gradio layout using Blocks
+with gr.Blocks() as app:
+    with gr.Tab("Train Model"):
+        gr.Markdown("Train the Kolmogorov-Arnold Network model using stem data.")
+        epochs = gr.Number(label='Epochs', value=10)
+        learning_rate = gr.Number(label='Learning Rate', value=0.001)
+        batch_size = gr.Number(label='Batch Size', value=8)  # Lowered default batch size to reduce memory usage
+        dataset_path = gr.Textbox(label='Dataset Path', value='G:\\Music\\badmultitracks-michaeljackson\\dataset', placeholder='Enter dataset path')
+        train_button = gr.Button("Train")
+        train_output = gr.Textbox()
+        train_button.click(train_model, inputs=[epochs, learning_rate, batch_size, dataset_path], outputs=train_output)
+    
+    with gr.Tab("Separate Audio"):
+        gr.Markdown("Upload an audio file and get separated stems using Kolmogorov-Arnold Networks (KANs).")
+        input_audio = gr.Audio(type='numpy')
+        model_checkpoint = gr.Dropdown(label='Model Checkpoint', choices=get_model_checkpoints(), value='model.ckpt', interactive=True)
+        refresh_button = gr.Button("Refresh Checkpoints")
+        refresh_button.click(refresh_checkpoints, outputs=model_checkpoint)
+        separate_button = gr.Button("Separate")
+        output_stems = [gr.Audio(type='numpy') for _ in range(4)]
+        separate_button.click(separate_audio, inputs=[input_audio, model_checkpoint], outputs=output_stems)
 
 if __name__ == '__main__':
-    if not hasattr(gr, 'is_running'):
-        gr.is_running = True
-        app.launch()
+    app.launch()
