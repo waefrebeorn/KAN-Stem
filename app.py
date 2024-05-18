@@ -55,9 +55,9 @@ def separate_audio(input_audio):
 train_interface = gr.Interface(
     fn=train_model,
     inputs=[
-        gr.Number(label='Epochs', default=10),
-        gr.Number(label='Learning Rate', default=0.001),
-        gr.Number(label='Batch Size', default=32)
+        gr.Number(label='Epochs', value=10),
+        gr.Number(label='Learning Rate', value=0.001),
+        gr.Number(label='Batch Size', value=32)
     ],
     outputs='text',
     title='Train KAN Model',
