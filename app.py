@@ -76,6 +76,11 @@ def train_model(epochs, learning_rate, batch_size, dataset_path):
     torch.save(model.state_dict(), 'checkpoints/model.ckpt')
     return 'Model trained and saved at checkpoints/model.ckpt'
 
+# Function to get a list of model checkpoints
+def get_model_checkpoints():
+    checkpoint_path = 'checkpoints'
+    return [f for f in os.listdir(checkpoint_path) if f.endswith('.ckpt')]
+
 # Preprocess function for input audio
 def preprocess(audio):
     if isinstance(audio, tuple):
@@ -101,10 +106,10 @@ def postprocess(stems):
     return [stems[0, i, :] for i in range(stems.shape[1])]
 
 # Audio separation function
-def separate_audio(input_audio):
+def separate_audio(input_audio, model_checkpoint):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = KANModel().to(device)
-    model.load_state_dict(torch.load('checkpoints/model.ckpt', map_location=device))
+    model.load_state_dict(torch.load(f'checkpoints/{model_checkpoint}', map_location=device))
     model.eval()
     input_data = preprocess(input_audio).to(device)
     with torch.no_grad():
@@ -128,10 +133,14 @@ train_interface = gr.Interface(
 
 separate_interface = gr.Interface(
     fn=separate_audio,
-    inputs=gr.Audio(type='numpy'),
+    inputs=[
+        gr.Audio(type='numpy'),
+        gr.Dropdown(label='Model Checkpoint', choices=get_model_checkpoints(), value='model.ckpt', interactive=True)
+    ],
     outputs=[gr.Audio(type='numpy') for _ in range(4)],
     title='KAN Audio Stem Separation',
-    description='Upload an audio file and get separated stems using Kolmogorov-Arnold Networks (KANs).'
+    description='Upload an audio file and get separated stems using Kolmogorov-Arnold Networks (KANs).',
+    refresh_button=True
 )
 
 app = gr.TabbedInterface(
