@@ -44,7 +44,7 @@ def separate_audio(input_audio):
     output_stems = postprocess(separated_stems)
     return output_stems
 
-train_interface = gr.Interface(
+train_interface = if not hasattr(gr, 'is_running'):\n    gr.is_running = True\n    gr.Interface(
     fn=train_model,
     inputs=[gr.Number(label="Epochs"), gr.Number(label="Learning Rate")],
     outputs="text",
@@ -52,7 +52,7 @@ train_interface = gr.Interface(
     description="Train the Kolmogorov-Arnold Network model using stem data."
 )
 
-separate_interface = gr.Interface(
+separate_interface = if not hasattr(gr, 'is_running'):\n    gr.is_running = True\n    gr.Interface(
     fn=separate_audio,
     inputs=gr.Audio(type="numpy"),
     outputs=[gr.Audio(type="numpy") for _ in range(4)],
