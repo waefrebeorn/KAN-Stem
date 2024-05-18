@@ -79,6 +79,7 @@ def train_model(epochs, learning_rate, batch_size, dataset_path):
 def preprocess(audio):
     if isinstance(audio, tuple):
         y, sr = audio
+        y = np.array(y)
     else:
         y, sr = librosa.load(audio, sr=None)
     spectrogram = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128)
