@@ -120,7 +120,7 @@ def gradio_inference_interface():
 
     iface = gr.Interface(
         fn=separate,
-        inputs=gr.Audio(source="microphone", type="numpy"),
+        inputs=gr.Audio(type="numpy"),
         outputs=gr.Audio(type="numpy"),
         live=True,
     )
