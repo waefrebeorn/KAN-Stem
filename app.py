@@ -4,8 +4,6 @@ import torch
 import librosa
 import numpy as np
 
-# import requests  # Commenting out since it's not used
-
 from modules.KANModel import KANModel
 import torch.optim as optim
 import torch.nn as nn
@@ -104,13 +102,12 @@ def gradio_training_interface():
     iface = gr.Interface(
         fn=train,
         inputs=[
-            gr.inputs.Textbox(label="Dataset Path"),
-            gr.inputs.Textbox(label="Checkpoint Path", default="checkpoints/model.ckpt"),
-            gr.inputs.Textbox(label="Log Directory", default="logs"),
-            gr.inputs.Slider(label="Number of Epochs", minimum=1, maximum=100, default=10)
+            gr.Textbox(label="Dataset Path"),
+            gr.Textbox(label="Checkpoint Path", value="checkpoints/model.ckpt"),
+            gr.Textbox(label="Log Directory", value="logs"),
+            gr.Slider(label="Number of Epochs", minimum=1, maximum=100, value=10)
         ],
-        outputs="text",
-        live=True
+        outputs="text"
     )
     return iface
 
