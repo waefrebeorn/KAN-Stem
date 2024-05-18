@@ -103,11 +103,14 @@ def preprocess(audio, max_duration):
     else:
         y = np.pad(y, (0, max_samples - len(y)), 'constant')
 
+    print(f"Processed audio data shape after padding/truncation: {y.shape}")
+
     spectrogram = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128)
     log_spectrogram = librosa.power_to_db(spectrogram, ref=np.max)
     log_spectrogram = log_spectrogram[:, :128 * 128]  # Ensure the correct shape
     log_spectrogram = np.pad(log_spectrogram, ((0, 0), (0, 128 * 128 - log_spectrogram.shape[1])), 'constant')
     log_spectrogram = log_spectrogram[np.newaxis, np.newaxis, :, :]  # Add batch and channel dimensions
+    print(f"Log spectrogram shape: {log_spectrogram.shape}")
     return torch.tensor(log_spectrogram, dtype=torch.float32)
 
 # Postprocess function for output stems
@@ -151,7 +154,7 @@ with gr.Blocks() as app:
         model_checkpoint = gr.Dropdown(label='Model Checkpoint', choices=get_model_checkpoints('C:\\projects\\KAN-Stem\\checkpoints'), value='model.ckpt', interactive=True, allow_custom_value=True)
         max_duration = gr.Number(label='Max Audio Duration (seconds)', value=30)
         refresh_button = gr.Button("Refresh Checkpoints")
-        refresh_button.click(fn=lambda: refresh_checkpoints(checkpoint_path.value), inputs=None, outputs=model_checkpoint)
+        refresh_button.click(fn=lambda: refresh_checkpoints(checkpoint_path), inputs=None, outputs=model_checkpoint)
         separate_button = gr.Button("Separate")
         output_stems = [gr.Audio(type='numpy') for _ in range(4)]
         separate_button.click(separate_audio, inputs=[input_audio, model_checkpoint, checkpoint_path, max_duration], outputs=output_stems)
