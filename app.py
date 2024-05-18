@@ -83,7 +83,8 @@ def get_model_checkpoints(checkpoint_path):
 # Preprocess function for input audio
 
 import numpy as np
-def preprocess
+import numpy as np
+
 def debug_audio_data(audio_data):
     if isinstance(audio_data, np.ndarray):
         print(f'Audio data shape: {audio_data.shape}')
@@ -98,6 +99,37 @@ def debug_audio_data(audio_data):
     return audio_data
 
 def preprocess(audio_data, max_duration=None):
+    audio_data = debug_audio_data(audio_data)
+def debug_audio_data(audio_data):
+    if isinstance(audio_data, np.ndarray):
+        print(f'Audio data shape: {audio_data.shape}')
+        print(f'Audio data type: {audio_data.dtype}')
+        print(f'Audio data max: {np.max(audio_data)}')
+        print(f'Audio data min: {np.min(audio_data)}')
+    else:
+        print('Audio data is not a numpy array')
+
+    if audio_data is None or audio_data.size == 0:
+        print('Audio data is empty or malformed')
+    return audio_data
+
+import numpy as np
+
+def debug_audio_data(audio_data):
+    if isinstance(audio_data, np.ndarray):
+        print(f'Audio data shape: {audio_data.shape}')
+        print(f'Audio data type: {audio_data.dtype}')
+        print(f'Audio data max: {np.max(audio_data)}')
+        print(f'Audio data min: {np.min(audio_data)}')
+    else:
+        print('Audio data is not a numpy array')
+
+    if audio_data is None or audio_data.size == 0:
+        print('Audio data is empty or malformed')
+    return audio_data
+
+def preprocess(audio_data, max_duration=None):
+    audio_data = debug_audio_data(audio_data)(audio_data, max_duration=None):
     audio_data = debug_audio_data(audio_data)
 (audio, max_duration):
     if isinstance(audio, tuple):
