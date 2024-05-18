@@ -109,7 +109,11 @@ def preprocess(audio, max_duration):
             y, sr = audio
             y = np.array(y, dtype=np.float32)  # Ensure audio data is floating-point
         else:
-            y, sr = librosa.load(audio, sr=None)
+            file_ext = os.path.splitext(audio)[-1].lower()
+            if file_ext == '.flac':
+                y, sr = librosa.load(audio, sr=None, mono=True)
+            else:
+                y, sr = librosa.load(audio, sr=None)
             y = y.astype(np.float32)  # Ensure audio data is floating-point
 
         print(f"Audio shape: {y.shape}, Sample rate: {sr}")  # Debug statement
