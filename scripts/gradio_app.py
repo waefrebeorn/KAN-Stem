@@ -24,7 +24,7 @@ def main():
     with gr.Blocks() as demo:
         gr.Markdown('# KAN-Stem Project')
         with gr.Tab('Using the Model'):
-            audio_inputs = gr.File(file_count="multiple", label="Input Audio Files")
+            audio_inputs = gr.File(file_count='multiple', label='Input Audio Files')
             model_outputs = gr.Textbox(label='Model Outputs')
             run_model = gr.Button('Run Model')
             run_model.click(use_model, inputs=audio_inputs, outputs=model_outputs)
