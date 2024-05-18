@@ -1,17 +1,14 @@
 import os
-import gradio as gr
 import torch
 from modules import KANModel, preprocess, postprocess
 import torch.optim as optim
 import torch.nn as nn
 import numpy as np
 
-# Load data (replace this with actual data loading code)
 def load_stem_data():
     # Placeholder function to load stem data
-    # Replace with actual data loading
-    inputs = np.random.randn(100, 1, 44100)  # Example inputs
-    targets = np.random.randn(100, 4, 44100)  # Example targets
+    inputs = np.random.randn(100, 1, 44100)
+    targets = np.random.randn(100, 4, 44100)
     return inputs, targets
 
 def train_model(epochs, learning_rate):
@@ -43,27 +40,3 @@ def separate_audio(input_audio):
     separated_stems = model(input_data)
     output_stems = postprocess(separated_stems)
     return output_stems
-
-train_interface = if not hasattr(gr, 'is_running'):\n    gr.is_running = True\n    gr.Interface(
-    fn=train_model,
-    inputs=[gr.Number(label="Epochs"), gr.Number(label="Learning Rate")],
-    outputs="text",
-    title="Train KAN Model",
-    description="Train the Kolmogorov-Arnold Network model using stem data."
-)
-
-separate_interface = if not hasattr(gr, 'is_running'):\n    gr.is_running = True\n    gr.Interface(
-    fn=separate_audio,
-    inputs=gr.Audio(type="numpy"),
-    outputs=[gr.Audio(type="numpy") for _ in range(4)],
-    title="KAN Audio Stem Separation",
-    description="Upload an audio file and get separated stems using Kolmogorov-Arnold Networks (KANs)."
-)
-
-app = gr.TabbedInterface(
-    [train_interface, separate_interface],
-    ["Train Model", "Separate Audio"]
-)
-
-if __name__ == "__main__":
-    app.launch()

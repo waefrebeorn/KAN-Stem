@@ -1,37 +1,28 @@
 import gradio as gr
-from train import train_model
+from main_script import train_model, separate_audio
 
-def start_training(dataset_path, num_epochs, batch_size, learning_rate):
-    if not hasattr(start_training, 'running'):
-        start_training.running = False
+train_interface = gr.Interface(
+    fn=train_model,
+    inputs=[gr.Number(label="Epochs"), gr.Number(label="Learning Rate")],
+    outputs="text",
+    title="Train KAN Model",
+    description="Train the Kolmogorov-Arnold Network model using stem data."
+)
 
-    if start_training.running:
-        return 'Training already in progress...'
+separate_interface = gr.Interface(
+    fn=separate_audio,
+    inputs=gr.Audio(type="numpy"),
+    outputs=[gr.Audio(type="numpy") for _ in range(4)],
+    title="KAN Audio Stem Separation",
+    description="Upload an audio file and get separated stems using Kolmogorov-Arnold Networks (KANs)."
+)
 
-    start_training.running = True
-    train_model(dataset_path, num_epochs, batch_size, learning_rate)
-    start_training.running = False
-    return 'Training completed.'
+app = gr.TabbedInterface(
+    [train_interface, separate_interface],
+    ["Train Model", "Separate Audio"]
+)
 
-def visualize_logs(log_dir):
-    # Visualization logic for TensorBoard logs (this can be improved with actual TensorBoard integration)
-    return 'Logs visualized.'
-
-with gr.Blocks() as demo:
-    gr.Markdown('# KAN-Stem Training App')
-    with gr.Tab('Training'):
-        dataset_path = gr.Textbox(label='Dataset Path', value='G:\\Music\\badmultitracks-michaeljackson\\dataset')
-        num_epochs = gr.Slider(label='Number of Epochs', minimum=1, maximum=100, value=10, step=1)
-        batch_size = gr.Slider(label='Batch Size', minimum=1, maximum=64, value=16, step=1)
-        learning_rate = gr.Number(label='Learning Rate', value=0.001)
-        train_button = gr.Button('Start Training')
-        output_text = gr.Textbox()
-        train_button.click(start_training, [dataset_path, num_epochs, batch_size, learning_rate], outputs=output_text)
-
-    with gr.Tab('Logs'):
-        log_dir = gr.Textbox(label='Log Directory', value='runs')
-        visualize_button = gr.Button('Visualize Logs')
-        log_output = gr.Textbox()
-        visualize_button.click(visualize_logs, log_dir, outputs=log_output)
-
-demo.launch(share=True)
+if __name__ == "__main__":
+    if not hasattr(gr, 'is_running'):
+        gr.is_running = True
+        app.launch()
