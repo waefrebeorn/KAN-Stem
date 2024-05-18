@@ -6,20 +6,21 @@ import torch.optim as optim
 import torch.nn as nn
 import numpy as np
 
-# Set the dataset path and ensure the directory exists
-dataset_path = 'G:\\Music\\badmultitracks-michaeljackson\\dataset'
-os.makedirs(dataset_path, exist_ok=True)
+# Function to load data from a given directory
+def load_stem_data(dataset_path):
+    png_files = [os.path.join(dataset_path, 'png', f) for f in os.listdir(os.path.join(dataset_path, 'png')) if f.endswith('.png')]
+    wav_files = [os.path.join(dataset_path, 'wav', f) for f in os.listdir(os.path.join(dataset_path, 'wav')) if f.endswith('.wav')]
 
-# Function to load data
-def load_stem_data():
-    inputs = np.random.randn(100, 1, 44100)  # Placeholder
-    targets = np.random.randn(100, 4, 44100)  # Placeholder
+    # Placeholder logic to match PNGs with WAVs
+    inputs = [np.random.randn(1, 44100) for _ in wav_files]  # Example inputs
+    targets = [np.random.randn(4, 44100) for _ in wav_files]  # Example targets
+
     return inputs, targets
 
 # Training function
-def train_model(epochs, learning_rate, batch_size):
+def train_model(epochs, learning_rate, batch_size, dataset_path):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    inputs, targets = load_stem_data()
+    inputs, targets = load_stem_data(dataset_path)
     model = KANModel().to(device)
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     criterion = nn.MSELoss()
@@ -57,7 +58,8 @@ train_interface = gr.Interface(
     inputs=[
         gr.Number(label='Epochs', value=10),
         gr.Number(label='Learning Rate', value=0.001),
-        gr.Number(label='Batch Size', value=32)
+        gr.Number(label='Batch Size', value=32),
+        gr.Textbox(label='Dataset Path', value='G:\\Music\\badmultitracks-michaeljackson\\dataset', placeholder='Enter dataset path')
     ],
     outputs='text',
     title='Train KAN Model',
