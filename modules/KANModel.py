@@ -8,14 +8,18 @@ class KANModel(nn.Module):
         self.conv2 = nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1)
         self.pool = nn.MaxPool2d(kernel_size=2, stride=2, padding=0)
         self.conv3 = nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1)
-        self.fc1 = nn.Linear(64 * 32 * 32, 1024)  # Adjusted to match the output size of the conv layers
+        self.conv4 = nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1)
+        self.fc1 = nn.Linear(128 * 16 * 16, 1024)  # Adjusted to match the output size of the conv layers
         self.fc2 = nn.Linear(1024, 4 * 44100)  # Assuming output size matches the target shape
 
     def forward(self, x):
         x = torch.relu(self.conv1(x))
+        x = self.pool(x)
         x = torch.relu(self.conv2(x))
         x = self.pool(x)
         x = torch.relu(self.conv3(x))
+        x = self.pool(x)
+        x = torch.relu(self.conv4(x))
         x = self.pool(x)
         x = x.view(x.size(0), -1)
         x = torch.relu(self.fc1(x))
