@@ -1,5 +1,7 @@
 numpy
 pandas
 tensorflow
-logging
-unittest
+
+gr
+gradio
+gradio
