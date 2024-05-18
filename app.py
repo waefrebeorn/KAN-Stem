@@ -56,8 +56,66 @@ def separate_audio(input_audio, max_duration, model):
         print(f"Error in separate_audio: {e}")
         return []
 
-# Define the Gradio interface
-def gradio_interface():
+# Function to train the model
+def train_model(dataset_path, checkpoint_path, log_dir, num_epochs=10):
+    model = KANModel()
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    criterion = nn.MSELoss()
+    writer = SummaryWriter(log_dir)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+
+    for epoch in range(num_epochs):
+        model.train()
+        epoch_loss = 0.0
+
+        wav_files = load_stem_data(dataset_path)
+        for wav_file in wav_files:
+            try:
+                audio, sr = librosa.load(wav_file, sr=None)
+                audio = preprocess(audio, max_duration=10.0).to(device)
+
+                optimizer.zero_grad()
+                outputs = model(audio)
+                loss = criterion(outputs, audio)
+                loss.backward()
+                optimizer.step()
+
+                epoch_loss += loss.item()
+            except Exception as e:
+                print(f"Error processing {wav_file}: {e}")
+
+        avg_loss = epoch_loss / len(wav_files)
+        print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {avg_loss:.4f}")
+        writer.add_scalar('Loss/train', avg_loss, epoch)
+
+        # Save checkpoint
+        torch.save(model.state_dict(), checkpoint_path)
+
+    writer.close()
+
+# Define the Gradio interface for training
+def gradio_training_interface():
+    def train(dataset_path, checkpoint_path, log_dir, num_epochs):
+        train_model(dataset_path, checkpoint_path, log_dir, num_epochs)
+        return f"Training completed. Model saved to {checkpoint_path}"
+
+    iface = gr.Interface(
+        fn=train,
+        inputs=[
+            gr.inputs.Textbox(label="Dataset Path"),
+            gr.inputs.Textbox(label="Checkpoint Path", default="checkpoints/model.ckpt"),
+            gr.inputs.Textbox(label="Log Directory", default="logs"),
+            gr.inputs.Slider(label="Number of Epochs", minimum=1, maximum=100, default=10)
+        ],
+        outputs="text",
+        live=True
+    )
+    return iface
+
+# Define the Gradio interface for inference
+def gradio_inference_interface():
     def separate(input_audio):
         model = load_model("checkpoints/model.ckpt")
         max_duration = 10.0  # 10 seconds
@@ -66,13 +124,16 @@ def gradio_interface():
 
     iface = gr.Interface(
         fn=separate,
-        inputs=gr.inputs.Audio(source="microphone", type="numpy"),
-        outputs=gr.outputs.Audio(type="numpy"),
+        inputs=gr.Audio(source="microphone", type="numpy"),
+        outputs=gr.Audio(type="numpy"),
         live=True,
     )
     return iface
 
 # Launch the app
 if __name__ == "__main__":
-    iface = gradio_interface()
-    iface.launch(server_name="127.0.0.1")
+    train_iface = gradio_training_interface()
+    infer_iface = gradio_inference_interface()
+
+    app = gr.TabbedInterface([train_iface, infer_iface], ["Train Model", "Separate Audio"])
+    app.launch(server_name="127.0.0.1")
