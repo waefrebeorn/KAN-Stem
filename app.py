@@ -1,10 +1,10 @@
+import os
 import gradio as gr
 import torch
 from modules import KANModel, preprocess, postprocess
 import torch.optim as optim
 import torch.nn as nn
 import numpy as np
-import os
 
 # Load data (replace this with actual data loading code)
 def load_stem_data():
