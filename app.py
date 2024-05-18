@@ -18,6 +18,7 @@ def load_stem_data(dataset_path):
 
     for wav_file in wav_files:
         y, sr = librosa.load(wav_file, sr=None)
+        y = y.astype(np.float32)  # Ensure audio data is floating-point
         spectrogram = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128)
         log_spectrogram = librosa.power_to_db(spectrogram, ref=np.max)
 
@@ -79,9 +80,10 @@ def train_model(epochs, learning_rate, batch_size, dataset_path):
 def preprocess(audio):
     if isinstance(audio, tuple):
         y, sr = audio
-        y = np.array(y)
+        y = np.array(y, dtype=np.float32)  # Ensure audio data is floating-point
     else:
         y, sr = librosa.load(audio, sr=None)
+        y = y.astype(np.float32)  # Ensure audio data is floating-point
     spectrogram = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128)
     log_spectrogram = librosa.power_to_db(spectrogram, ref=np.max)
     log_spectrogram = log_spectrogram[:, :128 * 128]  # Ensure the correct shape
