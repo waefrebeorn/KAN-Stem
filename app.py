@@ -119,7 +119,7 @@ def separate_audio(input_audio, model_checkpoint):
 
 # Refresh function to update model checkpoints
 def refresh_checkpoints():
-    return gr.Dropdown.update(choices=get_model_checkpoints())
+    return get_model_checkpoints()
 
 # Gradio layout using Blocks
 with gr.Blocks() as app:
@@ -138,7 +138,7 @@ with gr.Blocks() as app:
         input_audio = gr.Audio(type='numpy')
         model_checkpoint = gr.Dropdown(label='Model Checkpoint', choices=get_model_checkpoints(), value='model.ckpt', interactive=True)
         refresh_button = gr.Button("Refresh Checkpoints")
-        refresh_button.click(refresh_checkpoints, outputs=model_checkpoint)
+        refresh_button.click(fn=refresh_checkpoints, inputs=None, outputs=model_checkpoint)
         separate_button = gr.Button("Separate")
         output_stems = [gr.Audio(type='numpy') for _ in range(4)]
         separate_button.click(separate_audio, inputs=[input_audio, model_checkpoint], outputs=output_stems)
