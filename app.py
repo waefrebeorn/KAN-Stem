@@ -27,6 +27,10 @@ def load_stem_data(dataset_path):
 
     inputs = np.array(inputs)
     targets = np.array(targets)
+    
+    # Ensure inputs have the correct shape
+    inputs = inputs[:, np.newaxis, :, :]  # Add a channel dimension
+
     return inputs, targets
 
 # Training function

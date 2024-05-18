@@ -4,10 +4,9 @@ import torch.nn as nn
 class KANModel(nn.Module):
     def __init__(self):
         super(KANModel, self).__init__()
-        # Example layers, adjust according to the actual model architecture from efficient-kan
         self.conv1 = nn.Conv2d(1, 16, kernel_size=3, stride=1, padding=1)
         self.conv2 = nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1)
-        self.fc1 = nn.Linear(32 * 32 * 32, 1024)
+        self.fc1 = nn.Linear(32 * 128 * 128, 1024)
         self.fc2 = nn.Linear(1024, 4 * 44100)  # Assuming output size matches the target shape
 
     def forward(self, x):
