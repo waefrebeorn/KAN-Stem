@@ -1,11 +1,11 @@
 import os
-    app.launch(server_name="127.0.0.1")
+app.launch(server_name="127.0.0.1")
 import os
-    app.launch(server_name="127.0.0.1")
+app.launch(server_name="127.0.0.1")
 import os
-    app.launch(server_name="127.0.0.1")
+app.launch(server_name="127.0.0.1")
 if __name__ == '__main__':
-    app.launch(server_name="127.0.0.1")
+app.launch(server_name="127.0.0.1")
 import os
 import gradio as gr
 import torch
@@ -215,17 +215,17 @@ import librosa
 import torch
 import gradio as gr
 import os
-    app.launch(server_name="127.0.0.1")
+app.launch(server_name="127.0.0.1")
 if __name__ == '__main__':
-    app.launch(server_name="127.0.0.1")
+app.launch(server_name="127.0.0.1")
 import os
-    app.launch(server_name="127.0.0.1")
+app.launch(server_name="127.0.0.1")
 import os
-    app.launch(server_name="127.0.0.1")
+app.launch(server_name="127.0.0.1")
 import os
-    app.launch(server_name="127.0.0.1")
+app.launch(server_name="127.0.0.1")
 if __name__ == '__main__':
-    app.launch(server_name="127.0.0.1")
+app.launch(server_name="127.0.0.1")
 import os
 import gradio as gr
 import torch
@@ -427,4 +427,4 @@ with gr.Blocks() as app:
         separate_button.click(separate_audio, inputs=[input_audio, model_checkpoint, checkpoint_path, max_duration], outputs=output_stems)
 
 if __name__ == '__main__':
-    app.launch(server_name="127.0.0.1")
+app.launch(server_name="127.0.0.1")
