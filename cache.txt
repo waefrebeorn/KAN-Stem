@@ -1,22 +1,7 @@
-Initial setup and repository update complete.
-User allows adding to the cache using PowerShell to make memory for checking when starting new conversation prompts.
-The Gradio app configuration and functionalities have been updated.
-Uvicorn configurations adjusted to handle larger data sizes.
-Ensure the inputs and outputs for train_model and separate_audio functions are correctly handled in the Gradio interface.
-User allows adding to the cache using PowerShell to make memory for checking when starting new conversation prompts.
-The Gradio app configuration and functionalities have been updated.
-Uvicorn configurations adjusted to handle larger data sizes.
-Ensure the inputs and outputs for train_model and separate_audio functions are correctly handled in the Gradio interface.
-Recent updates include debugging statements for better context during preprocessing and postprocessing.
 User allows adding to the cache using PowerShell to make memory for checking when starting new conversation prompts.
 The Gradio app configuration and functionalities have been updated.
 Uvicorn configurations adjusted to handle larger data sizes.
 Ensure the inputs and outputs for train_model and separate_audio functions are correctly handled in the Gradio interface.
 Recent updates include debugging statements for better context during preprocessing and postprocessing.
 The model refresh button functionality has been fixed.
-User allows adding to the cache using PowerShell to make memory for checking when starting new conversation prompts.
-The Gradio app configuration and functionalities have been updated.
-Uvicorn configurations adjusted to handle larger data sizes.
-Ensure the inputs and outputs for train_model and separate_audio functions are correctly handled in the Gradio interface.
-Recent updates include debugging statements for better context during preprocessing and postprocessing.
-The model refresh button functionality has been fixed.
+Switched to Gradio's launch method to avoid Uvicorn IndexError.
