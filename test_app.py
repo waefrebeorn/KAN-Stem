@@ -4,12 +4,12 @@ import gradio as gr
 import numpy as np
 
 # Add the directories to the system path
-sys.path.append(os.path.abspath("KAN examples/efficient kan"))
-sys.path.append(os.path.abspath("KAN examples/KindXiaoming kan"))
+sys.path.append(os.path.abspath("kan examples/KindXioming kan"))
+sys.path.append(os.path.abspath("kan examples/efficient kan"))
 
 # Import KAN models
-from kan import KAN as EfficientKAN  # efficient-kan implementation
 from KAN import KAN as KindXiaomingKAN  # KindXiaoming implementation
+from kan import KAN as EfficientKAN  # efficient-kan implementation
 
 # Function to simulate training
 def train_model(epochs, learning_rate, batch_size, dataset_path):
