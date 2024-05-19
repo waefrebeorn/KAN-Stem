@@ -27,6 +27,11 @@ def preprocess(audio, max_duration):
         print("Error: Audio data must be at least one-dimensional and not empty")
         return None
 
+    # Convert to mono if stereo
+    if y.ndim == 2:
+        y = librosa.to_mono(y.T)
+        print(f"Converted to mono, shape: {y.shape}")
+
     max_samples = int(max_duration * sr)
     if len(y) > max_samples:
         y = y[:max_samples]
