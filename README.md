@@ -44,3 +44,7 @@ This project incorporates the KAN model from [Blealtan's efficient-kan](https://
 ## Credits
 This project incorporates the KAN model from [Blealtan's efficient-kan](https://github.com/Blealtan/efficient-kan).
 
+
+## Credits
+This project incorporates the KAN model from [Blealtan's efficient-kan](https://github.com/Blealtan/efficient-kan).
+
