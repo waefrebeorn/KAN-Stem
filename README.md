@@ -32,3 +32,7 @@ This project incorporates code and ideas from the [efficient-kan](https://github
 ## License
 
 [MIT License](LICENSE)
+
+## Credits
+This project incorporates the KAN model from [KindXiaoming's pykan](https://github.com/KindXiaoming/pykan).
+
