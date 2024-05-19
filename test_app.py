@@ -1,23 +1,19 @@
 import os
 import sys
-import numpy as np
 import gradio as gr
-import uvicorn
-import soundfile as sf
-import tensorflow as tf
-from efficient_kan.kan import KAN  # Assuming you have moved the KAN model implementation here
-from efficient_kan.kan import preprocess as efficient_preprocess
-from efficient_kan.kan import postprocess as efficient_postprocess
+import numpy as np
 
-# Ensure the checkpoint directory exists
-if not os.path.exists('checkpoints'):
-    os.makedirs('checkpoints')
+# Add the directories to the system path
+sys.path.append(os.path.abspath("KAN examples/efficient kan"))
+sys.path.append(os.path.abspath("KAN examples/KindXiaoming kan"))
+
+# Import KAN models
+from kan import KAN as EfficientKAN  # efficient-kan implementation
+from KAN import KAN as KindXiaomingKAN  # KindXiaoming implementation
 
 # Function to simulate training
 def train_model(epochs, learning_rate, batch_size, dataset_path):
     print(f"Training model with epochs={epochs}, learning_rate={learning_rate}, batch_size={batch_size}, dataset_path={dataset_path}")
-    kan = KAN()  # Initialize the KAN model
-    # Add training logic here
     return f"Model trained for {epochs} epochs with learning rate {learning_rate} and batch size {batch_size}"
 
 # Function to refresh checkpoints
@@ -25,22 +21,10 @@ def refresh_checkpoints(checkpoint_path):
     print(f"Refreshing checkpoints in {checkpoint_path}")
     return gr.update(choices=["model.ckpt"])
 
-# Function to preprocess audio
-def preprocess(audio, max_duration):
-    if isinstance(audio, tuple):
-        sample_rate, data = audio
-    else:
-        sample_rate, data = sf.read(audio)
-    data = np.pad(data, (0, max(0, max_duration * sample_rate - len(data))), mode='constant')
-    return efficient_preprocess(data, sample_rate)
-
 # Function to simulate audio separation
 def separate_audio(input_audio, model_checkpoint, checkpoint_path, max_duration):
     print(f"Separating audio with model_checkpoint={model_checkpoint}, checkpoint_path={checkpoint_path}, max_duration={max_duration}")
-    input_data = preprocess(input_audio, max_duration)
-    kan = KAN(model_checkpoint)  # Load KAN model
-    output_data = kan.separate(input_data)  # Perform separation
-    return [efficient_postprocess(stem) for stem in output_data]
+    return [np.zeros(44100) for _ in range(4)]
 
 # Gradio layout using Blocks
 with gr.Blocks() as app:
