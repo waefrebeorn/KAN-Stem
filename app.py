@@ -4,7 +4,7 @@ import gradio as gr
 import torch
 import librosa
 import numpy as np
-import uvicorn  # Import uvicorn
+import uvicorn
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'modules'))
 from KANModel import KANModel
 import torch.optim as optim
