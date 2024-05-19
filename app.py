@@ -4,6 +4,7 @@ import gradio as gr
 import torch
 import librosa
 import numpy as np
+import uvicorn  # Import uvicorn
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'modules'))
 from KANModel import KANModel
 import torch.optim as optim
@@ -167,4 +168,4 @@ with gr.Blocks() as app:
 
 if __name__ == '__main__':
     print("Launching the Gradio app...")
-    app.launch(server_name="127.0.0.1", share=True)
+    uvicorn.run(app, host="127.0.0.1", port=7860, log_level="info", limit_max_requests=2048, timeout_keep_alive=180)
