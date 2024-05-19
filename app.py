@@ -152,7 +152,7 @@ with gr.Blocks() as app:
         dataset_path = gr.Textbox(label='Dataset Path', value='G:\\Music\\badmultitracks-michaeljackson\\dataset', placeholder='Enter dataset path')
         train_button = gr.Button("Train")
         train_output = gr.Textbox()
-        train_button.click(train_model, inputs=[epochs, learning_rate, batch_size, dataset_path], outputs=[train_output])
+        train_button.click(fn=train_model, inputs=[epochs, learning_rate, batch_size, dataset_path], outputs=train_output)
 
     with gr.Tab("Separate Audio"):
         gr.Markdown("Upload an audio file and get separated stems using Kolmogorov-Arnold Networks (KANs).")
@@ -161,10 +161,10 @@ with gr.Blocks() as app:
         model_checkpoint = gr.Dropdown(label='Model Checkpoint', choices=get_model_checkpoints('C:\\projects\\KAN-Stem\\checkpoints'), value='model.ckpt', interactive=True, allow_custom_value=True)
         max_duration = gr.Number(label='Max Audio Duration (seconds)', value=30)
         refresh_button = gr.Button("Refresh Checkpoints")
-        refresh_button.click(fn=lambda: refresh_checkpoints(checkpoint_path.value), inputs=[], outputs=[model_checkpoint])
+        refresh_button.click(fn=refresh_checkpoints, inputs=[checkpoint_path], outputs=[model_checkpoint])
         separate_button = gr.Button("Separate")
         output_stems = [gr.Audio(type='numpy') for _ in range(4)]
-        separate_button.click(separate_audio, inputs=[input_audio, model_checkpoint, checkpoint_path, max_duration], outputs=output_stems)
+        separate_button.click(fn=separate_audio, inputs=[input_audio, model_checkpoint, checkpoint_path, max_duration], outputs=output_stems)
 
 if __name__ == '__main__':
     print("Launching the Gradio app...")
