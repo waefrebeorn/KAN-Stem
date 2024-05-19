@@ -46,6 +46,7 @@ def preprocess(audio, max_duration):
 # Postprocess function for output stems
 def postprocess(stems):
     stems = stems.detach().cpu().numpy()
+    print(f"Postprocessed stems shape: {stems.shape}")
     return [stems[0, i, :] for i in range(stems.shape[1])]
 
 # Function to load data from a given directory
@@ -77,6 +78,7 @@ def load_stem_data(dataset_path):
     targets = np.array(targets)
     inputs = inputs[:, np.newaxis, :, :]
 
+    print(f"Loaded stem data shapes - inputs: {inputs.shape}, targets: {targets.shape}")
     return inputs, targets
 
 # Training function
@@ -132,6 +134,7 @@ def separate_audio(input_audio, model_checkpoint, checkpoint_path, max_duration)
 
     # Ensure that the output list has exactly 4 elements for Gradio
     output_stems += [np.zeros(44100) for _ in range(4 - len(output_stems))]
+    print(f"Separated stems shapes: {[stem.shape for stem in output_stems]}")
     return output_stems
 
 # Refresh function to update model checkpoints
