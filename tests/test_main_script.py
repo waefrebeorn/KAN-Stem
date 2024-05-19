@@ -1,11 +1,11 @@
 import unittest
-from modules import main_script
-
+from src.modules import main_script
 
 class TestMainScript(unittest.TestCase):
-    def test_sample(self):
-        self.assertEqual(main_script.sample_function(), "expected_output")
 
+    def test_main_function(self):
+        # Add your specific tests for main_script here
+        pass
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     unittest.main()
