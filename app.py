@@ -1,12 +1,52 @@
 import os
+import sys
 import gradio as gr
 import torch
 import librosa
 import numpy as np
-from modules.KANModel import KANModel  # Ensure correct import
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'modules'))
+from KANModel import KANModel
 import torch.optim as optim
 import torch.nn as nn
 from torch.utils.tensorboard import SummaryWriter
+
+# Preprocess function for input audio
+def preprocess(audio, max_duration):
+    print("Preprocessing audio...")
+    print(f"Audio type: {type(audio)}")
+    if isinstance(audio, tuple):
+        sr, y = audio
+        y = np.array(y, dtype=np.float32)
+        print(f"Audio loaded from tuple, shape: {y.shape}, sample rate: {sr}")
+    else:
+        y, sr = librosa.load(audio, sr=None)
+        y = y.astype(np.float32)
+        print(f"Audio loaded from file, shape: {y.shape}, sample rate: {sr}")
+
+    if y.ndim == 0 or y.size == 0:
+        print("Error: Audio data must be at least one-dimensional and not empty")
+        return None
+
+    max_samples = int(max_duration * sr)
+    if len(y) > max_samples:
+        y = y[:max_samples]
+    else:
+        y = np.pad(y, (0, max_samples - len(y)), 'constant')
+
+    print(f"Processed audio data shape after padding/truncation: {y.shape}")
+
+    spectrogram = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128)
+    log_spectrogram = librosa.power_to_db(spectrogram, ref=np.max)
+    log_spectrogram = log_spectrogram[:, :128 * 128]
+    log_spectrogram = np.pad(log_spectrogram, ((0, 0), (0, 128 * 128 - log_spectrogram.shape[1])), 'constant')
+    log_spectrogram = log_spectrogram[np.newaxis, np.newaxis, :, :]
+    print(f"Log spectrogram shape: {log_spectrogram.shape}")
+    return torch.tensor(log_spectrogram, dtype=torch.float32)
+
+# Postprocess function for output stems
+def postprocess(stems):
+    stems = stems.detach().cpu().numpy()
+    return [stems[0, i, :] for i in range(stems.shape[1])]
 
 # Function to load data from a given directory
 def load_stem_data(dataset_path):
@@ -18,11 +58,10 @@ def load_stem_data(dataset_path):
 
     for wav_file in wav_files:
         y, sr = librosa.load(wav_file, sr=None)
-        y = y.astype(np.float32)  # Ensure audio data is floating-point
+        y = y.astype(np.float32)
         spectrogram = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128)
         log_spectrogram = librosa.power_to_db(spectrogram, ref=np.max)
 
-        # Ensure the log_spectrogram has the correct shape
         target_shape = (128, 128 * 128)
         if log_spectrogram.shape[1] < target_shape[1]:
             log_spectrogram = np.pad(log_spectrogram, ((0, 0), (0, target_shape[1] - log_spectrogram.shape[1])), 'constant')
@@ -31,15 +70,12 @@ def load_stem_data(dataset_path):
 
         inputs.append(log_spectrogram)
 
-        # Example targets, in practice, load actual target data
-        target = np.random.randn(4, 44100)  # Example target with 4 stems
+        target = np.random.randn(4, 44100)
         targets.append(target)
 
     inputs = np.array(inputs)
     targets = np.array(targets)
-
-    # Ensure inputs have the correct shape
-    inputs = inputs[:, np.newaxis, :, :]  # Add a channel dimension
+    inputs = inputs[:, np.newaxis, :, :]
 
     return inputs, targets
 
@@ -51,7 +87,6 @@ def train_model(epochs, learning_rate, batch_size, dataset_path):
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     criterion = nn.MSELoss()
 
-    # TensorBoard writer
     writer = SummaryWriter()
 
     for epoch in range(epochs):
@@ -80,44 +115,6 @@ def train_model(epochs, learning_rate, batch_size, dataset_path):
 def get_model_checkpoints(checkpoint_path):
     return [f for f in os.listdir(checkpoint_path) if f.endswith('.ckpt')]
 
-# Preprocess function for input audio
-def preprocess(audio, max_duration):
-    print("Preprocessing audio...")
-    print(f"Audio type: {type(audio)}")
-    if isinstance(audio, tuple):
-        y, sr = audio
-        y = np.array(y, dtype=np.float32)  # Ensure audio data is floating-point
-        print(f"Audio loaded from tuple, shape: {y.shape}, sample rate: {sr}")
-    else:
-        y, sr = librosa.load(audio, sr=None)
-        y = y.astype(np.float32)  # Ensure audio data is floating-point
-        print(f"Audio loaded from file, shape: {y.shape}, sample rate: {sr}")
-
-    if y.ndim == 0 or y.size == 0:
-        raise ValueError("Audio data must be at least one-dimensional and not empty")
-
-    # Truncate or pad the audio to the max_duration
-    max_samples = int(max_duration * sr)
-    if len(y) > max_samples:
-        y = y[:max_samples]
-    else:
-        y = np.pad(y, (0, max_samples - len(y)), 'constant')
-
-    print(f"Processed audio data shape after padding/truncation: {y.shape}")
-
-    spectrogram = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128)
-    log_spectrogram = librosa.power_to_db(spectrogram, ref=np.max)
-    log_spectrogram = log_spectrogram[:, :128 * 128]  # Ensure the correct shape
-    log_spectrogram = np.pad(log_spectrogram, ((0, 0), (0, 128 * 128 - log_spectrogram.shape[1])), 'constant')
-    log_spectrogram = log_spectrogram[np.newaxis, np.newaxis, :, :]  # Add batch and channel dimensions
-    print(f"Log spectrogram shape: {log_spectrogram.shape}")
-    return torch.tensor(log_spectrogram, dtype=torch.float32)
-
-# Postprocess function for output stems
-def postprocess(stems):
-    stems = stems.detach().cpu().numpy()
-    return [stems[0, i, :] for i in range(stems.shape[1])]
-
 # Audio separation function
 def separate_audio(input_audio, model_checkpoint, checkpoint_path, max_duration):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -125,15 +122,21 @@ def separate_audio(input_audio, model_checkpoint, checkpoint_path, max_duration)
     model.load_state_dict(torch.load(os.path.join(checkpoint_path, model_checkpoint), map_location=device))
     model.eval()
     print(f"Input audio: {input_audio}")
-    input_data = preprocess(input_audio, max_duration).to(device)
+    input_data = preprocess(input_audio, max_duration)
+    if input_data is None:
+        return ["Error in preprocessing audio data."] * 4
+    input_data = input_data.to(device)
     with torch.no_grad():
         separated_stems = model(input_data)
     output_stems = postprocess(separated_stems)
+
+    # Ensure that the output list has exactly 4 elements for Gradio
+    output_stems += [np.zeros(44100) for _ in range(4 - len(output_stems))]
     return output_stems
 
 # Refresh function to update model checkpoints
 def refresh_checkpoints(checkpoint_path):
-    return gr.Dropdown.update(choices=get_model_checkpoints(checkpoint_path))
+    return gr.update(choices=get_model_checkpoints(checkpoint_path))
 
 # Gradio layout using Blocks
 with gr.Blocks() as app:
@@ -141,7 +144,7 @@ with gr.Blocks() as app:
         gr.Markdown("Train the Kolmogorov-Arnold Network model using stem data.")
         epochs = gr.Number(label='Epochs', value=10)
         learning_rate = gr.Number(label='Learning Rate', value=0.001)
-        batch_size = gr.Number(label='Batch Size', value=8)  # Lowered default batch size to reduce memory usage
+        batch_size = gr.Number(label='Batch Size', value=8)
         dataset_path = gr.Textbox(label='Dataset Path', value='G:\\Music\\badmultitracks-michaeljackson\\dataset', placeholder='Enter dataset path')
         train_button = gr.Button("Train")
         train_output = gr.Textbox()
@@ -154,10 +157,11 @@ with gr.Blocks() as app:
         model_checkpoint = gr.Dropdown(label='Model Checkpoint', choices=get_model_checkpoints('C:\\projects\\KAN-Stem\\checkpoints'), value='model.ckpt', interactive=True, allow_custom_value=True)
         max_duration = gr.Number(label='Max Audio Duration (seconds)', value=30)
         refresh_button = gr.Button("Refresh Checkpoints")
-        refresh_button.click(fn=lambda: refresh_checkpoints(checkpoint_path), inputs=None, outputs=model_checkpoint)
+        refresh_button.click(fn=lambda: refresh_checkpoints(checkpoint_path.value), inputs=None, outputs=model_checkpoint)
         separate_button = gr.Button("Separate")
         output_stems = [gr.Audio(type='numpy') for _ in range(4)]
         separate_button.click(separate_audio, inputs=[input_audio, model_checkpoint, checkpoint_path, max_duration], outputs=output_stems)
 
 if __name__ == '__main__':
+    print("Launching the Gradio app...")
     app.launch(server_name="127.0.0.1", share=True)
