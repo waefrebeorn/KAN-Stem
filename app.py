@@ -4,7 +4,7 @@ import gradio as gr
 import torch
 import librosa
 import numpy as np
-import uvicorn  # Import uvicorn
+import uvicorn
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'modules'))
 from KANModel import KANModel
 import torch.optim as optim
@@ -161,7 +161,7 @@ with gr.Blocks() as app:
         model_checkpoint = gr.Dropdown(label='Model Checkpoint', choices=get_model_checkpoints('C:\\projects\\KAN-Stem\\checkpoints'), value='model.ckpt', interactive=True, allow_custom_value=True)
         max_duration = gr.Number(label='Max Audio Duration (seconds)', value=30)
         refresh_button = gr.Button("Refresh Checkpoints")
-        refresh_button.click(fn=lambda: refresh_checkpoints(checkpoint_path.value), inputs=None, outputs=model_checkpoint)
+        refresh_button.click(fn=lambda: refresh_checkpoints(checkpoint_path.value), inputs=[], outputs=model_checkpoint)
         separate_button = gr.Button("Separate")
         output_stems = [gr.Audio(type='numpy') for _ in range(4)]
         separate_button.click(separate_audio, inputs=[input_audio, model_checkpoint, checkpoint_path, max_duration], outputs=output_stems)
