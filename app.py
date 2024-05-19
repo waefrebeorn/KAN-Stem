@@ -1,39 +1,44 @@
+import gradio as gr
 import some_required_module  # Ensure you import necessary modules
 import numpy as np
+from modules.preprocess import preprocess
+from modules.train import train_model
 
-def preprocess(audio_data):
-    print(f\"Debug: Received audio data of type {type(audio_data)} and length {len(audio_data)}\")
+# Add any existing functions here
 
-    if isinstance(audio_data, tuple):
-        sample_rate, data = audio_data
-        print(f\"Debug: Audio data sample rate: {sample_rate}, shape: {data.shape}\")
-        audio_data = data
-    else:
-        print(f\"Debug: Audio data preview: {audio_data[:10]}...\")
+def preprocess_audio(audio_data):
+    return preprocess(audio_data)
 
-    # Convert to spectrogram
-    log_spectrogram = np.log1p(np.abs(audio_data))
-    print(f\"Debug: log_spectrogram shape before padding: {log_spectrogram.shape}\")
+def start_training(dataset_path, num_epochs, batch_size, learning_rate):
+    train_model(dataset_path, num_epochs, batch_size, learning_rate)
 
-    # Ensure log_spectrogram has correct shape
-    target_shape = 128 * 128
-    current_shape = log_spectrogram.shape[1]
+# Keep your existing Gradio app structure and add new tabs/functions if necessary
+with gr.Blocks() as demo:
+    gr.Markdown("# KAN-Stem Project")
 
-    if current_shape < target_shape:
-        try:
-            log_spectrogram = np.pad(log_spectrogram, ((0, 0), (0, target_shape - current_shape)), 'constant')
-        except ValueError as e:
-            print(f\"Error in padding log_spectrogram: {e}\")
-            raise
-    else:
-        log_spectrogram = log_spectrogram[:, :target_shape]
+    with gr.Tabs():
+        with gr.TabItem(\"Training\"):
+            dataset_path = gr.Textbox(label=\"Dataset Path\")
+            num_epochs = gr.Slider(1, 100, value=10, label=\"Number of Epochs\")
+            batch_size = gr.Slider(1, 64, value=16, label=\"Batch Size\")
+            learning_rate = gr.Number(value=0.001, label=\"Learning Rate\")
+            start_training_button = gr.Button(\"Start Training\")
 
-    print(f\"Debug: log_spectrogram shape after padding: {log_spectrogram.shape}\")
+            start_training_button.click(
+                fn=start_training,
+                inputs=[dataset_path, num_epochs, batch_size, learning_rate],
+                outputs=None,
+            )
 
-    return log_spectrogram
+        with gr.TabItem(\"Using the Model\"):
+            audio_input = gr.Audio(label=\"Input Audio\")
+            preprocess_button = gr.Button(\"Preprocess Audio\")
+            preprocess_output = gr.Plot(label=\"Preprocessed Spectrogram\")
 
-# Other functions and code
+            preprocess_button.click(
+                fn=preprocess_audio,
+                inputs=audio_input,
+                outputs=preprocess_output,
+            )
 
-if __name__ == \"__main__\":
-    # Your main code
-    pass
+    demo.launch()
