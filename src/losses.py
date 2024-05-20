@@ -1,10 +1,18 @@
 import torch
 import torch.nn.functional as F
 
-def si_snr_loss(pred, target, eps=1e-8):
-    target = target - target.mean(dim=-1, keepdim=True)
-    pred = pred - pred.mean(dim=-1, keepdim=True)
-    s_target = torch.sum(pred * target, dim=-1, keepdim=True) * target / (torch.sum(target ** 2, dim=-1, keepdim=True) + eps)
-    e_noise = pred - s_target
-    si_snr = 10 * torch.log10(torch.sum(s_target ** 2, dim=-1) / (torch.sum(e_noise ** 2, dim=-1) + eps) + eps)
-    return -si_snr.mean()
+def si_snr_loss(preds, target):
+    def pairwise_dot(x, y):
+        return torch.sum(x * y, dim=-1, keepdim=True)
+    
+    def l2_norm(x):
+        return torch.norm(x, dim=-1, keepdim=True)
+    
+    target_dot = pairwise_dot(target, target)
+    proj = target_dot / (pairwise_dot(target, target) + 1e-8) * target
+    e_noise = preds - proj
+    
+    snr = pairwise_dot(proj, proj) / (pairwise_dot(e_noise, e_noise) + 1e-8)
+    si_snr = 10 * torch.log10(snr + 1e-8)
+    
+    return -torch.mean(si_snr)

@@ -1,36 +1,25 @@
-# src/modules/KANModel.py
-
 import torch
 import torch.nn as nn
 
-class KANModel(nn.Module):
-    def __init__(self):
-        super(KANModel, self).__init__()
-        self.conv1 = nn.Conv2d(1, 16, kernel_size=3, stride=1, padding=1)
-        self.conv2 = nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1)
-        self.pool = nn.MaxPool2d(kernel_size=2, stride=2, padding=0)
-        self.conv3 = nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1)
-        self.conv4 = nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1)
-        self.fc1 = nn.Linear(128 * 4 * 256, 1024)  # Adjusted to match the output size of the conv layers
-        self.fc2 = nn.Linear(1024, 4 * 44100)  # Assuming output size matches the target shape
+class KANLayer(nn.Module):
+    def __init__(self, in_features, out_features):
+        super(KANLayer, self).__init__()
+        self.linear = nn.Linear(in_features, out_features)
+        self.poly = nn.Linear(in_features, out_features)
 
     def forward(self, x):
-        x = torch.relu(self.conv1(x))
-        x = self.pool(x)
-        x = torch.relu(self.conv2(x))
-        x = self.pool(x)
-        x = torch.relu(self.conv3(x))
-        x = self.pool(x)
-        x = torch.relu(self.conv4(x))
-        x = self.pool(x)
-        x = x.view(x.size(0), -1)
-        x = torch.relu(self.fc1(x))
-        x = self.fc2(x)
-        x = x.view(x.size(0), 4, 44100)  # Reshape to match target shape
-        return x
+        return torch.relu(self.linear(x) + self.poly(x ** 2))
 
-    @staticmethod
-    def load_from_checkpoint(filepath):
-        model = KANModel()
-        model.load_state_dict(torch.load(filepath))
-        return model
+class KANModel(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size):
+        super(KANModel, self).__init__()
+        self.layer1 = KANLayer(input_size, hidden_size)
+        self.layer2 = KANLayer(hidden_size, hidden_size)
+        self.layer3 = KANLayer(hidden_size, hidden_size)
+        self.output = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x):
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        return self.output(x)

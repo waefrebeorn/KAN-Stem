@@ -6,17 +6,13 @@ $venvPath = "C:\projects\KAN-Stem\venv"
 $activateScript = Join-Path -Path $venvPath -ChildPath "Scripts\Activate.ps1"
 if (Test-Path $activateScript) {
     & $activateScript
-
+    
     # Set the PYTHONPATH to include the src directory
     $env:PYTHONPATH = "C:\projects\KAN-Stem\src;C:\projects\KAN-Stem"
-
-    # Install necessary dependencies
-    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-    pip install -r requirements.txt | Out-Null
-
+    
     # Run the training script
     python src\train.py
-
+    
     # Launch TensorBoard for performance monitoring
     tensorboard --logdir logs/
 } else {

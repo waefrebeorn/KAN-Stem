@@ -1,6 +1,9 @@
 numpy==1.26.4
 pandas==2.0.2
 tensorflow==2.16.1
+torch==2.3.0+cu121
+torchvision==0.18.0+cu121
+torchaudio==2.3.0+cu121
 gradio==4.31.4
 python-dateutil==2.8.2
 pytz==2023.3

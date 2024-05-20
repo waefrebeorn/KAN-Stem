@@ -1,27 +1,42 @@
+import os
 import torch
-from dataset import MyAudioDataset
-from KANModel import KANModel
 from torch.utils.data import DataLoader
-import torch.optim as optim
-from losses import sisnr_loss
+from modules.KANModel import KANModel  # Corrected import path
+from dataset import MyAudioDataset  # Ensure this path is correct based on your structure
+from losses import si_snr_loss  # Ensure this path is correct based on your structure
 
 def train_model():
-    train_dataset = MyAudioDataset(r'G:\Music\badmultitracks-michaeljackson\dataset\wav')  # Replace with actual path
-    train_loader = DataLoader(train_dataset, batch_size=16, shuffle=True)
+    # Initialize dataset and dataloader
+    train_dataset = MyAudioDataset('G:/Music/badmultitracks-michaeljackson/dataset/wav')  # Update with your actual dataset path
+    train_loader = DataLoader(train_dataset, batch_size=2, shuffle=True, num_workers=2)  # Reduced batch size and num_workers
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = KANModel().to(device)
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    # Initialize model, loss function, and optimizer
+    model = KANModel().cuda()  # Ensure the model is on the GPU
+    criterion = si_snr_loss
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+    
+    accumulation_steps = 4  # Number of steps to accumulate gradients
 
+    # Training loop
     for epoch in range(10):  # Number of epochs
-        for inputs, targets in train_loader:
-            inputs, targets = inputs.to(device), targets.to(device)
-            optimizer.zero_grad()
+        model.train()
+        running_loss = 0.0
+        optimizer.zero_grad()
+        
+        for i, (inputs, targets) in enumerate(train_loader):
+            inputs, targets = inputs.cuda(), targets.cuda()
+            
             outputs = model(inputs)
-            loss = sisnr_loss(outputs, targets)
+            loss = criterion(outputs, targets)
             loss.backward()
-            optimizer.step()
-        print(f'Epoch {epoch + 1}, Loss: {loss.item()}')
+            
+            if (i + 1) % accumulation_steps == 0:
+                optimizer.step()
+                optimizer.zero_grad()
+            
+            running_loss += loss.item()
+        
+        print(f"Epoch {epoch + 1}, Loss: {running_loss / len(train_loader)}")
 
 if __name__ == "__main__":
     train_model()
