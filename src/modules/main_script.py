@@ -12,7 +12,7 @@ def separate_audio(input_audio):
 
 iface = gr.Interface(
     fn=separate_audio,
-    inputs=gr.Audio(source="upload", type="numpy"),
+    inputs=gr.Audio\(sources=\["upload"\], type="numpy"),
     outputs=[gr.outputs.Audio(type="numpy") for _ in range(4)],
     title="KAN Audio Stem Separation",
     description="Upload an audio file and get separated stems using Kolmogorov-Arnold Networks (KANs)."
