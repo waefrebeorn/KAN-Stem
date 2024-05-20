@@ -1,3 +1,5 @@
+# src/modules/main_script.py
+
 import os
 import gradio as gr
 import torch
@@ -12,8 +14,8 @@ def separate_audio(input_audio):
 
 iface = gr.Interface(
     fn=separate_audio,
-    inputs=gr.Audio\(sources=\["upload"\], type="numpy"),
-    outputs=[gr.outputs.Audio(type="numpy") for _ in range(4)],
+    inputs=gr.Audio(sources=["upload"], type="numpy"),
+    outputs=[gr.Audio(type="numpy") for _ in range(4)],
     title="KAN Audio Stem Separation",
     description="Upload an audio file and get separated stems using Kolmogorov-Arnold Networks (KANs)."
 )
