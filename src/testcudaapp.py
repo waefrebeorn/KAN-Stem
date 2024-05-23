@@ -29,8 +29,8 @@ class SplineActivation(nn.Module):
 
     def forward(self, x):
         x = x.unsqueeze(-1).expand(-1, -1, self.num_knots)
-        x = torch.bmm(x, self.coeffs.unsqueeze(0).expand(x.size(0), -1, -1))
-        return x.sum(dim=-1)
+        x = BSpline(self.knots.cpu().detach().numpy(), self.coeffs.cpu().detach().numpy(), 3)(x.cpu().detach().numpy())
+        return x.sum(dim=-1).to(x.device)
 
 class KANLayer(nn.Module):
     def __init__(self, input_dim, output_dim, degree=3):
@@ -49,14 +49,14 @@ class KANModel(nn.Module):
         self.layers = nn.ModuleList()
         current_size = input_size
         for _ in range(num_layers - 1):
-            self.layers.append(KANLayer(current_size, current_size * 2, degree))
-            current_size = current_size * 2
-        self.layers.append(KANLayer(current_size, 7, degree))  # Output 7 stems
+            self.layers.append(KANLayer(current_size, current_size * 2 + 1, degree))
+            current_size = current_size * 2 + 1
+        self.layers.append(KANLayer(current_size, 1, degree))
 
     def forward(self, x):
         for layer in self.layers:
             x = layer(x)
-        return x
+        return x.squeeze(1)
 
 def ensure_mono(waveform):
     if waveform.ndim > 1:
@@ -207,6 +207,13 @@ def process_to_dataset(input_dir, output_dir, num_examples):
     except subprocess.CalledProcessError as e:
         return f"Error processing dataset: {e}"
 
+def calculate_num_examples(memory_gb, duration_sec=180, num_stems=5, sample_rate=44100):
+    num_samples = duration_sec * sample rate
+    example_size_bytes = num_samples * num_stems * 4
+    
+    memory_bytes = memory_gb * 1024**3
+    
+    num_examples = memory_bytes //
 def calculate_num_examples(memory_gb, duration_sec=180, num_stems=5, sample_rate=44100):
     num_samples = duration_sec * sample_rate
     example_size_bytes = num_samples * num_stems * 4

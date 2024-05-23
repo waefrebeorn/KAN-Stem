@@ -17,3 +17,9 @@ typing-extensions==4.11.0
 soundfile
 nvidia-cudnn-cu12
 scipy
+torch
+numpy
+matplotlib
+scikit_learn
+sympy
+tqdm
