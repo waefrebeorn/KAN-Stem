@@ -23,3 +23,4 @@ matplotlib
 scikit_learn
 sympy
 tqdm
+psutil

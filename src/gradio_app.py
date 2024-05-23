@@ -10,6 +10,8 @@ import subprocess
 import soundfile as sf
 from scipy.interpolate import BSpline
 from pathlib import Path
+import psutil
+import gc
 
 print("CUDA available:", torch.cuda.is_available())
 print("CUDA version:", torch.version.cuda)
@@ -18,6 +20,12 @@ if torch.cuda.is_available():
     print("CUDA device name:", torch.cuda.get_device_name(0))
 
 print("Starting Gradio interface with KAN functionality...")
+
+# Function to print current memory usage
+def print_memory_usage(step):
+    process = psutil.Process(os.getpid())
+    mem_info = process.memory_info()
+    print(f"{step}: Memory usage: {mem_info.rss / 1024**2:.2f} MB")
 
 class SplineActivation(nn.Module):
     def __init__(self, num_params=1, num_knots=10):
@@ -126,6 +134,7 @@ def run_prediction(audio_chunks):
     if len(outputs) == 0:
         return None
     return np.concatenate(outputs, axis=2)
+
 def split_audio(audio_file_path):
     try:
         audio_chunks, sample_rate = preprocess_audio(audio_file_path)
@@ -156,8 +165,10 @@ def monitor_training():
                 break
             if output:
                 print(output.strip().decode())
+                print_memory_usage("During training")
     except Exception as e:
         print(f"Error monitoring training: {e}")
+
 def start_training(dataset_path, num_epochs, batch_size, learning_rate, chunk_size, hop_length, n_fft):
     global training_process, training_start_time
     try:
@@ -218,6 +229,7 @@ def calculate_num_examples(memory_gb, duration_sec=180, num_stems=5, sample_rate
     return int(num_examples)
 
 default_num_examples = calculate_num_examples(32)
+
 def create_gradio_interface():
     with gr.Blocks() as interface:
         print("Setting up Gradio interface with KAN functionality...")

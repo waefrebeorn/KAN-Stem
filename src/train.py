@@ -5,13 +5,28 @@ from torch.utils.data import DataLoader, Dataset
 import torch.nn as nn
 import torch.optim as optim
 import argparse
+import tracemalloc
+import psutil
+import gc
+
+# Function to print current memory usage
+def print_memory_usage(step):
+    process = psutil.Process(os.getpid())
+    mem_info = process.memory_info()
+    print(f"{step}: Memory usage: {mem_info.rss / 1024**2:.2f} MB")
 
 class CustomDataset(Dataset):
-    def __init__(self, data_dir, chunk_size, hop_length, n_fft):
+    def __init__(self, data_dir, chunk_size, hop_length, n_fft, sample_rate=44100, chunk_duration=1.0, downsample_rate=16000):
         self.data_dir = data_dir
         self.chunk_size = chunk_size
         self.hop_length = hop_length
         self.n_fft = n_fft
+        self.chunk_duration = chunk_duration
+        self.sample_rate = sample_rate
+        self.downsample_rate = downsample_rate
+        
+        # Calculate the number of samples in a chunk
+        self.chunk_samples = int(downsample_rate * chunk_duration)
         
         # Identify input and target files
         self.input_files = sorted([f for f in os.listdir(data_dir) if f.startswith('input_')])
@@ -35,22 +50,31 @@ class CustomDataset(Dataset):
         print(f"Loading input file: {input_file}")
         input_waveform, sample_rate = torchaudio.load(input_file)
         print(f"Loaded input file with sample rate: {sample_rate} and shape: {input_waveform.shape}")
+        
+        # Downsample and truncate the input waveform
+        input_waveform = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=self.downsample_rate)(input_waveform)
+        input_waveform = input_waveform[:, :self.chunk_samples]
+        
         input_spectrogram = torchaudio.transforms.Spectrogram(n_fft=self.n_fft, hop_length=self.hop_length)(input_waveform)
         input_chunks = self.chunk_spectrogram(input_spectrogram, is_input=True)
-        print(f"Input spectrogram shape: {input_spectrogram.shape}, Input chunks shape: {input_chunks.shape}")
 
         target_spectrograms = []
         for target_file in target_files:
             print(f"Loading target file: {target_file}")
             target_waveform, _ = torchaudio.load(target_file)
             print(f"Loaded target file with shape: {target_waveform.shape}")
+            
+            # Downsample and truncate the target waveform
+            target_waveform = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=self.downsample_rate)(target_waveform)
+            target_waveform = target_waveform[:, :self.chunk_samples]
+            
             target_spectrogram = torchaudio.transforms.Spectrogram(n_fft=self.n_fft, hop_length=self.hop_length)(target_waveform)
             target_spectrograms.append(target_spectrogram)
 
         target_spectrograms = torch.stack(target_spectrograms, dim=0)
         target_chunks = self.chunk_spectrogram(target_spectrograms, is_input=False)
-        print(f"Target spectrograms shape: {target_spectrograms.shape}, Target chunks shape: {target_chunks.shape}")
 
+        print_memory_usage("After loading data in __getitem__")
         return input_chunks, target_chunks
 
     def chunk_spectrogram(self, spectrogram, is_input):
@@ -65,14 +89,15 @@ class CustomDataset(Dataset):
         if is_input:
             chunks = torch.stack(chunks, dim=2)  # Stack along the third dimension for input spectrograms
         else:
-            chunks = torch.stack(chunks, dim=2)  # Stack along the third dimension for target spectrograms
+            chunks = torch.stack(chunks, dim2)  # Stack along the third dimension for target spectrograms
             chunks = chunks.unsqueeze(1)  # Add a dummy batch dimension for target spectrograms
             chunks = chunks.permute(1, 0, 2, 3, 4, 5)  # Permute dimensions to match the expected target shape
         
+        print_memory_usage("After chunking spectrogram")
         return chunks
 
-def load_data(dataset_path, batch_size, chunk_size, hop_length, n_fft):
-    train_dataset = CustomDataset(dataset_path, chunk_size, hop_length, n_fft)
+def load_data(dataset_path, batch_size, chunk_size, hop_length, n_fft, downsample_rate):
+    train_dataset = CustomDataset(dataset_path, chunk_size, hop_length, n_fft, downsample_rate=downsample_rate)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=4)
     return train_loader
 
@@ -164,6 +189,8 @@ def train(model, train_loader, criterion, optimizer, device):
             # Clear memory after each batch
             del inputs, targets, outputs
             torch.cuda.empty_cache()
+            gc.collect()
+            print_memory_usage(f"After training batch {batch_idx+1}")
         except Exception as e:
             print(f"Error during training batch {batch_idx+1}: {e}")
             raise e
@@ -176,6 +203,7 @@ def print_gpu_memory():
         print(f"GPU Memory - Allocated: {allocated:.2f} MB, Reserved: {reserved:.2f} MB")
 
 def main():
+    tracemalloc.start()
     parser = argparse.ArgumentParser(description='KAN Training Script')
     parser.add_argument('--dataset', type=str, required=True, help='Path to the dataset')
     parser.add_argument('--num_epochs', type=int, default=50, help='Number of epochs to train')
@@ -186,12 +214,13 @@ def main():
     parser.add_argument('--n_fft', type=int, default=512, help='Number of FFT points')
     parser.add_argument('--hidden_size', type=int, default=512, help='Hidden size for KAN layers')
     parser.add_argument('--use_cuda', action='store_true', help='Use CUDA if available')
+    parser.add_argument('--downsample_rate', type=int, default=16000, help='Downsample rate for audio')
     args = parser.parse_args()
 
     device = torch.device("cuda" if args.use_cuda and torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    train_loader = load_data(args.dataset, args.batch_size, args.chunk_size, args.hop_length, args.n_fft)
+    train_loader = load_data(args.dataset, args.batch_size, args.chunk_size, args.hop_length, args.n_fft, args.downsample_rate)
     
     # Initialize model, loss function, and optimizer
     input_size = args.chunk_size * (args.n_fft // 2 + 1) * 483 * 1  # Adjusted input size calculation
@@ -212,9 +241,17 @@ def main():
 
             # Clear memory after each epoch
             torch.cuda.empty_cache()
+            gc.collect()
+            print_memory_usage(f"After epoch {epoch+1}")
         except Exception as e:
             print(f"Error during epoch {epoch+1}: {e}")
             raise e
+
+    snapshot = tracemalloc.take_snapshot()
+    top_stats = snapshot.statistics('lineno')
+    print("[ Top 10 memory-consuming lines ]")
+    for stat in top_stats[:10]:
+        print(stat)
 
 if __name__ == "__main__":
     main()
