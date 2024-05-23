@@ -1,0 +1,19 @@
+# PyTorch and related packages
+https://download.pytorch.org/whl/cu121/torch-2.2.2%2Bcu121-cp310-cp310-win_amd64.whl#sha256=d300055aac0e2063f9a2659924e9766605db06d5683532c6eabbdef6bec865dd
+https://download.pytorch.org/whl/cu121/torchvision-0.17.2%2Bcu121-cp310-cp310-win_amd64.whl#sha256=c780783d4113cf3f86297f1b51a0f3a5c1f9487c5ec690b9a470d7d6e4f67e62
+https://download.pytorch.org/whl/cu121/torchaudio-2.2.2%2Bcu121-cp310-cp310-win_amd64.whl#sha256=e31ffc82ee5d3458fd5c28999d34e81e794d714abf5ac1765c9a8722d4bba833
+fastapi==0.100.0
+starlette==0.27.0
+numpy==1.26.4
+pandas==2.0.2
+tensorflow==2.16.1
+gradio==4.29.0
+python-dateutil==2.8.2
+pytz==2023.3
+tzdata==2023.3
+tensorflow-intel==2.16.1
+keras==3.3.3
+typing-extensions==4.11.0
+soundfile
+nvidia-cudnn-cu12
+scipy
