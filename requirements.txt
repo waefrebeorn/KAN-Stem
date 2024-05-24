@@ -7,7 +7,7 @@ starlette==0.27.0
 numpy==1.26.4
 pandas==2.0.2
 tensorflow==2.16.1
-gradio==4.29.0
+gradio
 python-dateutil==2.8.2
 pytz==2023.3
 tzdata==2023.3
