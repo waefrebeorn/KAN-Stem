@@ -11,7 +11,8 @@ if (Test-Path $activateScript) {
     $env:PYTHONPATH = "C:\\projects\\KAN-Stem\\src;C:\\projects\\KAN-Stem"
     
     # Start TensorBoard
-    Start-Process -NoNewWindow -FilePath "cmd.exe" -ArgumentList "/c", "tensorboard --logdir=logs"
+    Start-Process -NoNewWindow -FilePath "cmd.exe" -ArgumentList "/c", "tensorboard --logdir=runs
+"
     
     # Keep the script running to allow TensorBoard to continue
     Write-Host "TensorBoard is running. Press Enter to stop..."

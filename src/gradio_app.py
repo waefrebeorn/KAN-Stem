@@ -1,291 +1,298 @@
+import gradio as gr
 import os
-import threading
-import time
-import numpy as np
 import torch
 import torchaudio
+import librosa
+import numpy as np
+from torch.utils.data import DataLoader
 import torch.nn as nn
-import gradio as gr
-import subprocess
-import soundfile as sf
-from scipy.interpolate import BSpline
-from pathlib import Path
-import psutil
-import gc
+import torch.optim as optim
+from torch.utils.tensorboard import SummaryWriter
+import logging
 
-print("CUDA available:", torch.cuda.is_available())
-print("CUDA version:", torch.version.cuda)
-print("CUDA device count:", torch.cuda.device_count())
-if torch.cuda.is_available():
-    print("CUDA device name:", torch.cuda.get_device_name(0))
+def analyze_audio(file_path):
+    waveform, sample_rate = torchaudio.load(file_path)
+    duration = waveform.size(1) / sample_rate
+    if waveform.abs().max() == 0:  # Check for silence
+        return sample_rate, duration, 0, True  # Indicate that the audio is silent
+    return sample_rate, duration, waveform.size(1), False  # Return sequence length instead of None
 
-print("Starting Gradio interface with KAN functionality...")
+def detect_parameters(data_dir, default_n_mels=64, default_n_fft=1024):
+    sample_rates = []
+    durations = []
 
-# Function to print current memory usage
-def print_memory_usage(step):
-    process = psutil.Process(os.getpid())
-    mem_info = process.memory_info()
-    print(f"{step}: Memory usage: {mem_info.rss / 1024**2:.2f} MB")
+    # Print the contents of the data directory
+    print(f"Contents of the data directory ({data_dir}): {os.listdir(data_dir)}")
 
-class SplineActivation(nn.Module):
-    def __init__(self, num_params=1, num_knots=10):
-        super(SplineActivation, self).__init__()
-        self.num_params = num_params
-        self.num_knots = num_knots
-        self.knots = nn.Parameter(torch.linspace(0, 1, num_knots))
-        self.coeffs = nn.Parameter(torch.ones(num_knots, num_params))
+    for file_name in os.listdir(data_dir):
+        if file_name.endswith('.wav'):  # Ensure only .wav files are processed
+            file_path = os.path.join(data_dir, file_name)
+            sample_rate, duration, sequence_length, is_silent = analyze_audio(file_path)
+            if is_silent:
+                print(f"Skipping silent file: {file_name}")
+                continue  # Skip silent files
+            sample_rates.append(sample_rate)
+            durations.append(duration)
+
+    print(f"Found {len(sample_rates)} valid audio files")
+    
+    if not sample_rates or not durations:
+        raise ValueError("No valid audio files found in the dataset")
+
+    avg_sample_rate = sum(sample_rates) / len(sample_rates)
+    avg_duration = sum(durations) / len(durations)
+
+    # Set n_mels and n_fft based on average sample rate and duration
+    n_mels = min(default_n_mels, int(avg_sample_rate / 100))
+    n_fft = min(default_n_fft, int(avg_sample_rate * 0.025))  # 25 ms window
+
+    return int(avg_sample_rate), n_mels, n_fft
+
+def _waveform_to_spectrogram_librosa(waveform, sr, n_mels=64, n_fft=1024):
+    S = librosa.feature.melspectrogram(y=waveform, sr=sr, n_fft=n_fft, n_mels=n_mels)
+    S_dB = librosa.power_to_db(S, ref=np.max)
+    return S_dB
+
+class CustomDataset(torch.utils.data.Dataset):
+    def __init__(self, data_dir, n_mels=64, target_length=256, n_fft=1024):
+        self.data_dir = data_dir
+        self.n_mels = n_mels
+        self.target_length = target_length
+        self.n_fft = n_fft
+        self.file_list = []
+
+        for f in os.listdir(data_dir):
+            if f.endswith('.wav'):
+                file_path = os.path.join(data_dir, f)
+                sample_rate, duration, sequence_length, is_silent = analyze_audio(file_path)
+                if not is_silent:
+                    self.file_list.append(f)
+
+        print(f"Number of valid files in the dataset: {len(self.file_list)}")
+
+    def __len__(self):
+        return len(self.file_list)
+
+    def __getitem__(self, idx):
+        file_path = os.path.join(self.data_dir, self.file_list[idx])
+        waveform, sample_rate = torchaudio.load(file_path)
+        waveform = waveform.numpy().flatten()
+        spectrogram = _waveform_to_spectrogram_librosa(waveform, sample_rate, n_mels=self.n_mels, n_fft=self.n_fft)
+        spectrogram = (spectrogram - np.mean(spectrogram)) / np.std(spectrogram)  # Normalize spectrogram
+
+        # Truncate or pad spectrogram to target length
+        if spectrogram.shape[1] > self.target_length:
+            spectrogram = spectrogram[:, :self.target_length]
+        else:
+            padding = self.target_length - spectrogram.shape[1]
+            spectrogram = np.pad(spectrogram, ((0, 0), (0, padding)), mode='constant')
+
+        spectrogram = torch.tensor(spectrogram).unsqueeze(0)  # Adding one channel dimension
+        return spectrogram
+
+class KANLinear(nn.Module):
+    def __init__(self, in_features, out_features):
+        super(KANLinear, self).__init__()
+        self.fc = nn.Linear(in_features, out_features)
+        self.bn = nn.BatchNorm1d(out_features)
+        self.inorm = nn.InstanceNorm1d(out_features, affine=True)
 
     def forward(self, x):
-        x = x.unsqueeze(-1).expand(-1, -1, self.num_knots)
-        x = torch.bmm(x, self.coeffs.unsqueeze(0).expand(x.size(0), -1, -1))
-        return x.sum(dim=-1)
+        x = self.fc(x)
+        if x.size(0) > 1:  # Use batch normalization if batch size is greater than 1
+            x = self.bn(x)
+        else:  # Use instance normalization if batch size is 1
+            x = x.view(1, -1, x.size(-1))  # Reshape for instance normalization
+            x = self.inorm(x)
+            x = x.view(1, -1)  # Reshape back to original
+        return nn.functional.relu(x)
 
-class KANLayer(nn.Module):
-    def __init__(self, input_dim, output_dim, degree=3):
-        super(KANLayer, self).__init__()
-        self.linear = nn.Linear(input_dim, output_dim)
-        self.activation = SplineActivation(num_params=output_dim)
+class KAN(nn.Module):
+    def __init__(self, in_features):
+        super(KAN, self).__init__()
+        self.layer1 = nn.Linear(in_features, 512)
+        self.fc = nn.Linear(512, in_features)
 
     def forward(self, x):
-        x = self.linear(x)
-        x = self.activation(x)
+        x = self.layer1(x)
+        x = nn.functional.relu(x)
+        x = self.fc(x)
         return x
 
-class KANModel(nn.Module):
-    def __init__(self, input_size, num_layers=3, degree=3):
-        super(KANModel, self).__init__()
-        self.layers = nn.ModuleList()
-        current_size = input_size
-        for _ in range(num_layers - 1):
-            self.layers.append(KANLayer(current_size, current_size * 2, degree))
-            current_size = current_size * 2
-        self.layers.append(KANLayer(current_size, 7, degree))  # Output 7 stems
+def train(model, train_loader, criterion, optimizer, device, epoch, num_epochs, writer, checkpoint_dir, save_interval, logger):
+    model.train()
+    running_loss = 0.0
 
-    def forward(self, x):
-        for layer in self.layers:
-            x = layer(x)
-        return x
+    for i, data in enumerate(train_loader, 0):
+        inputs = data.to(device)  # Assuming audio data is the first element
 
-def ensure_mono(waveform):
-    if waveform.ndim > 1:
-        waveform = np.mean(waveform, axis=1)
-    return waveform
+        # Squeeze unnecessary dimensions
+        inputs = inputs.squeeze()
 
-def normalize_length(waveform, sample_rate, target_length):
-    target_samples = int(target_length * sample_rate)
-    current_samples = waveform.shape[0]
+        # Ensure the input tensor has the correct dimensions
+        if inputs.ndimension() == 2:
+            inputs = inputs.unsqueeze(0)  # Add batch dimension if necessary
+        elif inputs.ndimension() == 4:
+            batch_size, c, n_mels, seq_len = inputs.shape
+            inputs = inputs.view(batch_size, n_mels, seq_len)
+        elif inputs.ndimension() == 5:
+            batch_size, c1, c2, n_mels, seq_len = inputs.shape
+            inputs = inputs.view(batch_size, n_mels, seq_len)
+        elif inputs.ndimension() != 3:
+            print("Unexpected input dimensions after squeezing. Expected 3D tensor, got: ", inputs.shape)
+            continue
+
+        batch_size, n_mels, seq_len = inputs.shape
+        in_features = int(n_mels * seq_len)
+        inputs = inputs.view(batch_size, in_features)
+
+        optimizer.zero_grad()
+        outputs = model(inputs)
+        loss = criterion(outputs, inputs)
+        loss.backward()
+        optimizer.step()
+
+        running_loss += loss.item()
+        if i % 10 == 9:  # Print every 10 mini-batches
+            print(f'Epoch [{epoch + 1}/{num_epochs}], Step [{i + 1}/{len(train_loader)}], Loss: {running_loss / 10:.4f}')
+            writer.add_scalar('Loss/train', running_loss / 10, epoch * len(train_loader) + i)
+            running_loss = 0.0
+
+        # Save checkpoint at specified intervals
+        if (epoch + 1) % save_interval == 0:
+            if not os.path.exists(checkpoint_dir):
+                os.makedirs(checkpoint_dir)
+            checkpoint_path = os.path.join(checkpoint_dir, f'model_epoch_{epoch + 1}.pt')
+            torch.save(model.state_dict(), checkpoint_path)
+            print(f"Checkpoint saved at {checkpoint_path}")
+
+    writer.close()
+    logger.info('Epoch Made')
+    return "Epoch Made"
+
+def start_training(data_dir, batch_size, num_epochs, learning_rate, use_cuda, checkpoint_dir, save_interval):
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger(__name__)
+
+    device = torch.device("cuda" if use_cuda and torch.cuda.is_available() else "cpu")
+    logger.info(f"Using device: {device}")
+
+    sample_rate, n_mels, n_fft = detect_parameters(data_dir)
+
+    dataset = CustomDataset(data_dir, n_mels=n_mels, target_length=256, n_fft=n_fft)
+    if len(dataset) == 0:
+        raise ValueError("No valid audio files found in the dataset after filtering.")
+
+    train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, pin_memory=True if use_cuda else False)
+
+    # Calculate in_features based on n_mels and target_length
+    target_length = 256
+    in_features = int(n_mels * target_length)
+
+    model = KAN(in_features=in_features).to(device)
+    criterion = nn.MSELoss()
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+
+    writer = SummaryWriter()
+
+    for epoch in range(num_epochs):
+        train(model, train_loader, criterion, optimizer, device, epoch, num_epochs, writer, checkpoint_dir, save_interval, logger)
+
+    writer.close()
+    logger.info('Training Finished')
+
+    return "Training Finished"
+
+def perform_separation(checkpoint_path, file_path, use_cuda=True):
+    sample_rate, duration, sequence_length, is_silent = analyze_audio(file_path)
+    if is_silent:
+        raise ValueError("The provided audio file is silent and cannot be processed.")
     
-    if current_samples > target_samples:
-        return waveform[:target_samples]
-    else:
-        repeats = target_samples // current_samples
-        remainder = target_samples % current_samples
-        return np.concatenate([np.tile(waveform, repeats), waveform[:remainder]])
+    n_mels = 128
+    target_length = 256
+    in_features = int(n_mels * target_length)  # Ensure this matches the input feature calculation
+    model = load_model(checkpoint_path, in_features=in_features)
+    device = torch.device("cuda" if use_cuda and torch.cuda.is_available() else "cpu")
+    model.to(device)
 
-def preprocess_audio(audio_file_path, target_length=180):
-    print(f"Preprocessing audio file: {audio_file_path}")
-    try:
-        waveform, sample_rate = sf.read(audio_file_path, dtype='float32')
-        waveform = ensure_mono(waveform)
-        waveform = normalize_length(waveform, sample_rate, target_length)
-        waveform = torch.tensor(waveform)
+    output_path = "separated_output.wav"
+    separated_file_path = separate_stems(model, file_path, output_path, device=device)
+    return separated_file_path
 
-        chunks = torch.split(waveform, 44100)
+def test_cuda():
+    return torch.cuda.is_available()
 
-        return chunks, sample_rate
-    except Exception as e:
-        print(f"Error preprocessing audio: {e}")
-        return None, None
-
-def predict(model, input_data):
-    print(f"Running prediction with model: {model} on input data: {input_data.shape}")
-    try:
-        input_data = input_data.T
-        input_data = input_data.unsqueeze(0)
-        input_data = input_data.cuda() if torch.cuda.is_available() else input_data
-        model = model.cuda() if torch.cuda.is_available() else model.cpu()
-        output = model(input_data)
-        print(f"Prediction output: {output.shape}")
-        return output.detach().cpu().numpy()
-    except Exception as e:
-        print(f"Error during prediction: {e}")
-        return None
-
-def run_prediction(audio_chunks):
-    model = KANModel(input_size=44100, num_layers=3)
-    checkpoint_dir = "checkpoints"
-    checkpoints = [f for f in Path(checkpoint_dir).iterdir() if f.is_file() and f.name.startswith("kan_model_checkpoint_")]
-    if checkpoints:
-        best_checkpoint = sorted(checkpoints, key=lambda p: sum(float(w) for w in p.name.split("_")[2:-1]))[-1]
-        model.load_state_dict(torch.load(best_checkpoint, map_location=torch.device('cuda' if torch.cuda.is_available() else 'cpu')))
-        print(f"Loaded checkpoint with winners: {best_checkpoint.name}")
-    else:
-        print("No checkpoint found. Please train the model first.")
-        return None
-    
-    model = model.cuda() if torch.cuda.is_available() else model.cpu()
+def load_model(checkpoint_path, in_features):
+    model = KAN(in_features=in_features)
+    checkpoint = torch.load(checkpoint_path)
+    print(checkpoint.keys())  # Debugging: print the keys in the checkpoint
+    model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
-    outputs = []
-    for chunk in audio_chunks:
-        chunk = chunk.cuda() if torch.cuda.is_available() else chunk
-        output = predict(model, chunk)
-        if output is not None:
-            outputs.append(output)
-    if len(outputs) == 0:
-        return None
-    return np.concatenate(outputs, axis=2)
+    return model
 
-def split_audio(audio_file_path):
-    try:
-        audio_chunks, sample_rate = preprocess_audio(audio_file_path)
-        if audio_chunks is None:
-            raise Exception("Error during audio preprocessing")
-        output = run_prediction(audio_chunks)
-        if output is None:
-            raise Exception("Error during prediction")
-        stems = []
-        for i in range(output.shape[1]):
-            stem_path = f"stem_{i+1}.wav"
-            sf.write(stem_path, output[0, i], sample_rate)
-            stems.append(stem_path)
-        return stems
-    except Exception as e:
-        print(f"Error during audio splitting: {e}")
-        return [None] * 5
+def separate_stems(model, file_path, output_path, n_mels=64, n_fft=1024, target_length=256, device='cpu'):
+    sample_rate, duration, sequence_length, is_silent = analyze_audio(file_path)
+    if is_silent:
+        raise ValueError("The provided audio file is silent and cannot be processed.")
+    
+    waveform, sample_rate = torchaudio.load(file_path)
+    waveform = waveform.numpy().flatten()
+    spectrogram = _waveform_to_spectrogram_librosa(waveform, sample_rate, n_mels=n_mels, n_fft=n_fft)
+    spectrogram = (spectrogram - np.mean(spectrogram)) / np.std(spectrogram)  # Normalize spectrogram
 
-training_process = None
-training_start_time = None
-
-def monitor_training():
-    global training_process
-    try:
-        while True:
-            output = training_process.stdout.readline()
-            if output == b'' and training_process.poll() is not None:
-                break
-            if output:
-                print(output.strip().decode())
-                print_memory_usage("During training")
-    except Exception as e:
-        print(f"Error monitoring training: {e}")
-
-def start_training(dataset_path, num_epochs, batch_size, learning_rate, chunk_size, hop_length, n_fft):
-    global training_process, training_start_time
-    try:
-        training_start_time = time.time()
-        use_cuda_flag = "--use_cuda" if torch.cuda.is_available() else ""
-        print(f"Starting training with dataset={dataset_path}, num_epochs={num_epochs}, batch_size={batch_size}, learning_rate={learning_rate}, chunk_size={chunk_size}, hop_length={hop_length}, n_fft={n_fft}")
-        training_process = subprocess.Popen(
-            ["python", "src/train.py", "--dataset", dataset_path, "--num_epochs", str(num_epochs), "--batch_size", str(batch_size), "--learning_rate", str(learning_rate), "--chunk_size", str(chunk_size), "--hop_length", str(hop_length), "--n_fft", str(n_fft), use_cuda_flag],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE
-        )
-        monitor_thread = threading.Thread(target=monitor_training)
-        monitor_thread.start()
-        return "Training started successfully. Check the terminal for detailed updates."
-    except subprocess.CalledProcessError as e:
-        return f"Error starting training: {e}"
-
-def training_status():
-    if training_process and training_process.poll() is None:
-        elapsed_time = time.time() - training_start_time
-        return f"Training in progress... Elapsed time: {int(elapsed_time)} seconds"
+    # Truncate or pad the spectrogram to match the training target length
+    if spectrogram.shape[1] > target_length:
+        spectrogram = spectrogram[:, :target_length]
     else:
-        return "No training in progress."
+        padding = target_length - spectrogram.shape[1]
+        spectrogram = np.pad(spectrogram, ((0, 0), (0, padding)), mode='constant')
 
-def prepare_dataset(input_dir, output_dir, num_examples):
-    try:
-        print(f"Preparing dataset with input_dir={input_dir}, output_dir={output_dir}, num_examples={num_examples}")
-        subprocess.check_call([
-            "python", "src/prepare_dataset.py",
-            "--input_dir", input_dir,
-            "--output_dir", output_dir,
-            "--num_examples", str(num_examples)
-        ])
-        return f"Dataset prepared with {num_examples} examples in {output_dir}."
-    except subprocess.CalledProcessError as e:
-        return f"Error preparing dataset: {e}"
+    spectrogram = torch.tensor(spectrogram).unsqueeze(0).to(device)  # Add batch dimension and move to device
+    spectrogram = spectrogram.view(1, n_mels * target_length)  # Reshape for model input
 
-def process_to_dataset(input_dir, output_dir, num_examples):
-    try:
-        print(f"Processing to dataset with input_dir={input_dir}, output_dir={output_dir}, num_examples={num_examples}")
-        subprocess.check_call([
-            "python", "src/process_to_dataset.py",
-            "--input_dir", input_dir,
-            "--output_dir", output_dir,
-            "--num_examples", str(num_examples)
-        ])
-        return f"Dataset processed with {num_examples} examples in {output_dir}."
-    except subprocess.CalledProcessError as e:
-        return f"Error processing dataset: {e}"
+    with torch.no_grad():
+        separated_spectrogram = model(spectrogram)
 
-def calculate_num_examples(memory_gb, duration_sec=180, num_stems=5, sample_rate=44100):
-    num_samples = duration_sec * sample_rate
-    example_size_bytes = num_samples * num_stems * 4
+    separated_spectrogram = separated_spectrogram.view(n_mels, target_length).cpu()  # Reshape back to spectrogram dimensions and move to CPU
+
+    # Convert the spectrogram back to waveform using Griffin-Lim algorithm
+    inverse_mel_transform = torchaudio.transforms.InverseMelScale(n_stft=n_fft // 2 + 1, n_mels=n_mels)
+    griffin_lim_transform = torchaudio.transforms.GriffinLim(n_iter=32)
+    separated_waveform = griffin_lim_transform(inverse_mel_transform(separated_spectrogram))
+    torchaudio.save(output_path, separated_waveform, sample_rate)
+    return output_path
+
+with gr.Blocks() as demo:
+    with gr.Tab("Train Model"):
+        gr.Markdown("## CUDA Test and KAN Training")
+        
+        btn_cuda = gr.Button("Check CUDA Availability")
+        output_cuda = gr.Textbox()
+        btn_cuda.click(test_cuda, outputs=output_cuda)
+        
+        gr.Markdown("### Start Training")
+        data_dir = gr.Textbox(label="Dataset Directory", value="/path/to/your/dataset")
+        batch_size = gr.Number(label="Batch Size", value=4)
+        num_epochs = gr.Number(label="Number of Epochs", value=10)
+        learning_rate = gr.Number(label="Learning Rate", value=0.001)
+        use_cuda = gr.Checkbox(label="Use CUDA", value=True)
+        checkpoint_dir = gr.Textbox(label="Checkpoint Directory", value="./checkpoints")
+        save_interval = gr.Number(label="Checkpoint Save Interval (epochs)", value=1)
+        
+        btn_train = gr.Button("Start Training")
+        output_train = gr.Textbox()
+        
+        btn_train.click(start_training, inputs=[data_dir, batch_size, num_epochs, learning_rate, use_cuda, checkpoint_dir, save_interval], outputs=output_train)
     
-    memory_bytes = memory_gb * 1024**3
-    
-    num_examples = memory_bytes // (example_size_bytes * 1.5)
-    
-    return int(num_examples)
+    with gr.Tab("Separate Stems"):
+        gr.Markdown("## Stem Separation using KAN Model")
+        
+        checkpoint_path = gr.Textbox(label="Checkpoint Path", value="./checkpoints/checkpoint_epoch_10.pth")
+        file_path = gr.Textbox(label="Audio File Path", value="/path/to/your/audio/file.wav")
+        
+        btn_separate = gr.Button("Separate Stems")
+        output_separation = gr.Audio(label="Separated Audio")
+        
+        btn_separate.click(perform_separation, inputs=[checkpoint_path, file_path], outputs=output_separation)
 
-default_num_examples = calculate_num_examples(32)
-
-def create_gradio_interface():
-    with gr.Blocks() as interface:
-        print("Setting up Gradio interface with KAN functionality...")
-
-        with gr.Tab("Audio Splitter"):
-            audio_input = gr.Audio(type="filepath", label="Upload Audio File (FLAC or WAV)")
-            output_stems = [gr.Audio(label=f"Stem {i+1}") for i in range(5)]
-            gr.Button("Run").click(
-                fn=split_audio,
-                inputs=audio_input,
-                outputs=output_stems
-            )
-
-        with gr.Tab("Training"):
-            dataset_path = gr.Textbox(label="Dataset Path", value="K:\\KAN-Stem DataSet\\Chunks\\Chunk_0_Sample")
-            num_epochs = gr.Number(label="Number of Epochs", value=50)
-            batch_size = gr.Number(label="Batch Size", value=1)
-            learning_rate = gr.Number(label="Learning Rate", value=0.001)
-            chunk_size = gr.Number(label="Chunk Size", value=256)
-            hop_length = gr.Number(label="Hop Length", value=128)
-            n_fft = gr.Number(label="Number of FFT Points", value=512)
-            start_button = gr.Button("Start Training")
-            status_box = gr.Markdown("No training in progress.")
-            
-            start_button.click(
-                fn=start_training,
-                inputs=[dataset_path, num_epochs, batch_size, learning_rate, chunk_size, hop_length, n_fft],
-                outputs=None
-            )
-            
-            interface.load(fn=training_status, inputs=None, outputs=status_box, every=1)
-
-        with gr.Tab("Dataset Preparation"):
-            input_dir = gr.Textbox(label="Input Directory", value="K:\\KAN-Stem DataSet")
-            output_dir = gr.Textbox(label="Output Directory", value="K:\\KAN-Stem DataSet\\Kan-StemRB1")
-            num_examples = gr.Number(label="Number of Examples", value=default_num_examples)
-            prepare_button = gr.Button("Prepare Dataset")
-            output_message = gr.Textbox(label="Output Message")
-            prepare_button.click(prepare_dataset, inputs=[input_dir, output_dir, num_examples], outputs=output_message)
-
-        with gr.Tab("Process to Dataset"):
-            input_dir = gr.Textbox(label="Input Directory", value="K:\\KAN-Stem DataSet\\Kan-StemRB1")
-            output_dir = gr.Textbox(label="Output Directory", value="K:\\KAN-Stem DataSet\\ProcessedDataset")
-            num_examples = gr.Number(label="Number of Examples", value=default_num_examples)
-            process_button = gr.Button("Process to Dataset")
-            output_message = gr.Textbox(label="Output Message")
-            process_button.click(process_to_dataset, inputs=[input_dir, output_dir, num_examples], outputs=output_message)
-
-    return interface
-
-interface = create_gradio_interface()
-
-if __name__ == "__main__":
-    try:
-        print("Launching Gradio interface with KAN functionality...")
-        interface.launch(server_name="127.0.0.1", server_port=7860, show_error=True)
-        print("Gradio interface should now be running on http://127.0.0.1:7860")
-    except Exception as e:
-        print(f"Error launching Gradio interface: {e}")
+demo.launch(server_name="127.0.0.1", server_port=7861)
