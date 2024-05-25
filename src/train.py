@@ -1,7 +1,6 @@
 import os
 import torch
 import torchaudio
-import librosa
 import numpy as np
 import torch.utils.checkpoint as checkpoint
 from torch.utils.data import DataLoader, Dataset
@@ -11,10 +10,8 @@ import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 import torch.cuda.amp as amp
 import logging
-import tempfile
 import soundfile as sf
-from model import KANWithDepthwiseConv  # Import the model from model.py
-
+from model import KANWithDepthwiseConv, load_model
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -71,64 +68,67 @@ def detect_parameters(data_dir, default_n_mels=64, default_n_fft=1024):
 
     return int(avg_sample_rate), n_mels, n_fft
 
-# Convert waveform to spectrogram using librosa
-def _waveform_to_spectrogram_librosa(waveform, sr, n_mels=64, n_fft=1024):
-    S = librosa.feature.melspectrogram(y=waveform, sr=sr, n_fft=n_fft, n_mels=n_mels)
-    S_dB = librosa.power_to_db(S, ref=np.max)
-    return S_dB
-
 # Custom dataset class
-class CustomDataset(Dataset):
-    def __init__(self, data_dir, n_mels, target_length, n_fft):
+class StemSeparationDataset(Dataset):
+    def __init__(self, data_dir, n_mels, target_length, n_fft, num_stems):
         self.data_dir = data_dir
         self.n_mels = n_mels
         self.target_length = target_length
         self.n_fft = n_fft
-        self.file_paths = [os.path.join(data_dir, f) for f in os.listdir(data_dir) if f.endswith('.wav')]
+        self.num_stems = num_stems  # Number of stems to separate
+        self.file_list = []
+
+        input_files = [f for f in os.listdir(data_dir) if f.startswith("input_") and f.endswith(".wav")]
+
+        for f in input_files:
+            mix_path = os.path.join(data_dir, f)
+            stem_paths = [os.path.join(data_dir, f.replace("input_", f"target_{stem}_")) for stem in ["bass", "drums", "guitar", "keys", "noise", "other", "vocals"]]  # Assuming these stems
+            if all(os.path.exists(path) for path in stem_paths):  # Ensure all stems are present
+                self.file_list.append((mix_path, stem_paths))
+
+        total_files = len(input_files) + len(input_files) * self.num_stems
+        logger.info(f"Total number of files considered (inputs + stems): {total_files}")
+        logger.info(f"Number of valid file sets (input + corresponding stems): {len(self.file_list)}")
 
     def __len__(self):
-        return len(self.file_paths)
+        return len(self.file_list)
 
     def __getitem__(self, idx):
-        file_path = self.file_paths[idx]
-        waveform, sample_rate = torchaudio.load(file_path)
-        spectrogram = torchaudio.transforms.MelSpectrogram(
+        mix_path, stem_paths = self.file_list[idx]
+
+        # Load and preprocess the mix audio
+        mix_waveform, sample_rate = torchaudio.load(mix_path)
+        mix_spectrogram = torchaudio.transforms.MelSpectrogram(
             sample_rate=sample_rate, n_mels=self.n_mels, n_fft=self.n_fft
-        )(waveform)
-        spectrogram = (spectrogram - spectrogram.mean()) / spectrogram.std()
-        return spectrogram  # Shape [channels, height, width]
+        )(mix_waveform)
+        mix_spectrogram = (mix_spectrogram - mix_spectrogram.mean()) / mix_spectrogram.std()
 
-# Define depthwise separable convolution
-class DepthwiseSeparableConv(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1):
-        super(DepthwiseSeparableConv, self).__init__()
-        self.depthwise = nn.Conv2d(in_channels, in_channels, kernel_size=kernel_size, stride=stride, padding=padding, groups=in_channels)
-        self.pointwise = nn.Conv2d(in_channels, out_channels, kernel_size=1)
+        # Load and preprocess each stem
+        stem_spectrograms = []
+        for stem_path in stem_paths:
+            stem_waveform, _ = torchaudio.load(stem_path)
 
-    def forward(self, x):
-        x = self.depthwise(x)
-        x = self.pointwise(x)
-        return x
+            if stem_waveform.shape[0] != mix_waveform.shape[0]:  
+                stem_waveform = torchaudio.transforms.Resample(orig_freq=_, new_freq=sample_rate)(stem_waveform)  
+            
+            # Ensure the stem has the same number of samples as the mix
+            if stem_waveform.shape[1] < mix_waveform.shape[1]:
+                # Pad if the stem is shorter
+                stem_waveform = F.pad(stem_waveform, (0, mix_waveform.shape[1] - stem_waveform.shape[1]))
+            elif stem_waveform.shape[1] > mix_waveform.shape[1]:
+                # Truncate if the stem is longer
+                stem_waveform = stem_waveform[:, :mix_waveform.shape[1]]
 
-# Define the KAN model with depthwise convolution
-class KANWithDepthwiseConv(nn.Module):
-    def __init__(self, in_channels, out_channels, n_mels, target_length):
-        super(KANWithDepthwiseConv, self).__init__()
-        self.conv1 = DepthwiseSeparableConv(in_channels, out_channels)
-        self.conv2 = DepthwiseSeparableConv(out_channels, out_channels)
-        self.fc = nn.Conv2d(out_channels, in_channels, kernel_size=1)
+            stem_spectrogram = torchaudio.transforms.MelSpectrogram(
+                sample_rate=sample_rate, n_mels=self.n_mels, n_fft=self.n_fft
+            )(stem_waveform)
+            stem_spectrogram = (stem_spectrogram - stem_spectrogram.mean()) / stem_spectrogram.std()
+            stem_spectrograms.append(stem_spectrogram)
 
-    def forward(self, x):
-        x = checkpoint.checkpoint(self._forward_impl, x, use_reentrant=True)
-        return x
+        # Stack the stem spectrograms
+        target_spectrogram = torch.stack(stem_spectrograms, dim=0)  # Shape: [num_stems, channels, n_mels, target_length]
 
-    def _forward_impl(self, x):
-        x = self.conv1(x)
-        x = F.relu(x)
-        x = self.conv2(x)
-        x = F.relu(x)
-        x = self.fc(x)
-        return x
+        return mix_spectrogram, target_spectrogram
 
 # Training function
 def train(model, train_loader, criterion, optimizer, device, epoch, num_epochs, writer, checkpoint_dir, save_interval, logger, accumulation_steps=4):
@@ -137,16 +137,23 @@ def train(model, train_loader, criterion, optimizer, device, epoch, num_epochs, 
     scaler = amp.GradScaler()
 
     optimizer.zero_grad()
-    for i, data in enumerate(train_loader, 0):
-        inputs = data.to(device)
-        print(f"Input shape before unsqueeze: {inputs.shape}")  # Debugging line
+    for i, (inputs, targets) in enumerate(train_loader, 0):
+        inputs, targets = inputs.to(device), targets.to(device)
+
+        # Ensure inputs have the correct shape for Conv2d
+        batch_size, channels, n_mels, target_length = inputs.shape
+        inputs = inputs.view(batch_size, channels, n_mels, target_length)  # Shape: [batch_size, channels, n_mels, target_length]
+        targets = targets.view(batch_size, -1, n_mels, target_length)  # Shape: [batch_size, num_stems, n_mels, target_length]
 
         # Ensure inputs require gradients
         inputs.requires_grad_(True)
 
         with amp.autocast():
             outputs = model(inputs)
-            loss = criterion(outputs, inputs)
+            loss = 0
+            for j in range(targets.size(1)):  # Iterate over the number of stems
+                loss += criterion(outputs[:, j], targets[:, j])
+            loss = loss / targets.size(1)  # Average over the number of stems
             loss = loss / accumulation_steps
 
         scaler.scale(loss).backward()
@@ -174,9 +181,8 @@ def train(model, train_loader, criterion, optimizer, device, epoch, num_epochs, 
     writer.close()
     logger.info('Epoch Made')
     return "Epoch Made"
-
 # Start training
-def start_training(data_dir, batch_size, num_epochs, learning_rate, use_cuda, checkpoint_dir, save_interval, accumulation_steps=4):
+def start_training(data_dir, batch_size, num_epochs, learning_rate, use_cuda, checkpoint_dir, save_interval, accumulation_steps=4, num_stems=7):
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger(__name__)
 
@@ -185,17 +191,18 @@ def start_training(data_dir, batch_size, num_epochs, learning_rate, use_cuda, ch
 
     sample_rate, n_mels, n_fft = detect_parameters(data_dir)
 
-    dataset = CustomDataset(data_dir, n_mels=n_mels, target_length=256, n_fft=n_fft)
+    dataset = StemSeparationDataset(data_dir, n_mels=n_mels, target_length=256, n_fft=n_fft, num_stems=num_stems)
+    logger.info(f"Number of valid file sets (input + corresponding stems): {len(dataset)}")
     if len(dataset) == 0:
         raise ValueError("No valid audio files found in the dataset after filtering.")
 
     train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, pin_memory=True if use_cuda else False)
 
     target_length = 256
-    in_channels = 1  # Single channel for 2D spectrograms
+    in_channels = 1  # Adjusted to handle single-channel input
     out_channels = 64  # Adjust the number of output channels as needed
 
-    model = KANWithDepthwiseConv(in_channels, out_channels, n_mels, target_length).to(device)
+    model = KANWithDepthwiseConv(in_channels, out_channels, n_mels, target_length, num_stems=num_stems).to(device)
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
@@ -210,79 +217,13 @@ def start_training(data_dir, batch_size, num_epochs, learning_rate, use_cuda, ch
 
     return "Training Finished"
 
-# Perform stem separation
-def perform_separation(checkpoint_path, file_path, n_mels=64, target_length=256, n_fft=1024):
-    """Performs stem separation on a given audio file using the loaded model."""
-
-    # Load checkpoint and get in_features
-    checkpoint = torch.load(checkpoint_path)
-    model_state_dict = checkpoint.get('model_state_dict', checkpoint)
-    in_channels = model_state_dict['conv1.depthwise.weight'].shape[1]
-    out_channels = model_state_dict['conv1.pointwise.weight'].shape[0]
-
-    # Load and preprocess audio
-    waveform, sample_rate = torchaudio.load(file_path)
-    if waveform.abs().max() == 0:
-        raise ValueError("The provided audio file is silent and cannot be processed.")
-
-    if waveform.shape[0] == 1:  # Handle mono audio by duplicating to stereo
-        waveform = torch.cat([waveform, waveform], dim=0)
-
-    # Load the model
-    model = load_model(checkpoint_path, in_channels, out_channels, n_mels, target_length)
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    model.to(device)
-
-    # Process the audio in chunks
-    chunk_size = sample_rate * target_length // n_mels
-    num_chunks = (waveform.shape[1] + chunk_size - 1) // chunk_size
-    separated_audio = []
-
-    for i in range(num_chunks):
-        start_idx = i * chunk_size
-        end_idx = min((i + 1) * chunk_size, waveform.shape[1])
-        chunk_waveform = waveform[:, start_idx:end_idx]
-
-        if chunk_waveform.shape[1] < chunk_size:
-            padding = chunk_size - chunk_waveform.shape[1]
-            chunk_waveform = torch.nn.functional.pad(chunk_waveform, (0, padding))
-
-        spectrogram = torchaudio.transforms.MelSpectrogram(
-            sample_rate=sample_rate, n_mels=n_mels, n_fft=n_fft
-        )(chunk_waveform)
-        spectrogram = (spectrogram - spectrogram.mean()) / spectrogram.std()
-
-        spectrogram = spectrogram.unsqueeze(0).to(device)
-
-        with torch.no_grad():
-            separated_spectrogram = model(spectrogram)
-
-        separated_spectrogram = separated_spectrogram.squeeze().cpu()
-        inverse_mel_transform = torchaudio.transforms.InverseMelScale(n_stft=n_fft // 2 + 1, n_mels=n_mels)
-        griffin_lim_transform = torchaudio.transforms.GriffinLim(n_fft=n_fft, n_iter=32)
-
-        separated_waveform = griffin_lim_transform(inverse_mel_transform(separated_spectrogram))
-        separated_audio.append(separated_waveform[:, :chunk_waveform.shape[1]])
-
-    separated_audio = torch.cat(separated_audio, dim=1)
-
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmpfile:
-        sf.write(tmpfile.name, separated_audio.numpy().T, sample_rate)
-        tmpfile_path = tmpfile.name
-
-    return tmpfile_path
-
 # Test CUDA availability
 def test_cuda():
     return torch.cuda.is_available()
 
-if __name__ == "__main__":
-    data_dir = "your_dataset_directory"
-    batch_size = 4
-    num_epochs = 10
-    learning_rate = 0.001
-    use_cuda = True
-    checkpoint_dir = "./checkpoints"
-    save_interval = 1
+def verify_dataset_loading(dataset):
+    for i in range(len(dataset)):
+        mix_spectrogram, target_spectrogram = dataset[i]
+        print(f"Mix Spectrogram Shape: {mix_spectrogram.shape}")
+        print(f"Target Spectrogram Shape: {target_spectrogram.shape}")
 
-    start_training(data_dir, batch_size, num_epochs, learning_rate, use_cuda, checkpoint_dir, save_interval)
