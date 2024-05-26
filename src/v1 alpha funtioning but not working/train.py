@@ -10,9 +10,10 @@ import torch.nn.functional as F
 from torch.utils.tensorboard import SummaryWriter
 import torch.cuda.amp as amp
 import logging
-import matplotlib.pyplot as plt
 import soundfile as sf
+from separate_stems import perform_separation
 from model import KANWithDepthwiseConv, KANDiscriminator, load_model
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -132,31 +133,6 @@ class StemSeparationDataset(Dataset):
         return mix_spectrogram, target_spectrogram
 
 # Training function
-def chunked_log_params(logger, params, chunk_size=100):
-    """Log parameters in chunks to avoid hitting the enter key too much."""
-    chunk = []
-    for name, param in params:
-        chunk.append((name, param.data))
-        if len(chunk) >= chunk_size:
-            logger.info(chunk)
-            chunk = []
-    if chunk:
-        logger.info(chunk)
-
-def save_params_chart(params, epoch, checkpoint_dir):
-    """Save parameter values as a chart."""
-    plt.figure(figsize=(12, 6))
-    for name, param in params:
-        plt.plot(param.detach().cpu().numpy().flatten(), label=name)
-    plt.legend()
-    plt.title(f'Model Parameters at Epoch {epoch}')
-    plt.xlabel('Parameter Index')
-    plt.ylabel('Parameter Value')
-    plt.grid(True)
-    chart_path = os.path.join(checkpoint_dir, f'params_epoch_{epoch}.png')
-    plt.savefig(chart_path)
-    plt.close()
-
 def train(model, discriminator, train_loader, criterion, optimizer_g, optimizer_d, scheduler_g, scheduler_d, device, epoch, num_epochs, writer, checkpoint_dir, save_interval, logger, accumulation_steps=4):
     model.train()
     discriminator.train()
@@ -167,15 +143,19 @@ def train(model, discriminator, train_loader, criterion, optimizer_g, optimizer_
     optimizer_g.zero_grad()
     optimizer_d.zero_grad()
     for i, (inputs, targets) in enumerate(train_loader, 0):
-        inputs = inputs.to(device)
-        targets = targets.to(device)
+        inputs, targets = inputs.to(device), targets.to(device)
+        batch_size, channels, n_mels, target_length = inputs.shape
+        inputs = inputs.view(batch_size, channels, n_mels, target_length)
+        targets = targets.view(batch_size, -1, n_mels, target_length)
+        inputs.requires_grad_(True)
 
-        inputs.requires_grad = True
-
+        # Generator forward and backward pass
         with amp.autocast():
             outputs = model(inputs)
-            targets = targets.view_as(outputs)
-            loss_g = criterion(outputs, targets)
+            loss_g = 0
+            for j in range(targets.size(1)):  # Iterate over the number of stems
+                loss_g += criterion(outputs[:, j], targets[:, j])
+            loss_g = loss_g / targets.size(1)
             loss_g = loss_g / accumulation_steps
 
         scaler.scale(loss_g).backward()
@@ -184,29 +164,24 @@ def train(model, discriminator, train_loader, criterion, optimizer_g, optimizer_
             scaler.step(optimizer_g)
             scaler.update()
             optimizer_g.zero_grad()
-            scheduler_g.step()
 
-        running_loss_g += loss_g.item() * accumulation_steps
-
-        real_spectrograms = targets.view(targets.size(0), -1, targets.size(2), targets.size(3))
-        fake_spectrograms = outputs.detach().view(outputs.size(0), -1, outputs.size(2), outputs.size(3))
-
+        # Discriminator forward and backward pass
         with amp.autocast():
-            fake_labels = discriminator(fake_spectrograms)
-            real_labels = discriminator(real_spectrograms)
+            fake_outputs = outputs.detach()  # Detach the generator's output
+            fake_labels = discriminator(fake_outputs)
+            real_labels = discriminator(targets)
             loss_d = (fake_labels - 1).pow(2).mean() + real_labels.pow(2).mean()
             loss_d = loss_d / accumulation_steps
 
-        scaler.scale(loss_d).backward()
+        scaler.scale(loss_d).backward(retain_graph=True)
 
         if (i + 1) % accumulation_steps == 0:
             scaler.step(optimizer_d)
             scaler.update()
             optimizer_d.zero_grad()
-            scheduler_d.step()
 
+        running_loss_g += loss_g.item() * accumulation_steps
         running_loss_d += loss_d.item() * accumulation_steps
-
         if i % (10 * accumulation_steps) == (10 * accumulation_steps - 1):
             logger.info(f'Epoch [{epoch + 1}/{num_epochs}], Step [{i + 1}/{len(train_loader)}], Loss G: {running_loss_g / 10:.4f}, Loss D: {running_loss_d / 10:.4f}')
             writer.add_scalar('Loss/train_g', running_loss_g / 10, epoch * len(train_loader) + i)
@@ -214,63 +189,24 @@ def train(model, discriminator, train_loader, criterion, optimizer_g, optimizer_
             running_loss_g = 0.0
             running_loss_d = 0.0
 
+    scheduler_g.step(running_loss_g / len(train_loader))
+    scheduler_d.step(running_loss_d / len(train_loader))
+
     logger.info(torch.cuda.memory_summary(device))
 
     if (epoch + 1) % save_interval == 0:
         if not os.path.exists(checkpoint_dir):
             os.makedirs(checkpoint_dir)
         checkpoint_path = os.path.join(checkpoint_dir, f'model_epoch_{epoch + 1}.pt')
-
-        model_state_dict = model.state_dict()
-        discriminator_state_dict = discriminator.state_dict()
-        optimizer_g_state_dict = optimizer_g.state_dict()
-        optimizer_d_state_dict = optimizer_d.state_dict()
-
-        # Log parameter values in chunks
-        model_params = list(model.named_parameters())
-        discriminator_params = list(discriminator.named_parameters())
-        chunked_log_params(logger, model_params)
-        chunked_log_params(logger, discriminator_params)
-
-        # Save parameter values as a chart
-        save_params_chart(model_params, epoch + 1, checkpoint_dir)
-        save_params_chart(discriminator_params, epoch + 1, checkpoint_dir)
-
-        torch.save({
-            'model_state_dict': model_state_dict,
-            'discriminator_state_dict': discriminator_state_dict,
-            'optimizer_g_state_dict': optimizer_g_state_dict,
-            'optimizer_d_state_dict': optimizer_d_state_dict
-        }, checkpoint_path)
-
+        torch.save({'model_state_dict': model.state_dict()}, checkpoint_path)
         logger.info(f"Checkpoint saved at {checkpoint_path}")
 
     writer.close()
     logger.info('Epoch Made')
     return "Epoch Made"
 
-# Dummy implementation for the functions used
-def create_logger(name):
-    import logging
-    logger = logging.getLogger(name)
-    logger.setLevel(logging.INFO)
-    return logger
-
-# Dummy implementation for the training function call
-if __name__ == "__main__":
-    logger = create_logger('train')
-    model = KANWithDepthwiseConv(7, 64, 64, 256, 7)
-    discriminator = KANDiscriminator(7, 64, 64, 256, 7)
-    optimizer_g = torch.optim.Adam(model.parameters())
-    optimizer_d = torch.optim.Adam(discriminator.parameters())
-    scheduler_g = torch.optim.lr_scheduler.StepLR(optimizer_g, step_size=1)
-    scheduler_d = torch.optim.lr_scheduler.StepLR(optimizer_d, step_size=1)
-    writer = SummaryWriter()
-    train_loader = [([torch.randn(7, 64, 64)], [torch.randn(7, 64, 64)])] * 10  # Dummy data loader
-    train(model, discriminator, train_loader, nn.MSELoss(), optimizer_g, optimizer_d, scheduler_g, scheduler_d, 'cuda', 0, 10, writer, './checkpoints', 1, logger)
-    
 # Start training
-def start_training(data_dir, batch_size, num_epochs, learning_rate, use_cuda, checkpoint_dir, save_interval, accumulation_steps=4, num_stems=7):
+def start_training(data_dir, batch_size, num_epochs=50, learning_rate=0.001, use_cuda=True, checkpoint_dir="./checkpoints", save_interval=1, accumulation_steps=4, num_stems=7):
     logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger(__name__)
 
@@ -287,17 +223,16 @@ def start_training(data_dir, batch_size, num_epochs, learning_rate, use_cuda, ch
     train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, pin_memory=True if use_cuda else False)
 
     target_length = 256
-    in_channels = 1  # Adjusted to handle single-channel input
-    out_channels = 64  # Adjust the number of output channels as needed
+    in_channels = 1
+    out_channels = 64
 
     model = KANWithDepthwiseConv(in_channels, out_channels, n_mels, target_length, num_stems=num_stems).to(device)
-    discriminator = KANDiscriminator(in_channels * num_stems, out_channels, n_mels, target_length, num_stems=num_stems).to(device)
+    discriminator = KANDiscriminator(in_channels, out_channels, n_mels, target_length, num_stems).to(device)
     criterion = nn.MSELoss()
     optimizer_g = optim.Adam(model.parameters(), lr=learning_rate)
     optimizer_d = optim.Adam(discriminator.parameters(), lr=learning_rate)
-
-    scheduler_g = optim.lr_scheduler.StepLR(optimizer_g, step_size=1, gamma=0.9)
-    scheduler_d = optim.lr_scheduler.StepLR(optimizer_d, step_size=1, gamma=0.9)
+    scheduler_g = ReduceLROnPlateau(optimizer_g, 'min')
+    scheduler_d = ReduceLROnPlateau(optimizer_d, 'min')
 
     writer = SummaryWriter()
 

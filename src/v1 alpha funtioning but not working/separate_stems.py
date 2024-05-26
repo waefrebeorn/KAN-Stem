@@ -8,18 +8,11 @@ from model import load_model
 def perform_separation(checkpoint_path, file_path, n_mels=64, target_length=256, n_fft=1024, num_stems=7):
     """Performs stem separation on a given audio file using the loaded model."""
 
-    # Resolve the checkpoint path to be absolute
-    checkpoint_path = os.path.abspath(checkpoint_path)
-
     # Load checkpoint and get in_features
     checkpoint = torch.load(checkpoint_path)
     model_state_dict = checkpoint.get('model_state_dict', checkpoint)
     in_channels = model_state_dict['conv1.depthwise.weight'].shape[1]
     out_channels = model_state_dict['conv1.pointwise.weight'].shape[0]
-
-    # Debug: print the loaded state dictionary keys and sizes
-    print(f"Loaded model state dict keys: {model_state_dict.keys()}")
-    print(f"Size of loaded model state dict: {sum(p.numel() for p in model_state_dict.values())}")
 
     # Load and preprocess audio
     waveform, sample_rate = torchaudio.load(file_path)
@@ -59,7 +52,7 @@ def perform_separation(checkpoint_path, file_path, n_mels=64, target_length=256,
         spectrogram = spectrogram.unsqueeze(0).to(device)
 
         with torch.no_grad():
-            separated_spectrograms = model(spectrogram)  # Shape [batch_size, num_stems * channels, height, width]
+            separated_spectrograms = model(spectrogram)  # Shape [batch_size, num_stems, channels, height, width]
         
         for j in range(num_stems):
             separated_spectrogram = separated_spectrograms[0, j].cpu()

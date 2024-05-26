@@ -1,6 +1,5 @@
 import gradio as gr
 import torch
-import os
 from train import start_training, test_cuda
 from separate_stems import perform_separation
 
@@ -10,15 +9,8 @@ def start_training_wrapper(data_dir, batch_size, num_epochs, learning_rate, use_
     return "Training Started"
 
 def perform_separation_wrapper(checkpoint_path, file_path, n_mels, target_length):
-    print("Starting separation...")  # Log start of separation
     result_paths = perform_separation(checkpoint_path, file_path, n_mels, target_length)
-    print("Separation completed.")  # Log end of separation
     return result_paths
-
-def get_checkpoints(checkpoint_dir="./checkpoints"):
-    if not os.path.exists(checkpoint_dir):
-        return []
-    return [os.path.join(checkpoint_dir, f) for f in os.listdir(checkpoint_dir) if f.endswith(".pt")]
 
 with gr.Blocks() as demo:
     with gr.Tab("Training"):
@@ -36,7 +28,7 @@ with gr.Blocks() as demo:
 
     with gr.Tab("Separation"):
         gr.Markdown("### Perform Separation")
-        checkpoint_path = gr.Dropdown(label="Checkpoint Path", choices=get_checkpoints(), value="./checkpoints", allow_custom_value=True)
+        checkpoint_path = gr.Textbox(label="Checkpoint Path")
         file_path = gr.Textbox(label="File Path")
         n_mels = gr.Number(label="Number of Mels", value=64)
         target_length = gr.Number(label="Target Length", value=256)
