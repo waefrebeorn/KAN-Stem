@@ -1,0 +1,6 @@
+2024-05-25 20:54:11.810978: I tensorflow/core/util/port.cc:113] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+2024-05-25 20:54:12.568145: I tensorflow/core/util/port.cc:113] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+Traceback (most recent call last):
+  File "C:\projects\KAN-Stem\src\gradio_app.py", line 4, in <module>
+    from train import start_training, test_cuda
+ImportError: cannot import name 'test_cuda' from 'train' (C:\projects\KAN-Stem\src\train.py)
