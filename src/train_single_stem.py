@@ -11,6 +11,7 @@ from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
 import numpy as np
 import gc
+import random
 
 from model import KANWithDepthwiseConv, KANDiscriminator
 from utils import detect_parameters
@@ -91,7 +92,7 @@ def data_augmentation(inputs):
     return augmented_inputs
 
 class StemSeparationDataset(Dataset):
-    def __init__(self, data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation=False, ignore_files=[]):
+    def __init__(self, data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation=False):
         self.data_dir = data_dir
         self.n_mels = n_mels
         self.target_length = target_length
@@ -99,11 +100,25 @@ class StemSeparationDataset(Dataset):
         self.cache_dir = cache_dir
         self.apply_data_augmentation = apply_data_augmentation
         self.mel_spectrogram = T.MelSpectrogram(sample_rate=16000, n_mels=n_mels, n_fft=n_fft)
-        self.ignore_files = set(ignore_files)
-        self.valid_stems = [f for f in os.listdir(data_dir) if f.startswith("input") and f.endswith(".wav") and f not in self.ignore_files]
+        self.valid_stems = [f for f in os.listdir(data_dir) if f.startswith("input") and f.endswith(".wav")]
+        self.available_targets = self._get_available_targets()
 
     def __len__(self):
         return len(self.valid_stems)
+
+    def _get_available_targets(self):
+        targets = {}
+        for target_stem in ["bass", "drums", "guitar", "keys", "noise", "other", "vocals"]:
+            targets[target_stem] = []
+            for stem_file in self.valid_stems:
+                stem_id = stem_file.split('_')[1].replace('.wav', '')
+                target_file = os.path.join(self.data_dir, f"target_{target_stem}_{stem_id}.wav")
+                if os.path.exists(target_file):
+                    targets[target_stem].append(target_file)
+        return targets
+
+    def _get_random_target(self, target_stem):
+        return random.choice(self.available_targets[target_stem])
 
     def __getitem__(self, index):
         stem_name = self.valid_stems[index]
@@ -129,7 +144,12 @@ class StemSeparationDataset(Dataset):
             target_file = os.path.join(self.data_dir, f"target_{target_stem}_{stem_id}.wav")
             target_audio, _ = read_audio(target_file)
             if target_audio is None:
-                return None
+                # Substitute with a random existing target if the file is missing
+                target_file = self._get_random_target(target_stem)
+                target_audio, _ = read_audio(target_file)
+                if self.apply_data_augmentation:
+                    target_audio = data_augmentation(target_audio)
+
             target_audio = target_audio.float()
             target_mel = self.mel_spectrogram(target_audio).squeeze(0)[:, :self.target_length]
             target_mels.append(target_mel)
@@ -166,10 +186,7 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, learning_
     sample_rate, n_mels, n_fft = detect_parameters(data_dir)
     target_length = 256
 
-    # Get the list of files in the validation directory to ignore them in the training dataset
-    val_files = set(os.listdir(val_dir))
-
-    dataset = StemSeparationDataset(data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation, ignore_files=val_files)
+    dataset = StemSeparationDataset(data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation)
     train_loader = DataLoader(dataset, batch_size, shuffle=True, pin_memory=use_cuda, num_workers=num_workers, collate_fn=collate_fn)
 
     val_dataset = StemSeparationDataset(val_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation=False)
