@@ -48,21 +48,27 @@ class KANWithDepthwiseConv(nn.Module):
         x = x.to(self.device)  # Ensure x is on the correct device
         x = F.relu(self.conv1(x.clone()))  # Clone x before passing to conv1
         x = self.pool1(x)
+        print(f'After conv1 and pool1: {x.shape}')  # Debug print
         conv1_cache_path = self.cache_activation(x, 'conv1')
 
         x = F.relu(self.conv2(x.clone()))  # Clone x before passing to conv2
         x = self.pool2(x)
+        print(f'After conv2 and pool2: {x.shape}')  # Debug print
         conv2_cache_path = self.cache_activation(x, 'conv2')
 
         x = F.relu(self.conv3(x.clone()))  # Clone x before passing to conv3
         x = self.pool3(x)
+        print(f'After conv3 and pool3: {x.shape}')  # Debug print
         conv3_cache_path = self.cache_activation(x, 'conv3')
 
         x = F.relu(self.conv4(x.clone()))  # Clone x before passing to conv4
         x = self.pool4(x)
+        print(f'After conv4 and pool4: {x.shape}')  # Debug print
         x = self.pool5(x)
+        print(f'After additional pool5: {x.shape}')  # Debug print
 
         x = self.flatten(x)
+        print(f'After flatten: {x.shape}')  # Debug print
 
         # Initialize fc1 and fc2 based on the actual input size only once
         if self.fc1 is None or self.fc2 is None:
@@ -72,6 +78,7 @@ class KANWithDepthwiseConv(nn.Module):
         x = F.relu(self.fc1(x))
         x = self.fc2(x)
         x = x.view(-1, self.num_stems, self.n_mels, self.target_length)
+        print(f'After fc1 and fc2: {x.shape}')  # Debug print
 
         # Clean up cached activation files
         for cache_path in [conv1_cache_path, conv2_cache_path, conv3_cache_path]:
@@ -119,40 +126,10 @@ class KANDiscriminator(nn.Module):
         x = torch.sigmoid(self.fc1(x))
         return x
         
-def load_model(checkpoint_path, in_channels, out_channels, n_mels, target_length, num_stems, device, freeze_fc_layers=False):
+def load_model(checkpoint_path, in_channels, out_channels, n_mels, target_length, num_stems, device):
     model = KANWithDepthwiseConv(in_channels, out_channels, n_mels, target_length, num_stems, None, device)
     model.load_state_dict(torch.load(checkpoint_path, map_location=device))
-
-    # Set the model to training mode for fine-tuning
-    model.train()  # Switch to training mode
-
-    if freeze_fc_layers:
-        # Freeze the parameters of fc1 and fc2
-        for param in model.fc1.parameters():
-            param.requires_grad = False
-        for param in model.fc2.parameters():
-            param.requires_grad = False
-
     model.to(device)
+    model.eval()
     return model
-
-if __name__ == "__main__":
-    # Define training parameters
-    data_dir = "path_to_data_dir"
-    batch_size = 32
-    num_epochs = 10
-    learning_rate_g = 0.001
-    learning_rate_d = 0.00005  # Reduced learning rate for the discriminator
-    use_cuda = True
-    checkpoint_dir = "path_to_checkpoint_dir"
-    save_interval = 1
-    accumulation_steps = 1
-    num_stems = 7  # Adjusted to the number of stems in the dataset
-    num_workers = 4
-    cache_dir = "path_to_cache_dir"
-    loss_function = nn.L1Loss()
-    optimizer_name_g = "Adam"
-    optimizer_name_d = "Adam"
-
-    # Start training
-    start_training(data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function, optimizer_name_g, optimizer_name_d, apply_data_augmentation=False)
+    

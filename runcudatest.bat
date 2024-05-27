@@ -1,9 +1,5 @@
 @echo off
-REM Ensure the virtual environment is activated
-call venv\Scripts\activate
+set SCRIPT_DIR=%~dp0
+call %SCRIPT_DIR%venv\Scripts\activate
 
-REM Run the PowerShell script and wait for it to complete
-powershell.exe -NoExit -File .\runcudatest.ps1
-
-REM Deactivate the virtual environment after running the script
-deactivate
+powershell.exe -NoLogo -NoExit -Command "& { %SCRIPT_DIR%runcudatest.ps1 }"

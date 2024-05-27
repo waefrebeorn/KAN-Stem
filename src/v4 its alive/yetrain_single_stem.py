@@ -1,0 +1,484 @@
+import gc
+import os
+import logging
+import warnings
+from torch.utils.tensorboard import SummaryWriter
+
+import numpy as np
+import soundfile as sf
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torchaudio
+import torchaudio.transforms as T
+from torch.utils.data import DataLoader, Dataset
+
+from model import KANWithDepthwiseConv, KANDiscriminator
+from utils import detect_parameters
+from log_setup import logger
+
+warnings.filterwarnings("ignore", message="Lazy modules are a new feature under heavy development so changes to the API or functionality can happen at any moment")
+
+# Enable anomaly detection
+torch.autograd.set_detect_anomaly(True)
+
+def read_audio(file_path):
+    try:
+        data, samplerate = sf.read(file_path)
+        return torch.tensor(data).unsqueeze(0), samplerate
+    except (FileNotFoundError, RuntimeError, sf.LibsndfileError) as e:
+        logger.error(f"Error reading audio file {file_path}: {e}")
+        return None, None
+
+def write_audio(file_path, data, samplerate):
+    data = data.squeeze(0).cpu().numpy()
+    sf.write(file_path, data, samplerate)
+
+def check_device(model, *args):
+    device = next(model.parameters()).device
+    for idx, arg in enumerate(args):
+        if arg.device != device:
+            raise RuntimeError(
+                f"Argument {idx} is on {arg.device}, but expected it to be on {device}"
+            )
+
+def custom_loss(output, target, loss_fn=nn.SmoothL1Loss()):
+    if output.shape != target.shape:
+        min_length = min(output.size(-1), target.size(-1))
+        output = output[..., :min_length]
+        target = target[..., :min_length]
+    loss = loss_fn(output, target)
+    return loss
+
+def data_augmentation(inputs):
+    # Define individual transforms
+    pitch_shift = T.PitchShift(sample_rate=16000, n_steps=2)
+    freq_mask = T.FrequencyMasking(freq_mask_param=15)
+    time_mask = T.TimeMasking(time_mask_param=35)
+    
+    # Apply transforms individually, creating new tensors each time
+    augmented_inputs = pitch_shift(inputs.clone().detach())  # Create a copy of inputs to avoid in-place modification
+    augmented_inputs = freq_mask(augmented_inputs.clone().detach())
+    augmented_inputs = time_mask(augmented_inputs.clone().detach())
+    
+    return augmented_inputs
+
+class StemSeparationDataset(Dataset):
+    def __init__(self, data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation=False):
+        self.data_dir = data_dir
+        self.n_mels = n_mels
+        self.target_length = target_length
+        self.n_fft = n_fft
+        self.cache_dir = cache_dir
+        self.apply_data_augmentation = apply_data_augmentation
+        self.mel_spectrogram = T.MelSpectrogram(
+            sample_rate=16000, n_mels=n_mels, n_fft=n_fft
+        )
+        self.valid_stems = [f for f in os.listdir(data_dir) if f.startswith("input") and f.endswith(".wav")]
+
+    def __len__(self):
+        return len(self.valid_stems)
+
+    def __getitem__(self, index):
+        stem_name = self.valid_stems[index]
+        input_file = os.path.join(self.data_dir, stem_name)
+        input_audio, _ = read_audio(input_file)
+        if input_audio is None:
+            return None
+
+        input_audio = input_audio.float()
+        if self.apply_data_augmentation:
+            input_audio = data_augmentation(input_audio)
+        input_mel = self.mel_spectrogram(input_audio).squeeze(0)[:, :self.target_length]
+
+        parts = stem_name.split('_')
+        if len(parts) < 2:
+            logger.error(f"Invalid input file name format: {stem_name}")
+            return None
+        stem_id = parts[1].replace('.wav', '')
+        
+        target_stems = ["bass", "drums", "guitar", "keys", "noise", "other", "vocals"]
+        target_mels = []
+        for target_stem in target_stems:
+            target_file = os.path.join(self.data_dir, f"target_{target_stem}_{stem_id}.wav")
+            target_audio, _ = read_audio(target_file)
+            if target_audio is None:
+                return None
+            target_audio = target_audio.float()
+            target_mel = self.mel_spectrogram(target_audio).squeeze(0)[:, :self.target_length]
+            target_mels.append(target_mel)
+
+        return {'input': input_mel, 'target': torch.stack(target_mels)}
+
+def collate_fn(batch):
+    batch = [b for b in batch if b is not None]
+    if not batch:
+        return None
+    return torch.utils.data.dataloader.default_collate(batch)
+
+def train_single_stem(stem, data_dir, batch_size, num_epochs, learning_rate, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_workers, cache_dir, loss_function, apply_data_augmentation=False):
+    logger.info("Starting training single stem...")
+    device = torch.device("cuda" if use_cuda and torch.cuda.is_available() else "cpu")
+
+    # Setup TensorBoard writer
+    writer = SummaryWriter(log_dir='./KAN-stem/runs')
+
+    sample_rate, n_mels, n_fft = detect_parameters(data_dir)
+    target_length = 256  # Define your target length here
+
+    dataset = StemSeparationDataset(data_dir, n_mels=n_mels, target_length=target_length, n_fft=n_fft, cache_dir=cache_dir, apply_data_augmentation=apply_data_augmentation)
+    train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, pin_memory=True if use_cuda else False, num_workers=num_workers, collate_fn=collate_fn)
+
+    model = KANWithDepthwiseConv(in_channels=1, out_channels=64, n_mels=n_mels, target_length=target_length, num_stems=1, cache_dir=cache_dir, device=device).to(device)
+    discriminator = KANDiscriminator(in_channels=1, out_channels=64, n_mels=n_mels, target_length=target_length, device=device).to(device)
+    criterion = loss_function
+    optimizer_g = optim.Adam(model.parameters(), lr=learning_rate)
+    optimizer_d = optim.Adam(discriminator.parameters(), lr=learning_rate)
+
+    # Training loop
+    for epoch in range(num_epochs):
+        model.train()
+        discriminator.train()
+        running_loss_g = 0.0
+        running_loss_d = 0.0
+
+        for i, data in enumerate(train_loader):
+            if data is None:
+                continue  # Skip this batch if it's invalid
+
+            inputs = data['input'].unsqueeze(1).to(device)
+            targets = data['target'].to(device)
+
+            # Get actual batch size
+            batch_size = inputs.size(0)
+
+            # Forward pass through the generator
+            outputs = model(inputs.clone())  # Clone inputs to avoid in-place modification
+
+            # Ensure outputs have the same shape as targets for loss calculation
+            target_length = targets.size(-1)
+            outputs = outputs[..., :target_length]
+
+            # Discriminator forward pass and backward pass
+            optimizer_d.zero_grad()
+
+            real_labels = torch.ones(batch_size, 1, device=device, requires_grad=False)
+            fake_labels = torch.zeros(batch_size, 1, device=device, requires_grad=False)
+            loss_d_real_total = 0.0
+            loss_d_fake_total = 0.0
+
+            for stem in range(num_stems):  # Iterate over the number of stems in the target
+                output_stem = outputs[:, stem].unsqueeze(1).clone()  # Clone to avoid in-place modification
+                real_out = discriminator(targets[:, stem].unsqueeze(1).clone())  # Clone the tensor
+                fake_out = discriminator(output_stem.clone())  # Clone to avoid in-place modification
+
+                # Print shapes of the discriminator outputs
+                print(f'real_out shape: {real_out.shape}')
+                print(f'fake_out shape: {fake_out.shape}')
+
+                loss_d_real_total += criterion(real_out, real_labels)
+                loss_d_fake_total += criterion(fake_out, fake_labels)
+
+            # Average the discriminator loss across stems
+            loss_d = (loss_d_real_total + loss_d_fake_total) / 2
+
+            # Debug the backward pass
+            print('Before loss_d.backward()')
+            loss_d.backward(retain_graph=True)
+            print('After loss_d.backward()')
+
+            optimizer_d.step()
+            running_loss_d += loss_d.item()
+
+            # Generator forward pass and backward pass
+            optimizer_g.zero_grad()
+
+            loss_g_total = 0.0
+            for stem in range(num_stems): 
+                output_stem = outputs[:, stem].unsqueeze(1)
+                loss_g_stem = criterion(output_stem, targets[:, stem].unsqueeze(1))  
+                loss_g_total += loss_g_stem
+            loss_g_avg = loss_g_total / num_stems
+
+            loss_g_avg.backward()
+            optimizer_g.step()
+            running_loss_g += loss_g_avg.item()
+
+            # Print shapes of the relevant tensors
+            print(f'output_stem shape: {output_stem.shape}')
+            print(f'targets[:, {stem}].unsqueeze(1) shape: {targets[:, stem].unsqueeze(1).shape}')
+
+            if i % accumulation_steps == 0:
+                logger.info(f'Epoch [{epoch+1}/{num_epochs}], Step [{i+1}/{len(train_loader)}], Loss G: {running_loss_g/accumulation_steps:.4f}, Loss D: {running_loss_d/accumulation_steps:.4f}')
+                # Log the losses to TensorBoard
+                writer.add_scalar('Loss/Generator', running_loss_g / accumulation_steps, epoch * len(train_loader) + i)
+                writer.add_scalar('Loss/Discriminator', running_loss_d / accumulation_steps, epoch * len(train_loader) + i)
+                running_loss_g = 0.0
+                running_loss_d = 0.0
+
+            # Explicitly run garbage collection and clear CUDA cache at the end of each iteration
+            del outputs, targets
+            gc.collect()
+            torch.cuda.empty_cache()
+
+        if (epoch + 1) % save_interval == 0:
+            checkpoint_path = os.path.join(checkpoint_dir, f'checkpoint_epoch_{epoch+1}.pt')
+            torch.save(model.state_dict(), checkpoint_path)
+            logger.info(f'Saved checkpoint: {checkpoint_path}')
+
+    final_model_path = f"{checkpoint_dir}/model_final.pt"
+    torch.save(model.state_dict(), final_model_path)
+    logger.info(f"Training completed. Final model saved at {final_model_path}")
+
+    # Close the TensorBoard writer
+    writer.close()
+
+def start_training(data_dir, batch_size, num_epochs, learning_rate, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function, apply_data_augmentation=False):
+    logger.info(f"Starting training with dataset at {data_dir}")
+
+    device = torch.device("cuda" if use_cuda and torch.cuda.is_available() else "cpu")
+    logger.info(f"Using device: {device}")
+
+    sample_rate, n_mels, n_fft = detect_parameters(data_dir)
+    target_length = 256  # Define your target length here
+
+    dataset = StemSeparationDataset(data_dir, n_mels=n_mels, target_length=target_length, n_fft=n_fft, cache_dir=cache_dir, apply_data_augmentation=apply_data_augmentation)
+    train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, pin_memory=True if use_cuda else False, num_workers=num_workers, collate_fn=collate_fn)
+
+    model = KANWithDepthwiseConv(in_channels=1, out_channels=64, n_mels=n_mels, target_length=target_length, num_stems=num_stems, cache_dir=cache_dir, device=device).to(device)
+    discriminator = KANDiscriminator(in_channels=1, out_channels=64, n_mels=n_mels, target_length=target_length, device=device).to(device)
+    criterion = loss_function
+    optimizer_g = optim.Adam(model.parameters(), lr=learning_rate)
+    optimizer_d = optim.Adam(discriminator.parameters(), lr=learning_rate)
+
+    # Training loop
+    for epoch in range(num_epochs):
+        model.train()
+        discriminator.train()
+        running_loss_g = 0.0
+        running_loss_d = 0.0
+
+        for i, data in enumerate(train_loader):
+            if data is None:
+                continue  # Skip this batch if it's invalid
+
+            inputs = data['input'].unsqueeze(1).to(device)
+            targets = data['target'].to(device)
+
+            # Get actual batch size
+            batch_size = inputs.size(0)
+
+            # Forward pass through the generator
+            outputs = model(inputs.clone())  # Clone inputs to avoid in-place modification
+
+            # Ensure outputs have the same shape as targets for loss calculation
+            target_length = targets.size(-1)
+            outputs = outputs[..., :target_length]
+
+            # Discriminator forward pass and backward pass
+            optimizer_d.zero_grad()
+
+            real_labels = torch.ones(batch_size, 1, device=device, requires_grad=False)
+            fake_labels = torch.zeros(batch_size, 1, device=device, requires_grad=False)
+            loss_d_real_total = 0.0
+            loss_d_fake_total = 0.0
+
+            for stem in range(num_stems):  # Iterate over the number of stems in the target
+                output_stem = outputs[:, stem].unsqueeze(1).clone()  # Clone to avoid in-place modification
+                real_out = discriminator(targets[:, stem].unsqueeze(1).clone())  # Clone the tensor
+                fake_out = discriminator(output_stem.clone())  # Clone to avoid in-place modification
+
+                # Print shapes of the discriminator outputs
+                print(f'real_out shape: {real_out.shape}')
+                print(f'fake_out shape: {fake_out.shape}')
+
+                loss_d_real_total += criterion(real_out, real_labels)
+                loss_d_fake_total += criterion(fake_out, fake_labels)
+
+            # Average the discriminator loss across stems
+            loss_d = (loss_d_real_total + loss_d_fake_total) / 2
+
+            # Debug the backward pass
+            print('Before loss_d.backward()')
+            loss_d.backward(retain_graph=True)
+            print('After loss_d.backward()')
+
+            optimizer_d.step()
+            running_loss_d += loss_d.item()
+
+            # Generator forward pass and backward pass
+            optimizer_g.zero_grad()
+
+            loss_g_total = 0.0
+            for stem in range(num_stems): 
+                output_stem = outputs[:, stem].unsqueeze(1)
+                loss_g_stem = criterion(output_stem, targets[:, stem].unsqueeze(1))  
+                loss_g_total += loss_g_stem
+            loss_g_avg = loss_g_total / num_stems
+
+            loss_g_avg.backward()
+            optimizer_g.step()
+            running_loss_g += loss_g_avg.item()
+
+            # Print shapes of the relevant tensors
+            print(f'output_stem shape: {output_stem.shape}')
+            print(f'targets[:, {stem}].unsqueeze(1) shape: {targets[:, stem].unsqueeze(1).shape}')
+
+            if i % accumulation_steps == 0:
+                logger.info(f'Epoch [{epoch+1}/{num_epochs}], Step [{i+1}/{len(train_loader)}], Loss G: {running_loss_g/accumulation_steps:.4f}, Loss D: {running_loss_d/accumulation_steps:.4f}')
+                # Log the losses to TensorBoard
+                writer.add_scalar('Loss/Generator', running_loss_g / accumulation_steps, epoch * len(train_loader) + i)
+                writer.add_scalar('Loss/Discriminator', running_loss_d / accumulation_steps, epoch * len(train_loader) + i)
+                running_loss_g = 0.0
+                running_loss_d = 0.0
+
+            # Explicitly run garbage collection and clear CUDA cache at the end of each iteration
+            del outputs, targets
+            gc.collect()
+            torch.cuda.empty_cache()
+
+        if (epoch + 1) % save_interval == 0:
+            checkpoint_path = os.path.join(checkpoint_dir, f'checkpoint_epoch_{epoch+1}.pt')
+            torch.save(model.state_dict(), checkpoint_path)
+            logger.info(f'Saved checkpoint: {checkpoint_path}')
+
+    final_model_path = f"{checkpoint_dir}/model_final.pt"
+    torch.save(model.state_dict(), final_model_path)
+    logger.info(f"Training completed. Final model saved at {final_model_path}")
+
+    # Close the TensorBoard writer
+    writer.close()
+
+def start_training(data_dir, batch_size, num_epochs, learning_rate, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function, apply_data_augmentation=False):
+    logger.info(f"Starting training with dataset at {data_dir}")
+
+    device = torch.device("cuda" if use_cuda and torch.cuda.is_available() else "cpu")
+    logger.info(f"Using device: {device}")
+
+    sample_rate, n_mels, n_fft = detect_parameters(data_dir)
+    target_length = 256  # Define your target length here
+
+    dataset = StemSeparationDataset(data_dir, n_mels=n_mels, target_length=target_length, n_fft=n_fft, cache_dir=cache_dir, apply_data_augmentation=apply_data_augmentation)
+    train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True, pin_memory=True if use_cuda else False, num_workers=num_workers, collate_fn=collate_fn)
+
+    model = KANWithDepthwiseConv(in_channels=1, out_channels=64, n_mels=n_mels, target_length=target_length, num_stems=num_stems, cache_dir=cache_dir, device=device).to(device)
+    discriminator = KANDiscriminator(in_channels=1, out_channels=64, n_mels=n_mels, target_length=target_length, device=device).to(device)
+    criterion = loss_function
+    optimizer_g = optim.Adam(model.parameters(), lr=learning_rate)
+    optimizer_d = optim.Adam(discriminator.parameters(), lr=learning_rate)
+
+    # Training loop
+    for epoch in range(num_epochs):
+        model.train()
+        discriminator.train()
+        running_loss_g = 0.0
+        running_loss_d = 0.0
+
+        for i, data in enumerate(train_loader):
+            if data is None:
+                continue  # Skip this batch if it's invalid
+
+            inputs = data['input'].unsqueeze(1).to(device)
+            targets = data['target'].to(device)
+
+            # Get actual batch size
+            batch_size = inputs.size(0)
+
+            # Forward pass through the generator
+            outputs = model(inputs.clone())  # Clone inputs to avoid in-place modification
+
+            # Ensure outputs have the same shape as targets for loss calculation
+            target_length = targets.size(-1)
+            outputs = outputs[..., :target_length]
+
+            # Discriminator forward pass and backward pass
+            optimizer_d.zero_grad()
+
+            real_labels = torch.ones(batch_size, 1, device=device, requires_grad=False)
+            fake_labels = torch.zeros(batch_size, 1, device=device, requires_grad=False)
+            loss_d_real_total = 0.0
+            loss_d_fake_total = 0.0
+
+            for stem in range(num_stems):  # Iterate over the number of stems in the target
+                output_stem = outputs[:, stem].unsqueeze(1).clone()  # Clone to avoid in-place modification
+                real_out = discriminator(targets[:, stem].unsqueeze(1).clone())  # Clone the tensor
+                fake_out = discriminator(output_stem.clone())  # Clone to avoid in-place modification
+
+                # Print shapes of the discriminator outputs
+                print(f'real_out shape: {real_out.shape}')
+                print(f'fake_out shape: {fake_out.shape}')
+
+                loss_d_real_total += criterion(real_out, real_labels)
+                loss_d_fake_total += criterion(fake_out, fake_labels)
+
+            # Average the discriminator loss across stems
+            loss_d = (loss_d_real_total + loss_d_fake_total) / 2
+
+            # Debug the backward pass
+            print('Before loss_d.backward()')
+            loss_d.backward(retain_graph=True)
+            print('After loss_d.backward()')
+
+            optimizer_d.step()
+            running_loss_d += loss_d.item()
+
+            # Generator forward pass and backward pass
+            optimizer_g.zero_grad()
+
+            loss_g_total = 0.0
+            for stem in range(num_stems): 
+                output_stem = outputs[:, stem].unsqueeze(1)
+                loss_g_stem = criterion(output_stem, targets[:, stem].unsqueeze(1))  
+                loss_g_total += loss_g_stem
+            loss_g_avg = loss_g_total / num_stems
+
+            loss_g_avg.backward()
+            optimizer_g.step()
+            running_loss_g += loss_g_avg.item()
+
+            # Print shapes of the relevant tensors
+            print(f'output_stem shape: {output_stem.shape}')
+            print(f'targets[:, {stem}].unsqueeze(1) shape: {targets[:, stem].unsqueeze(1).shape}')
+
+            if i % accumulation_steps == 0:
+                logger.info(f'Epoch [{epoch+1}/{num_epochs}], Step [{i+1}/{len(train_loader)}], Loss G: {running_loss_g/accumulation_steps:.4f}, Loss D: {running_loss_d/accumulation_steps:.4f}')
+                # Log the losses to TensorBoard
+                writer.add_scalar('Loss/Generator', running_loss_g / accumulation_steps, epoch * len(train_loader) + i)
+                writer.add_scalar('Loss/Discriminator', running_loss_d / accumulation_steps, epoch * len(train_loader) + i)
+                running_loss_g = 0.0
+                running_loss_d = 0.0
+
+            # Explicitly run garbage collection and clear CUDA cache at the end of each iteration
+            del outputs, targets
+            gc.collect()
+            torch.cuda.empty_cache()
+
+        if (epoch + 1) % save_interval == 0:
+            checkpoint_path = os.path.join(checkpoint_dir, f'checkpoint_epoch_{epoch+1}.pt')
+            torch.save(model.state_dict(), checkpoint_path)
+            logger.info(f'Saved checkpoint: {checkpoint_path}')
+
+    final_model_path = f"{checkpoint_dir}/model_final.pt"
+    torch.save(model.state_dict(), final_model_path)
+    logger.info(f"Training completed. Final model saved at {final_model_path}")
+
+    # Close the TensorBoard writer
+    writer.close()
+
+if __name__ == "__main__":
+    # Define training parameters
+    data_dir = "path_to_data_dir"
+    batch_size = 32
+    num_epochs = 10
+    learning_rate = 0.001
+    use_cuda = True
+    checkpoint_dir = "path_to_checkpoint_dir"
+    save_interval = 1
+    accumulation_steps = 1
+    num_stems = 7  # Adjusted to the number of stems in the dataset
+    num_workers = 4
+    cache_dir = "path_to_cache_dir"
+    loss_function = nn.L1Loss()
+
+    # Start training
+    start_training(data_dir, batch_size, num_epochs, learning_rate, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function, apply_data_augmentation=False)
