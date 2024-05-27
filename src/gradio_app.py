@@ -17,16 +17,18 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("cached_dataset").setLevel(logging.WARNING)
 
 # Define the functions to wrap the training and separation logic
-def start_training_wrapper(data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_str, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma):
+def start_training_wrapper(data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g_str, loss_function_d_str, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, apply_data_augmentation):
     # Map the selected loss function to the corresponding PyTorch loss function
     loss_function_map = {
         "MSELoss": nn.MSELoss(),
         "L1Loss": nn.L1Loss(),
-        "SmoothL1Loss": nn.SmoothL1Loss()
+        "SmoothL1Loss": nn.SmoothL1Loss(),
+        "BCEWithLogitsLoss": nn.BCEWithLogitsLoss()
     }
-    loss_function = loss_function_map[loss_function_str]
-    start_training(data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma)
-    return f"Training Started with {loss_function_str} and {optimizer_name_g} for Generator, {optimizer_name_d} for Discriminator"
+    loss_function_g = loss_function_map[loss_function_g_str]
+    loss_function_d = loss_function_map[loss_function_d_str]
+    start_training(data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, apply_data_augmentation)
+    return f"Training Started with {loss_function_g_str} for Generator and {loss_function_d_str} for Discriminator, and {optimizer_name_g} for Generator Optimizer, {optimizer_name_d} for Discriminator Optimizer"
 
 def perform_separation_wrapper(checkpoint_path, file_path, n_mels, target_length, n_fft, num_stems, cache_dir):
     print("Starting separation...")  # Log start of separation
@@ -54,18 +56,20 @@ with gr.Blocks() as demo:
         num_stems = gr.Number(label="Number of Stems", value=7)
         num_workers = gr.Number(label="Number of Workers", value=4)
         cache_dir = gr.Textbox(label="Cache Directory", value="./cache")
-        loss_function = gr.Dropdown(label="Loss Function", choices=["MSELoss", "L1Loss", "SmoothL1Loss"], value="MSELoss")
+        loss_function_g = gr.Dropdown(label="Generator Loss Function", choices=["MSELoss", "L1Loss", "SmoothL1Loss", "BCEWithLogitsLoss"], value="MSELoss")
+        loss_function_d = gr.Dropdown(label="Discriminator Loss Function", choices=["MSELoss", "L1Loss", "SmoothL1Loss", "BCEWithLogitsLoss"], value="BCEWithLogitsLoss")
         optimizer_name_g = gr.Dropdown(label="Generator Optimizer", choices=["SGD", "Momentum", "Adagrad", "RMSProp", "Adadelta", "Adam"], value="Adam")
         optimizer_name_d = gr.Dropdown(label="Discriminator Optimizer", choices=["SGD", "Momentum", "Adagrad", "RMSProp", "Adadelta", "Adam"], value="Adam")
         perceptual_loss_flag = gr.Checkbox(label="Use Perceptual Loss", value=True)
         clip_value = gr.Number(label="Gradient Clipping Value", value=1.0)
         scheduler_step_size = gr.Number(label="Scheduler Step Size", value=5)
         scheduler_gamma = gr.Number(label="Scheduler Gamma", value=0.5)
+        apply_data_augmentation = gr.Checkbox(label="Apply Data Augmentation", value=False)
         start_training_button = gr.Button("Start Training")
         output = gr.Textbox(label="Output")
         start_training_button.click(
             start_training_wrapper,
-            inputs=[data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma],
+            inputs=[data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, apply_data_augmentation],
             outputs=output
         )
 

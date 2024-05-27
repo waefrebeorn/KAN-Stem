@@ -133,7 +133,7 @@ def get_optimizer(optimizer_name, model_parameters, learning_rate):
     else:
         raise ValueError(f"Unknown optimizer: {optimizer_name}")
 
-def train_single_stem(stem, data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_workers, cache_dir, loss_function, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, apply_data_augmentation=False):
+def train_single_stem(stem, data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, apply_data_augmentation=False):
     logger.info("Starting training for single stem: %s", stem)  # Log the specific stem being trained
     device = torch.device("cuda" if use_cuda and torch.cuda.is_available() else "cpu")
     writer = SummaryWriter(log_dir=os.path.join(checkpoint_dir, 'runs', f'stem_{stem}_{datetime.now().strftime("%Y%m%d-%H%M%S")}'))  # Separate log for each stem
@@ -146,7 +146,6 @@ def train_single_stem(stem, data_dir, batch_size, num_epochs, learning_rate_g, l
 
     model = KANWithDepthwiseConv(in_channels=1, out_channels=64, n_mels=n_mels, target_length=target_length, num_stems=1, cache_dir=cache_dir, device=device).to(device)  # num_stems=1 for single stem
     discriminator = KANDiscriminator(in_channels=1, out_channels=64, n_mels=n_mels, target_length=target_length, device=device).to(device)
-    criterion = loss_function
     optimizer_g = get_optimizer(optimizer_name_g, model.parameters(), learning_rate_g)
     optimizer_d = get_optimizer(optimizer_name_d, discriminator.parameters(), learning_rate_d)
 
@@ -175,7 +174,7 @@ def train_single_stem(stem, data_dir, batch_size, num_epochs, learning_rate_g, l
             outputs = outputs[..., :target_length]  # Ensure matching length
 
             optimizer_g.zero_grad()
-            loss_g = criterion(outputs, targets)
+            loss_g = loss_function_g(outputs, targets)
             if perceptual_loss_flag:
                 # Add perceptual loss computation here if applicable
                 pass
@@ -191,8 +190,8 @@ def train_single_stem(stem, data_dir, batch_size, num_epochs, learning_rate_g, l
             real_out = discriminator(targets.clone().detach())
             fake_out = discriminator(outputs.clone().detach())
 
-            loss_d_real = nn.BCEWithLogitsLoss()(real_out, real_labels)
-            loss_d_fake = nn.BCEWithLogitsLoss()(fake_out, fake_labels)
+            loss_d_real = loss_function_d(real_out, real_labels)
+            loss_d_fake = loss_function_d(fake_out, fake_labels)
             loss_d = (loss_d_real + loss_d_fake) / 2
 
             loss_d.backward()
@@ -226,7 +225,7 @@ def train_single_stem(stem, data_dir, batch_size, num_epochs, learning_rate_g, l
 
     writer.close()
 
-def start_training(data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, apply_data_augmentation=False):
+def start_training(data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, apply_data_augmentation=False):
     logger.info(f"Starting training with dataset at {data_dir}")
 
     device = torch.device("cuda" if use_cuda and torch.cuda.is_available() else "cpu")
@@ -236,7 +235,7 @@ def start_training(data_dir, batch_size, num_epochs, learning_rate_g, learning_r
     target_length = 256  # Define your target length here
 
     for stem in range(num_stems):
-        train_single_stem(stem, data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_workers, cache_dir, loss_function, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, apply_data_augmentation)
+        train_single_stem(stem, data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, apply_data_augmentation)
 
 if __name__ == "__main__":
     # Define training parameters
@@ -252,13 +251,15 @@ if __name__ == "__main__":
     num_stems = 7  # Adjusted to the number of stems in the dataset
     num_workers = 4
     cache_dir = "path_to_cache_dir"
-    loss_function = nn.L1Loss()
+    loss_function_g = nn.L1Loss()
+    loss_function_d = nn.BCEWithLogitsLoss()
     optimizer_name_g = "Adam"
     optimizer_name_d = "Adam"
     perceptual_loss_flag = True
     clip_value = 1.0
     scheduler_step_size = 5
     scheduler_gamma = 0.5
+    apply_data_augmentation = False
 
     # Start training
-    start_training(data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, apply_data_augmentation=False)
+    start_training(data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, apply_data_augmentation)
