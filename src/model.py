@@ -81,6 +81,8 @@ class KANWithDepthwiseConv(nn.Module):
         return x
 
     def cache_activation(self, x, name):
+        if not os.path.exists(self.cache_dir):
+            os.makedirs(self.cache_dir)
         with tempfile.NamedTemporaryFile(dir=self.cache_dir, delete=False) as temp_file:
             np.save(temp_file.name, x.detach().cpu().numpy())
             return temp_file.name

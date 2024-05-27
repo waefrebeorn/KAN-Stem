@@ -1,6 +1,6 @@
 # Set source and destination paths
-$sourcePath = "K:\KAN-Stem DataSet"
-$destinationPath = "K:\KAN-Stem DataSet"
+$sourcePath = "K:\KAN-Stem DataSet\Chunks"
+$destinationPath = "K:\KAN-Stem DataSet\Chunks"
 
 # Function to get a unique file name if there's a conflict
 function Get-UniqueFileName {
