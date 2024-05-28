@@ -90,7 +90,7 @@ def data_augmentation(inputs, device='cuda' if torch.cuda.is_available() else 'c
     freq_mask = T.FrequencyMasking(freq_mask_param=15).to(device)
     time_mask = T.TimeMasking(time_mask_param=35).to(device)
     
-    augmented_inputs = pitch_shift(inputs.clone().detach())
+    augmented_inputs = pitch_shift(inputs.clone().detach().to(device))
     augmented_inputs = freq_mask(augmented_inputs.clone().detach())
     augmented_inputs = time_mask(augmented_inputs.clone().detach())
     
@@ -120,14 +120,14 @@ class StemSeparationDataset(Dataset):
     def __getitem__(self, index):
         stem_name = self.valid_stems[index]
         input_file = os.path.join(self.data_dir, stem_name)
-        input_audio, _ = read_audio(input_file, device=self.device)
+        input_audio, _ = read_audio(input_file, device='cpu')
         if input_audio is None:
             return None
 
         input_audio = input_audio.float()
         if self.apply_data_augmentation:
             input_audio = data_augmentation(input_audio, device=self.device)
-        input_mel = self.mel_spectrogram(input_audio).squeeze(0)[:, :self.target_length]
+        input_mel = self.mel_spectrogram(input_audio.to(self.device)).squeeze(0)[:, :self.target_length]
 
         parts = stem_name.split('_')
         if len(parts) < 2:
@@ -151,7 +151,7 @@ class StemSeparationDataset(Dataset):
                 if valid_target_files:
                     valid_target_file = random.choice(valid_target_files)
                     logger.warning(f"Substituting {target_file} with {valid_target_file} for stem {target_stem}")
-                    target_audio, _ = read_audio(valid_target_file, device=self.device)
+                    target_audio, _ = read_audio(valid_target_file, device='cpu')
                     if target_audio is not None:
                         wildcard_flag = torch.ones_like(target_audio) * -1  # Indicates this is a substitution
                         target_audio = torch.cat((target_audio, wildcard_flag), dim=-1)
@@ -159,7 +159,7 @@ class StemSeparationDataset(Dataset):
                     logger.error(f"Error: No valid target found for stem '{target_stem}' and ID '{stem_id}'. Skipping this sample.")
                     return None
             else:
-                target_audio, _ = read_audio(target_file, device=self.device)
+                target_audio, _ = read_audio(target_file, device='cpu')
                 if target_audio is not None:
                     normal_flag = torch.zeros_like(target_audio)  # Indicates this is not a substitution
                     target_audio = torch.cat((target_audio, normal_flag), dim=-1)
@@ -169,7 +169,7 @@ class StemSeparationDataset(Dataset):
                 return None
 
             target_audio = target_audio.float()
-            target_mel = self.mel_spectrogram(target_audio[..., :-1]).squeeze(0)[:, :self.target_length]  # Exclude the flag from mel spectrogram
+            target_mel = self.mel_spectrogram(target_audio[..., :-1].to(self.device)).squeeze(0)[:, :self.target_length]  # Exclude the flag from mel spectrogram
             target_mels.append(target_mel)
 
         return {'input': input_mel, 'target': torch.stack(target_mels)}
