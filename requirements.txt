@@ -25,3 +25,4 @@ sympy
 tqdm
 psutil
 librosa
+mir_eval

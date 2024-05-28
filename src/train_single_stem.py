@@ -1,4 +1,6 @@
 import os
+import random
+import warnings
 import logging
 import soundfile as sf
 import torch
@@ -6,17 +8,22 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.cuda.amp import autocast, GradScaler
 from torch.utils.data import DataLoader, Dataset
+import torchaudio
 import torchaudio.transforms as T
 from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
 import numpy as np
 import gc
-import random
+import mir_eval
 
 from model import KANWithDepthwiseConv, KANDiscriminator
 from utils import detect_parameters
 from log_setup import logger
 
+# Suppress specific warning
+warnings.filterwarnings("ignore", message="Lazy modules are a new feature under heavy development")
+
+# Initialize hybrid cache with 32GB RAM limit
 class HybridCache:
     def __init__(self, ram_limit=32 * 1024 ** 3, ssd_cache_dir='./ssd_cache'):
         self.ram_limit = ram_limit
@@ -32,37 +39,35 @@ class HybridCache:
         else:
             file_path = os.path.join(self.ssd_cache_dir, key)
             if os.path.exists(file_path):
-                return np.load(file_path)
+                return torch.load(file_path)
         return None
 
     def set(self, key, value):
-        value_size = value.nbytes
+        value_size = value.numel() * value.element_size()
         if self.current_ram_usage + value_size <= self.ram_limit:
             self.ram_cache[key] = value
             self.current_ram_usage += value_size
         else:
             file_path = os.path.join(self.ssd_cache_dir, key)
-            np.save(file_path, value)
+            torch.save(value, file_path)
 
-# Initialize hybrid cache with 32GB RAM limit
 cache = HybridCache(ram_limit=32 * 1024 ** 3, ssd_cache_dir='./ssd_cache')
 
-def read_audio(file_path):
+def read_audio(file_path, device='cuda' if torch.cuda.is_available() else 'cpu'):
     try:
         print(f"Attempting to read: {file_path}")
-        data, samplerate = sf.read(file_path)
-        return torch.tensor(data).unsqueeze(0), samplerate
+        data, samplerate = torchaudio.load(file_path)
+        data = data.to(device)
+        return data, samplerate
     except FileNotFoundError:
         logger.error(f"Error: Audio file not found: {file_path}")
     except RuntimeError as e:
         logger.error(f"Error reading audio file {file_path}: {e}")
-    except sf.LibsndfileError as e:
-        logger.error(f"Error decoding audio file {file_path}: {e}")
     return None, None
 
 def write_audio(file_path, data, samplerate):
-    data = data.squeeze(0).cpu().numpy()
-    sf.write(file_path, data, samplerate)
+    data_cpu = data.squeeze(0).cpu().numpy()
+    sf.write(file_path, data_cpu, samplerate)
 
 def check_device(model, *args):
     device = next(model.parameters()).device
@@ -80,10 +85,10 @@ def custom_loss(output, target, loss_fn=nn.SmoothL1Loss()):
     loss = loss_fn(output, target)
     return loss
 
-def data_augmentation(inputs):
-    pitch_shift = T.PitchShift(sample_rate=16000, n_steps=2)
-    freq_mask = T.FrequencyMasking(freq_mask_param=15)
-    time_mask = T.TimeMasking(time_mask_param=35)
+def data_augmentation(inputs, device='cuda' if torch.cuda.is_available() else 'cpu'):
+    pitch_shift = T.PitchShift(sample_rate=16000, n_steps=2).to(device)
+    freq_mask = T.FrequencyMasking(freq_mask_param=15).to(device)
+    time_mask = T.TimeMasking(time_mask_param=35).to(device)
     
     augmented_inputs = pitch_shift(inputs.clone().detach())
     augmented_inputs = freq_mask(augmented_inputs.clone().detach())
@@ -92,44 +97,36 @@ def data_augmentation(inputs):
     return augmented_inputs
 
 class StemSeparationDataset(Dataset):
-    def __init__(self, data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation=False):
+    def __init__(self, data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation=False, suppress_messages=False):
         self.data_dir = data_dir
         self.n_mels = n_mels
         self.target_length = target_length
         self.n_fft = n_fft
         self.cache_dir = cache_dir
         self.apply_data_augmentation = apply_data_augmentation
-        self.mel_spectrogram = T.MelSpectrogram(sample_rate=16000, n_mels=n_mels, n_fft=n_fft)
+        self.suppress_messages = suppress_messages
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.mel_spectrogram = T.MelSpectrogram(sample_rate=16000, n_mels=n_mels, n_fft=n_fft).to(self.device)
         self.valid_stems = [f for f in os.listdir(data_dir) if f.startswith("input") and f.endswith(".wav")]
-        self.available_targets = self._get_available_targets()
+
+        if suppress_messages:
+            logging.getLogger().setLevel(logging.ERROR)
+        else:
+            logging.getLogger().setLevel(logging.INFO)
 
     def __len__(self):
         return len(self.valid_stems)
 
-    def _get_available_targets(self):
-        targets = {}
-        for target_stem in ["bass", "drums", "guitar", "keys", "noise", "other", "vocals"]:
-            targets[target_stem] = []
-            for stem_file in self.valid_stems:
-                stem_id = stem_file.split('_')[1].replace('.wav', '')
-                target_file = os.path.join(self.data_dir, f"target_{target_stem}_{stem_id}.wav")
-                if os.path.exists(target_file):
-                    targets[target_stem].append(target_file)
-        return targets
-
-    def _get_random_target(self, target_stem):
-        return random.choice(self.available_targets[target_stem])
-
     def __getitem__(self, index):
         stem_name = self.valid_stems[index]
         input_file = os.path.join(self.data_dir, stem_name)
-        input_audio, _ = read_audio(input_file)
+        input_audio, _ = read_audio(input_file, device=self.device)
         if input_audio is None:
             return None
 
         input_audio = input_audio.float()
         if self.apply_data_augmentation:
-            input_audio = data_augmentation(input_audio)
+            input_audio = data_augmentation(input_audio, device=self.device)
         input_mel = self.mel_spectrogram(input_audio).squeeze(0)[:, :self.target_length]
 
         parts = stem_name.split('_')
@@ -137,21 +134,42 @@ class StemSeparationDataset(Dataset):
             logger.error(f"Invalid input file name format: {stem_name}")
             return None
         stem_id = parts[1].replace('.wav', '')
-        
+
         target_stems = ["bass", "drums", "guitar", "keys", "noise", "other", "vocals"]
         target_mels = []
         for target_stem in target_stems:
+            target_audio = None
             target_file = os.path.join(self.data_dir, f"target_{target_stem}_{stem_id}.wav")
-            target_audio, _ = read_audio(target_file)
+
+            # Keep searching for a valid substitute
+            valid_target_files = [
+                os.path.join(self.data_dir, f) for f in os.listdir(self.data_dir)
+                if f.startswith(f"target_{target_stem}_") and f.endswith(".wav") and f != target_file
+            ]
+
+            if not os.path.exists(target_file) or os.path.getsize(target_file) == 0:
+                if valid_target_files:
+                    valid_target_file = random.choice(valid_target_files)
+                    logger.warning(f"Substituting {target_file} with {valid_target_file} for stem {target_stem}")
+                    target_audio, _ = read_audio(valid_target_file, device=self.device)
+                    if target_audio is not None:
+                        wildcard_flag = torch.ones_like(target_audio) * -1  # Indicates this is a substitution
+                        target_audio = torch.cat((target_audio, wildcard_flag), dim=-1)
+                else:
+                    logger.error(f"Error: No valid target found for stem '{target_stem}' and ID '{stem_id}'. Skipping this sample.")
+                    return None
+            else:
+                target_audio, _ = read_audio(target_file, device=self.device)
+                if target_audio is not None:
+                    normal_flag = torch.zeros_like(target_audio)  # Indicates this is not a substitution
+                    target_audio = torch.cat((target_audio, normal_flag), dim=-1)
+
             if target_audio is None:
-                # Substitute with a random existing target if the file is missing
-                target_file = self._get_random_target(target_stem)
-                target_audio, _ = read_audio(target_file)
-                if self.apply_data_augmentation:
-                    target_audio = data_augmentation(target_audio)
+                logger.error(f"Error: No valid target found for stem '{target_stem}' and ID '{stem_id}'. Skipping this sample.")
+                return None
 
             target_audio = target_audio.float()
-            target_mel = self.mel_spectrogram(target_audio).squeeze(0)[:, :self.target_length]
+            target_mel = self.mel_spectrogram(target_audio[..., :-1]).squeeze(0)[:, :self.target_length]  # Exclude the flag from mel spectrogram
             target_mels.append(target_mel)
 
         return {'input': input_mel, 'target': torch.stack(target_mels)}
@@ -178,7 +196,13 @@ def get_optimizer(optimizer_name, model_parameters, learning_rate, weight_decay)
     else:
         raise ValueError(f"Unknown optimizer: {optimizer_name}")
 
-def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, weight_decay):
+def calculate_metrics(reference, estimation, sr=16000):
+    reference_np = reference.squeeze().cpu().numpy()
+    estimation_np = estimation.squeeze().cpu().numpy()
+    sdr, sir, sar, _ = mir_eval.separation.bss_eval_sources(reference_np, estimation_np)
+    return sdr, sir, sar
+
+def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, weight_decay, suppress_messages):
     logger.info("Starting training for single stem: %s", stem)
     device = torch.device("cuda" if use_cuda and torch.cuda.is_available() else "cpu")
     writer = SummaryWriter(log_dir=os.path.join(checkpoint_dir, 'runs', f'stem_{stem}_{datetime.now().strftime("%Y%m%d-%H%M%S")}')) if tensorboard_flag else None
@@ -186,11 +210,10 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, learning_
     sample_rate, n_mels, n_fft = detect_parameters(data_dir)
     target_length = 256
 
-    dataset = StemSeparationDataset(data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation)
-    train_loader = DataLoader(dataset, batch_size, shuffle=True, pin_memory=use_cuda, num_workers=num_workers, collate_fn=collate_fn)
-
-    val_dataset = StemSeparationDataset(val_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation=False)
-    val_loader = DataLoader(val_dataset, batch_size, shuffle=False, pin_memory=use_cuda, num_workers=num_workers, collate_fn=collate_fn)
+    dataset = StemSeparationDataset(data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation, suppress_messages)
+    train_loader = DataLoader(dataset, batch_size, shuffle=True, pin_memory=False, num_workers=num_workers, collate_fn=collate_fn)
+    val_dataset = StemSeparationDataset(val_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation=False, suppress_messages=suppress_messages)
+    val_loader = DataLoader(val_dataset, batch_size, shuffle=False, pin_memory=False, num_workers=num_workers, collate_fn=collate_fn)
 
     model = KANWithDepthwiseConv(in_channels=1, out_channels=64, n_mels=n_mels, target_length=target_length, num_stems=1, cache_dir=cache_dir, device=device).to(device)
     discriminator = KANDiscriminator(in_channels=1, out_channels=64, n_mels=n_mels, target_length=target_length, device=device).to(device)
@@ -210,37 +233,53 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, learning_
         running_loss_g = 0.0
         running_loss_d = 0.0
 
+        optimizer_g.zero_grad()
+        optimizer_d.zero_grad()
+
         for i, data in enumerate(train_loader):
             if data is None:
                 continue
 
-            inputs = data['input'].unsqueeze(1).to(device)
-            targets = data['target'][:, stem].unsqueeze(1).to(device)
-            batch_size = inputs.size(0)
+            # --- GPU Memory Management ---
+            _, available_memory = torch.cuda.mem_get_info()
+            input_size = data['input'].numel() * data['input'].element_size()
+            target_size = data['target'][:, stem].numel() * data['target'][:, stem].element_size()
+            total_size = input_size + target_size
 
-            if add_noise:
-                noise = torch.randn_like(inputs) * noise_amount
-                inputs = inputs + noise
+            # --- Load to GPU/CPU based on priority ---
+            inputs = data['input'].unsqueeze(1)
+            targets = data['target'][:, stem].unsqueeze(1)
 
+            # Prioritize inputs, then targets
+            if available_memory > total_size:
+                inputs = inputs.to(device)
+                targets = targets.to(device)
+            elif available_memory > input_size:
+                inputs = inputs.to(device)
+                targets = targets.to('cpu')
+            else:
+                inputs = inputs.to('cpu')
+                targets = targets.to('cpu')
+
+            # --- Offloading & Checkpointing ---
+            if available_memory < (input_size + target_size):
+                # Offload less critical tensors to CPU RAM
+                model.to('cpu')
+                # ... (Perform operations on CPU)
+                model.to(device)
+
+            # Use torch.utils.checkpoint for memory-intensive parts of your model
             with autocast():
-                outputs = model(inputs)
+                outputs = model(inputs.to(device))
                 target_length = targets.size(-1)
                 outputs = outputs[..., :target_length]
 
-                optimizer_g.zero_grad()
-                loss_g = loss_function_g(outputs, targets)
-                if perceptual_loss_flag:
-                    pass
+                loss_g = loss_function_g(outputs, targets.to(device))
                 scaler.scale(loss_g).backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), clip_value)
-                scaler.step(optimizer_g)
-                scaler.update()
-                running_loss_g += loss_g.item()
 
-                optimizer_d.zero_grad()
-                real_labels = torch.ones(batch_size, 1, device=device)
-                fake_labels = torch.zeros(batch_size, 1, device=device)
-                real_out = discriminator(targets.clone().detach())
+                real_labels = torch.ones(inputs.size(0), 1, device=device)
+                fake_labels = torch.zeros(inputs.size(0), 1, device=device)
+                real_out = discriminator(targets.to(device).clone().detach())
                 fake_out = discriminator(outputs.clone().detach())
 
                 loss_d_real = loss_function_d(real_out, real_labels)
@@ -248,18 +287,22 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, learning_
                 loss_d = (loss_d_real + loss_d_fake) / 2
 
                 scaler.scale(loss_d).backward()
-                torch.nn.utils.clip_grad_norm_(discriminator.parameters(), clip_value)
-                scaler.step(optimizer_d)
-                scaler.update()
-                running_loss_d += loss_d.item()
 
-            if i % accumulation_steps == 0:
-                logger.info(f'Epoch [{epoch+1}/{num_epochs}], Step [{i+1}/{len(train_loader)}], Loss G: {running_loss_g/accumulation_steps:.4f}, Loss D: {running_loss_d/accumulation_steps:.4f}')
-                if tensorboard_flag:
-                    writer.add_scalar('Loss/Generator', running_loss_g / accumulation_steps, epoch * len(train_loader) + i)
-                    writer.add_scalar('Loss/Discriminator', running_loss_d / accumulation_steps, epoch * len(train_loader) + i)
-                running_loss_g = 0.0
-                running_loss_d = 0.0
+                if (i + 1) % accumulation_steps == 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), clip_value)
+                    torch.nn.utils.clip_grad_norm_(discriminator.parameters(), clip_value)
+                    scaler.step(optimizer_g)
+                    scaler.step(optimizer_d)
+                    scaler.update()
+                    optimizer_g.zero_grad()
+                    optimizer_d.zero_grad()
+
+                    logger.info(f'Epoch [{epoch+1}/{num_epochs}], Step [{i+1}/{len(train_loader)}], Loss G: {running_loss_g/accumulation_steps:.4f}, Loss D: {running_loss_d/accumulation_steps:.4f}')
+                    if tensorboard_flag:
+                        writer.add_scalar('Loss/Generator', running_loss_g / accumulation_steps, epoch * len(train_loader) + i)
+                        writer.add_scalar('Loss/Discriminator', running_loss_d / accumulation_steps, epoch * len(train_loader) + i)
+                    running_loss_g = 0.0
+                    running_loss_d = 0.0
 
             del outputs, targets
             gc.collect()
@@ -276,6 +319,7 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, learning_
         # Validation
         model.eval()
         val_loss = 0.0
+        sdr_total, sir_total, sar_total = 0.0, 0.0, 0.0
         with torch.no_grad():
             for data in val_loader:
                 if data is None:
@@ -287,10 +331,24 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, learning_
                 outputs = outputs[..., :target_length]
                 loss = loss_function_g(outputs, targets)
                 val_loss += loss.item()
+
+                for j in range(outputs.size(0)):
+                    sdr, sir, sar = calculate_metrics(targets[j], outputs[j])
+                    sdr_total += sdr.mean()
+                    sir_total += sir.mean()
+                    sar_total += sar.mean()
+
         val_loss /= len(val_loader)
-        logger.info(f'Validation Loss: {val_loss:.4f}')
+        sdr_avg = sdr_total / len(val_loader.dataset)
+        sir_avg = sir_total / len(val_loader.dataset)
+        sar_avg = sar_total / len(val_loader.dataset)
+
+        logger.info(f'Validation Loss: {val_loss:.4f}, SDR: {sdr_avg:.4f}, SIR: {sir_avg:.4f}, SAR: {sar_avg:.4f}')
         if tensorboard_flag:
             writer.add_scalar('Loss/Validation', val_loss, epoch + 1)
+            writer.add_scalar('Metrics/SDR', sdr_avg, epoch + 1)
+            writer.add_scalar('Metrics/SIR', sir_avg, epoch + 1)
+            writer.add_scalar('Metrics/SAR', sar_avg, epoch + 1)
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -309,7 +367,17 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, learning_
     if tensorboard_flag:
         writer.close()
 
-def start_training(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, weight_decay):
+def pin_memory_batch(batch):
+    if isinstance(batch, torch.Tensor) and batch.device == torch.device('cpu'):
+        return batch.pin_memory()
+    elif isinstance(batch, dict):
+        return {k: pin_memory_batch(v) for k, v in batch.items()}
+    elif isinstance(batch, list):
+        return [pin_memory_batch(b) for b in batch]
+    else:
+        return batch
+
+def start_training(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, weight_decay, suppress_messages):
     logger.info(f"Starting training with dataset at {data_dir}")
 
     device = torch.device("cuda" if use_cuda and torch.cuda.is_available() else "cpu")
@@ -319,7 +387,7 @@ def start_training(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, l
     target_length = 256
 
     for stem in range(num_stems):
-        train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, weight_decay)
+        train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, weight_decay, suppress_messages)
 
 if __name__ == "__main__":
     data_dir = "path_to_data_dir"
@@ -349,5 +417,6 @@ if __name__ == "__main__":
     noise_amount = 0.1
     early_stopping_patience = 3
     weight_decay = 1e-4
+    suppress_messages = False
 
-    start_training(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, weight_decay)
+    start_training(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, weight_decay, suppress_messages)

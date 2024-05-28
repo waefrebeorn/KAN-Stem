@@ -89,22 +89,17 @@ def perform_separation(checkpoint_path, file_path, n_mels=64, target_length=256,
     return output_paths
 
 if __name__ == "__main__":
-    # Define training parameters
-    data_dir = "path_to_data_dir"
-    batch_size = 32
-    num_epochs = 10
-    learning_rate_g = 0.001
-    learning_rate_d = 0.00005  # Reduced learning rate for the discriminator
-    use_cuda = True
-    checkpoint_dir = "path_to_checkpoint_dir"
-    save_interval = 1
-    accumulation_steps = 1
-    num_stems = 7  # Adjusted to the number of stems in the dataset
-    num_workers = 4
-    cache_dir = "path_to_cache_dir"
-    loss_function = nn.L1Loss()
-    optimizer_name_g = "Adam"
-    optimizer_name_d = "Adam"
+    import argparse
 
-    # Start training
-    start_training(data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function, optimizer_name_g, optimizer_name_d, apply_data_augmentation=False)
+    parser = argparse.ArgumentParser(description='Perform stem separation on an audio file.')
+    parser.add_argument('--checkpoint', type=str, required=True, help='Path to the model checkpoint')
+    parser.add_argument('--file', type=str, required=True, help='Path to the input audio file')
+    parser.add_argument('--n_mels', type=int, default=64, help='Number of mel bands')
+    parser.add_argument('--target_length', type=int, default=256, help='Target length of the output')
+    parser.add_argument('--n_fft', type=int, default=1024, help='Number of FFT components')
+    parser.add_argument('--num_stems', type=int, default=7, help='Number of stems to separate')
+    parser.add_argument('--cache_dir', type=str, default='./cache', help='Cache directory')
+
+    args = parser.parse_args()
+
+    perform_separation(args.checkpoint, args.file, args.n_mels, args.target_length, args.n_fft, args.num_stems, args.cache_dir)
