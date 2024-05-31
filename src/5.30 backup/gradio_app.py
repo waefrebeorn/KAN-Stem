@@ -2,9 +2,10 @@ import os
 import gradio as gr
 import torch
 import torch.nn as nn
-from train import start_training_wrapper, stop_training_wrapper
+from multiprocessing import Process
+from train_utils import start_training, stop_training_wrapper, start_training_wrapper, run_training
 from separate_stems import perform_separation
-from model import load_model
+from model import KANWithDepthwiseConv, load_model
 import torchaudio.transforms as T
 import logging
 import soundfile as sf
@@ -14,18 +15,9 @@ import mir_eval
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-# Suppress httpx, httpcore, urllib3, and tensorflow logs below WARNING level
-httpx_logger = logging.getLogger("httpx")
-httpcore_logger = logging.getLogger("httpcore")
-urllib3_logger = logging.getLogger("urllib3")
-tensorflow_logger = logging.getLogger("tensorflow")
-httpx_logger.setLevel(logging.WARNING)
-httpcore_logger.setLevel(logging.WARNING)
-urllib3_logger.setLevel(logging.WARNING)
-tensorflow_logger.setLevel(logging.WARNING)
-
 training_process = None
 
+# Define other functions and main logic
 def read_audio(file_path, suppress_messages=False):
     try:
         if not suppress_messages:
@@ -56,22 +48,27 @@ def get_checkpoints(checkpoint_dir="./checkpoints"):
     return [os.path.join(checkpoint_dir, f) for f in os.listdir(checkpoint_dir) if f.endswith(".pt")]
 
 def evaluate_model(input_audio_path, checkpoint_path, n_mels, target_length, n_fft, num_stems, cache_dir, suppress_reading_messages):
+    # Load the input audio
     input_audio, sr = read_audio(input_audio_path, suppress_messages=suppress_reading_messages)
     if input_audio is None:
         return "Error: Input audio could not be read", "", ""
 
+    # Load the trained model
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = load_model(checkpoint_path, 1, 64, n_mels, target_length, num_stems, device)
     model.eval()
 
+    # Perform inference
     with torch.no_grad():
         input_mel = T.MelSpectrogram(sample_rate=sr, n_mels=n_mels, n_fft=n_fft)(input_audio.float()).unsqueeze(0).to(device)
         output_mel = model(input_mel).cpu()
     
+    # Inverse mel-spectrogram to get the audio back
     inverse_mel_transform = T.InverseMelScale(n_stft=n_fft // 2 + 1, n_mels=n_mels)
     griffin_lim_transform = T.GriffinLim(n_fft=n_fft, n_iter=32)
     output_audio = griffin_lim_transform(inverse_mel_transform(output_mel.squeeze(0))).numpy()
 
+    # Calculate metrics
     sdr, sir, sar = calculate_metrics(input_audio.numpy(), output_audio, sr)
 
     return sdr, sir, sar
