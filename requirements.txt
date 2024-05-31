@@ -27,3 +27,5 @@ psutil
 librosa
 mir_eval
 gputil
+ffmpeg
+pydub

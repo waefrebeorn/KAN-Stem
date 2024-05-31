@@ -12,7 +12,6 @@ logger = logging.getLogger(__name__)
 
 def worker(input_queue, output_queue, mel_spectrogram_params, data_dir, target_length, device_str, apply_data_augmentation, valid_stems, lock, num_processed_stems, cache_dir):
     device = torch.device(device_str)
-    mel_spectrogram = T.MelSpectrogram(**mel_spectrogram_params).to(device)
     process_name = f"Worker-{current_process().pid}"
     logger.info(f"{process_name}: Started with {len(valid_stems)} stems to process.")
 
@@ -42,6 +41,7 @@ def worker(input_queue, output_queue, mel_spectrogram_params, data_dir, target_l
                 logger.info(f"{process_name}: Successfully loaded from cache: {cache_path}")
             else:
                 start_time = time.time()
+                mel_spectrogram = T.MelSpectrogram(**mel_spectrogram_params).to(device)
                 data = load_and_preprocess(file_path, mel_spectrogram, target_length, apply_data_augmentation, device)
                 end_time = time.time()
 

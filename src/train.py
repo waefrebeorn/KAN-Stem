@@ -70,26 +70,22 @@ def start_training(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, l
     model, discriminator, optimizer_g, optimizer_d = create_model_and_optimizer(device, n_mels, target_length, cache_dir, learning_rate_g, learning_rate_d, optimizer_name_g, optimizer_name_d, weight_decay)
 
     for stem in range(num_stems):
-        train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, device, checkpoint_dir, save_interval, accumulation_steps, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d, model, discriminator, optimizer_g, optimizer_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep)
+        # Create DataLoaders outside the train_single_stem function
+        dataset = StemSeparationDataset(data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation, suppress_warnings, num_workers, device='cpu' if use_cpu_for_prep else device)
+        val_dataset = StemSeparationDataset(val_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation=False, suppress_messages=suppress_warnings, num_workers=num_workers, device='cpu' if use_cpu_for_prep else device)
+        
+        logger.info("Processing stems for training and validation datasets.")
+        dataset._process_stems()
+        val_dataset._process_stems()
+        
+        train_loader = DataLoader(dataset, batch_size, shuffle=True, pin_memory=True, num_workers=num_workers, collate_fn=collate_fn)
+        val_loader = DataLoader(val_dataset, batch_size, shuffle=False, pin_memory=True, num_workers=num_workers, collate_fn=collate_fn)
+        
+        train_single_stem(stem, train_loader, val_loader, num_epochs, device, checkpoint_dir, save_interval, accumulation_steps, model, discriminator, optimizer_g, optimizer_d, loss_function_g, loss_function_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, early_stopping_patience, weight_decay, suppress_reading_messages)
 
-def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, device, checkpoint_dir, save_interval, accumulation_steps, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d, model, discriminator, optimizer_g, optimizer_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep):
+def train_single_stem(stem, train_loader, val_loader, num_epochs, device, checkpoint_dir, save_interval, accumulation_steps, model, discriminator, optimizer_g, optimizer_d, loss_function_g, loss_function_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, early_stopping_patience, weight_decay, suppress_reading_messages):
     logger.info("Starting training for single stem: %s", stem)
     writer = SummaryWriter(log_dir=os.path.join(checkpoint_dir, 'runs', f'stem_{stem}_{datetime.now().strftime("%Y%m%d-%H%M%S")}')) if tensorboard_flag else None
-
-    sample_rate, n_mels, n_fft = detect_parameters(data_dir)
-    target_length = 256
-
-    dataset = StemSeparationDataset(data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation, suppress_warnings, num_workers, device='cpu' if use_cpu_for_prep else device)
-    logger.info("Processing stems for training dataset.")
-    dataset._process_stems()
-    train_loader = DataLoader(dataset, batch_size, shuffle=True, pin_memory=True, num_workers=num_workers, collate_fn=collate_fn)
-    logger.info("Finished processing stems for training dataset.")
-
-    val_dataset = StemSeparationDataset(val_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation=False, suppress_messages=suppress_warnings, num_workers=num_workers, device='cpu' if use_cpu_for_prep else device)
-    logger.info("Processing stems for validation dataset.")
-    val_dataset._process_stems()
-    val_loader = DataLoader(val_dataset, batch_size, shuffle=False, pin_memory=True, num_workers=num_workers, collate_fn=collate_fn)
-    logger.info("Finished processing stems for validation dataset.")
 
     scheduler_g = optim.lr_scheduler.CosineAnnealingLR(optimizer_g, T_max=num_epochs)
     scheduler_d = optim.lr_scheduler.CosineAnnealingLR(optimizer_d, T_max=num_epochs)
@@ -114,39 +110,23 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, learning_
 
             logger.debug(f"Processing batch {i+1}/{len(train_loader)}")
 
-            _, available_memory = torch.cuda.mem_get_info()
-            input_size = data['input'].numel() * data['input'].element_size()
-            target_size = data['target'][:, stem].numel() * data['target'][:, stem].element_size()
-            total_size = input_size + target_size
-
             inputs = data['input'].unsqueeze(1)
             targets = data['target'][:, stem].unsqueeze(1)
 
-            if available_memory > total_size:
-                inputs = inputs.to(device)
-                targets = targets.to(device)
-            elif available_memory > input_size:
-                inputs = inputs.to(device)
-                targets = targets.to('cpu')
-            else:
-                inputs = inputs.to('cpu')
-                targets = targets.to('cpu')
-
-            if available_memory < (input_size + target_size):
-                model.to('cpu')
-                model.to(device)
+            inputs = inputs.to(device)
+            targets = targets.to(device)
 
             with torch.cuda.amp.autocast():
-                outputs = model(inputs.to(device))
+                outputs = model(inputs)
                 target_length = targets.size(-1)
                 outputs = outputs[..., :target_length]
 
-                loss_g = loss_function_g(outputs.to(device), targets.to(device))
+                loss_g = loss_function_g(outputs, targets)
                 scaler.scale(loss_g).backward()
 
                 real_labels = torch.ones(inputs.size(0), 1, device=device)
                 fake_labels = torch.zeros(inputs.size(0), 1, device=device)
-                real_out = discriminator(targets.to(device).clone().detach())
+                real_out = discriminator(targets.clone().detach())
                 fake_out = discriminator(outputs.clone().detach())
 
                 loss_d_real = loss_function_d(real_out, real_labels)

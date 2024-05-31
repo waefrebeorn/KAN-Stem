@@ -2,12 +2,12 @@ import os
 import torch
 import torchaudio.transforms as T
 from torch.utils.data import Dataset
-from multiprocessing import Queue, Process, Value, Lock
+from torch.multiprocessing import Queue, Process, Value, Lock
 import logging
 import queue
 import hashlib
 from utils import load_and_preprocess
-from worker import worker  # Import the worker function
+from worker import worker
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +24,7 @@ class StemSeparationDataset(Dataset):
         self.device = device
         self.input_queue = Queue()
         self.output_queue = Queue()
-        self.valid_stems = [f for f in os.listdir(data_dir) if f.endswith('.wav')]
+        self.valid_stems = [f for f in os.listdir(data_dir) if f.endswith(('.wav', '.ogg'))]
 
         self.num_processed_stems = Value('i', 0)
         self.lock = Lock()

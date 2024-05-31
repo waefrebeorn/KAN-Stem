@@ -9,6 +9,8 @@ import torchaudio.transforms as T
 import logging
 import soundfile as sf
 import mir_eval
+from prepare_dataset import organize_and_prepare_dataset_gradio
+from generate_other_noise import generate_shuffled_noise_gradio
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -158,6 +160,32 @@ with gr.Blocks() as demo:
             evaluate_model,
             inputs=[eval_file_path, eval_checkpoint_path, eval_n_mels, eval_target_length, eval_n_fft, eval_num_stems, eval_cache_dir, suppress_reading_messages],
             outputs=[sdr_output, sir_output, sar_output]
+        )
+
+    with gr.Tab("Prepare Dataset"):
+        gr.Markdown("### Prepare Dataset")
+        input_dir = gr.Textbox(label="Input Directory")
+        output_dir = gr.Textbox(label="Output Directory")
+        num_examples = gr.Number(label="Number of Examples", value=100)
+        prepare_dataset_button = gr.Button("Prepare Dataset")
+        prepare_output = gr.Textbox(label="Output")
+        prepare_dataset_button.click(
+            organize_and_prepare_dataset_gradio,
+            inputs=[input_dir, output_dir, num_examples],
+            outputs=prepare_output
+        )
+
+    with gr.Tab("Generate Other Noise"):
+        gr.Markdown("### Generate Shuffled Noise for 'Other' Category")
+        noise_input_dir = gr.Textbox(label="Input Directory")
+        noise_output_dir = gr.Textbox(label="Output Directory")
+        noise_num_examples = gr.Number(label="Number of Examples", value=100)
+        generate_noise_button = gr.Button("Generate Noise")
+        noise_output = gr.Textbox(label="Output")
+        generate_noise_button.click(
+            generate_shuffled_noise_gradio,
+            inputs=[noise_input_dir, noise_output_dir, noise_num_examples],
+            outputs=noise_output
         )
 
 if __name__ == "__main__":
