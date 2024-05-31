@@ -9,7 +9,7 @@ import psutil
 import GPUtil
 import time
 from multiprocessing import Value, Lock
-import torch.nn as nn  # Add this import statement
+import torch.nn as nn
 
 logger = logging.getLogger(__name__)
 

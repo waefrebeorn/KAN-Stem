@@ -2,17 +2,17 @@ import os
 import torch
 import torchaudio.transforms as T
 from torch.utils.data import Dataset
-from torch.multiprocessing import Queue, Process, Value, Lock
+from torch.multiprocessing import Manager, Queue, Value, Lock, Process
 import logging
 import queue
 import hashlib
 from utils import load_and_preprocess
-from worker import worker
+from worker import worker  # Import the worker function
 
 logger = logging.getLogger(__name__)
 
 class StemSeparationDataset(Dataset):
-    def __init__(self, data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation=False, suppress_messages=False, num_workers=4, device='cpu'):
+    def __init__(self, data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation=False, suppress_messages=False, num_workers=4, device_str='cpu'):
         self.data_dir = data_dir
         self.n_mels = n_mels
         self.target_length = target_length
@@ -21,9 +21,11 @@ class StemSeparationDataset(Dataset):
         self.apply_data_augmentation = apply_data_augmentation
         self.suppress_messages = suppress_messages
         self.num_workers = num_workers
-        self.device = device
-        self.input_queue = Queue()
-        self.output_queue = Queue()
+        self.device_str = device_str
+
+        manager = Manager()
+        self.input_queue = manager.Queue()
+        self.output_queue = manager.Queue()
         self.valid_stems = [f for f in os.listdir(data_dir) if f.endswith(('.wav', '.ogg'))]
 
         self.num_processed_stems = Value('i', 0)
@@ -39,7 +41,6 @@ class StemSeparationDataset(Dataset):
         }
 
         self.workers = self._start_workers()
-        self.processed_data = []
         self._process_stems()
 
     def _get_cache_key(self, stem_name):
@@ -70,19 +71,20 @@ class StemSeparationDataset(Dataset):
 
     def _start_workers(self):
         workers = []
-        stems_per_worker = len(self.valid_stems) // self.num_workers
-        for i in range(self.num_workers):
-            start_idx = i * stems_per_worker
-            end_idx = start_idx + stems_per_worker if i < self.num_workers - 1 else len(self.valid_stems)
-            worker_stems = self.valid_stems[start_idx:end_idx]
-            
-            p = Process(target=worker, args=(
-                self.input_queue, self.output_queue, self.mel_spectrogram_params, 
-                self.data_dir, self.target_length, str(self.device), self.apply_data_augmentation,
-                worker_stems, self.lock, self.num_processed_stems, self.cache_dir
-            ))
-            p.start()
-            workers.append(p)
+        if self.num_workers > 0:
+            stems_per_worker = len(self.valid_stems) // self.num_workers
+            for i in range(self.num_workers):
+                start_idx = i * stems_per_worker
+                end_idx = start_idx + stems_per_worker if i < self.num_workers - 1 else len(self.valid_stems)
+                worker_stems = self.valid_stems[start_idx:end_idx]
+                
+                p = Process(target=worker, args=(
+                    self.input_queue, self.output_queue, self.mel_spectrogram_params, 
+                    self.data_dir, self.target_length, self.device_str, self.apply_data_augmentation,
+                    worker_stems, self.lock, self.num_processed_stems, self.cache_dir
+                ))
+                p.start()
+                workers.append(p)
         return workers
 
     def _process_stems(self):
@@ -132,8 +134,9 @@ class StemSeparationDataset(Dataset):
     def _process_single_stem(self, stem_name):
         file_path = os.path.join(self.data_dir, stem_name)
         logger.info(f"Loading and preprocessing: {file_path}")
-        mel_spectrogram = T.MelSpectrogram(**self.mel_spectrogram_params).to(self.device)
-        return load_and_preprocess(file_path, mel_spectrogram, self.target_length, self.apply_data_augmentation, self.device)
+        device = torch.device(self.device_str)
+        mel_spectrogram = T.MelSpectrogram(**self.mel_spectrogram_params).to(device)
+        return load_and_preprocess(file_path, mel_spectrogram, self.target_length, self.apply_data_augmentation, device)
 
 def collate_fn(batch):
     batch = [b for b in batch if b is not None]
