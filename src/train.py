@@ -1,16 +1,18 @@
 import os
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import DataLoader
 from datetime import datetime
 import torch.multiprocessing as mp
 import logging
+import torch.nn.functional as F
+import torchvision.models as models
+from torchvision.models import VGG16_Weights
 
 from dataset import StemSeparationDataset, collate_fn
-from utils import detect_parameters, get_optimizer, compute_adversarial_loss, PerceptualLoss
+from utils import detect_parameters, get_optimizer, PerceptualLoss
 from model import KANWithDepthwiseConv, KANDiscriminator
 
 mp.set_start_method('spawn', force=True)
@@ -68,8 +70,17 @@ def create_model_and_optimizer(device, n_mels, target_length, cache_dir, learnin
     optimizer_d = get_optimizer(optimizer_name_d, discriminator.parameters(), learning_rate_d, weight_decay)
     return model, discriminator, optimizer_g, optimizer_d
 
-def start_training(data_dir, val_dir, batch_size, num_epochs, initial_lr_g, initial_lr_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep, suppress_detailed_logs):
+def log_training_parameters(params):
+    logger.info("Training Parameters Selected:")
+    for key, value in params.items():
+        logger.info(f"{key}: {value}")
+
+def convert_to_3_channels(tensor):
+    return tensor.expand(-1, 3, -1, -1)
+
+def start_training(data_dir, val_dir, batch_size, num_epochs, initial_lr_g, initial_lr_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep, discriminator_update_interval, label_smoothing_real, label_smoothing_fake, suppress_detailed_logs):
     global device
+
     logger.info(f"Starting training with dataset at {data_dir}")
     device_str = 'cuda' if use_cuda and torch.cuda.is_available() else 'cpu'
     device_prep = 'cpu' if use_cpu_for_prep else device_str
@@ -80,14 +91,54 @@ def start_training(data_dir, val_dir, batch_size, num_epochs, initial_lr_g, init
 
     preprocess_and_cache_dataset(data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation, suppress_warnings, num_workers, device_prep)
     
+    # Log the parameters after preprocessing
+    params = {
+        "Data Directory": data_dir,
+        "Validation Directory": val_dir,
+        "Batch Size": batch_size,
+        "Number of Epochs": num_epochs,
+        "Generator Learning Rate": initial_lr_g,
+        "Discriminator Learning Rate": initial_lr_d,
+        "Use CUDA": use_cuda,
+        "Checkpoint Directory": checkpoint_dir,
+        "Save Interval": save_interval,
+        "Accumulation Steps": accumulation_steps,
+        "Number of Stems": num_stems,
+        "Number of Workers": num_workers,
+        "Cache Directory": cache_dir,
+        "Generator Loss Function": str(loss_function_g),
+        "Discriminator Loss Function": str(loss_function_d),
+        "Generator Optimizer": optimizer_name_g,
+        "Discriminator Optimizer": optimizer_name_d,
+        "Use Perceptual Loss": perceptual_loss_flag,
+        "Perceptual Loss Weight": perceptual_loss_weight,
+        "Gradient Clipping Value": clip_value,
+        "Scheduler Step Size": scheduler_step_size,
+        "Scheduler Gamma": scheduler_gamma,
+        "Enable TensorBoard Logging": tensorboard_flag,
+        "Apply Data Augmentation": apply_data_augmentation,
+        "Add Noise": add_noise,
+        "Noise Amount": noise_amount,
+        "Early Stopping Patience": early_stopping_patience,
+        "Weight Decay": weight_decay,
+        "Suppress Warnings": suppress_warnings,
+        "Suppress Reading Messages": suppress_reading_messages,
+        "Use CPU for Preparation": use_cpu_for_prep,
+        "Discriminator Update Interval": discriminator_update_interval,
+        "Label Smoothing Real": label_smoothing_real,
+        "Label Smoothing Fake": label_smoothing_fake,
+        "Suppress Detailed Logs": suppress_detailed_logs
+    }
+    log_training_parameters(params)
+
     for stem in range(num_stems):
         try:
-            train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_str, checkpoint_dir, save_interval, accumulation_steps, initial_lr_g, initial_lr_d, optimizer_name_g, optimizer_name_d, loss_function_g, loss_function_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, num_workers, early_stopping_patience, weight_decay, use_cpu_for_prep, suppress_warnings, suppress_reading_messages, cache_dir, device_prep, suppress_detailed_logs)
+            train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_str, checkpoint_dir, save_interval, accumulation_steps, initial_lr_g, initial_lr_d, optimizer_name_g, optimizer_name_d, loss_function_g, loss_function_d, perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, num_workers, early_stopping_patience, weight_decay, use_cpu_for_prep, suppress_warnings, suppress_reading_messages, cache_dir, device_prep, add_noise, noise_amount, discriminator_update_interval, label_smoothing_real, label_smoothing_fake)
         except Exception as e:
             logger.error(f"Error in train_single_stem: {e}", exc_info=True)
             raise  # Reraise the exception to halt training on error
 
-def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_str, checkpoint_dir, save_interval, accumulation_steps, initial_lr_g, initial_lr_d, optimizer_name_g, optimizer_name_d, loss_function_g, loss_function_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, num_workers, early_stopping_patience, weight_decay, use_cpu_for_prep, suppress_warnings, suppress_reading_messages, cache_dir, device_prep, suppress_detailed_logs):
+def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_str, checkpoint_dir, save_interval, accumulation_steps, initial_lr_g, initial_lr_d, optimizer_name_g, optimizer_name_d, loss_function_g, loss_function_d, perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, num_workers, early_stopping_patience, weight_decay, use_cpu_for_prep, suppress_warnings, suppress_reading_messages, cache_dir, device_prep, add_noise, noise_amount, discriminator_update_interval, label_smoothing_real, label_smoothing_fake):
     logger.info("Starting training for single stem: %s", stem)
     writer = SummaryWriter(log_dir=os.path.join(checkpoint_dir, 'runs', f'stem_{stem}_{datetime.now().strftime("%Y%m%d-%H%M%S")}')) if tensorboard_flag else None
 
@@ -95,6 +146,10 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_st
     target_length = 256
 
     model, discriminator, optimizer_g, optimizer_d = create_model_and_optimizer(device_str, n_mels, target_length, cache_dir, initial_lr_g, initial_lr_d, optimizer_name_g, optimizer_name_d, weight_decay)
+
+    feature_extractor = models.vgg16(weights=VGG16_Weights.IMAGENET1K_V1).features.to(device_str).eval()
+    for param in feature_extractor.parameters():
+        param.requires_grad = False
 
     train_loader = DataLoader(
         StemSeparationDataset(data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation, suppress_warnings, num_workers, device_prep),
@@ -154,31 +209,45 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_st
                     targets = targets.squeeze(2)
 
                 loss_g = loss_function_g(outputs.to(device_str), targets.to(device_str))
+                
+                if perceptual_loss_flag:
+                    outputs_3ch = convert_to_3_channels(outputs)
+                    targets_3ch = convert_to_3_channels(targets)
+                    perceptual_loss = PerceptualLoss(feature_extractor)(outputs_3ch.to(device_str), targets_3ch.to(device_str)) * perceptual_loss_weight
+                    loss_g += perceptual_loss
+                
                 scaler.scale(loss_g).backward(retain_graph=True)
 
-                real_labels = torch.ones(inputs.size(0), 1, device=device_str)
-                fake_labels = torch.zeros(inputs.size(0), 1, device=device_str)
-                real_out = discriminator(targets.to(device_str).clone().detach())
-                fake_out = discriminator(outputs.clone().detach())
+                if (i + 1) % discriminator_update_interval == 0:
+                    # Add noise to the discriminator's input
+                    if add_noise:
+                        noise = torch.randn_like(targets) * noise_amount
+                        targets = targets + noise
 
-                loss_d_real = loss_function_d(real_out, real_labels)
-                loss_d_fake = loss_function_d(fake_out, fake_labels)
-                gp = gradient_penalty(discriminator, targets.to(device_str), outputs.to(device_str), device_str)
-                loss_d = (loss_d_real + loss_d_fake) / 2 + 10 * gp  # Adding gradient penalty term
+                    # Apply label smoothing
+                    real_labels = torch.full((inputs.size(0), 1), label_smoothing_real, device=device_str)
+                    fake_labels = torch.full((inputs.size(0), 1), label_smoothing_fake, device=device_str)
+                    real_out = discriminator(targets.to(device_str).clone().detach())
+                    fake_out = discriminator(outputs.clone().detach())
 
-                scaler.scale(loss_d).backward()
+                    loss_d_real = loss_function_d(real_out, real_labels)
+                    loss_d_fake = loss_function_d(fake_out, fake_labels)
+                    gp = gradient_penalty(discriminator, targets.to(device_str), outputs.to(device_str), device_str)
+                    loss_d = (loss_d_real + loss_d_fake) / 2 + gp  # Adding gradient penalty term
+
+                    scaler.scale(loss_d).backward()
+                    torch.nn.utils.clip_grad_norm_(discriminator.parameters(), clip_value)
+                    scaler.step(optimizer_d)
+                    optimizer_d.zero_grad()
+                    running_loss_d += loss_d.item()
 
                 running_loss_g += loss_g.item()
-                running_loss_d += loss_d.item()
 
                 if (i + 1) % accumulation_steps == 0 or (i + 1) == len(train_loader):
                     torch.nn.utils.clip_grad_norm_(model.parameters(), clip_value)
-                    torch.nn.utils.clip_grad_norm_(discriminator.parameters(), clip_value)
                     scaler.step(optimizer_g)
-                    scaler.step(optimizer_d)
                     scaler.update()
                     optimizer_g.zero_grad()
-                    optimizer_d.zero_grad()
 
                     logger.info(f'Epoch [{epoch+1}/{num_epochs}], Step [{i+1}/{len(train_loader)}], Loss G: {running_loss_g / (i + 1):.4f}, Loss D: {running_loss_d / (i + 1):.4f}')
                     if tensorboard_flag:
@@ -186,8 +255,8 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_st
                         writer.add_scalar('Loss/Discriminator', running_loss_d / (i + 1), epoch * len(train_loader) + i)
 
         optimizer_g.step()
-        scheduler_g.step()
         optimizer_d.step()
+        scheduler_g.step()
         scheduler_d.step()
 
         if (epoch + 1) % save_interval == 0:
@@ -237,8 +306,8 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_st
 
                         if not torch.isnan(sdr):
                             sdr_total += sdr.mean()
-                            sir_total += 0.0  # Placeholder, update with actual computation if needed
-                            sar_total += 0.0  # Placeholder, update with actual computation if needed
+                            sir_total += compute_sir(real_out, fake_out)  # Placeholder, update with actual computation if needed
+                            sar_total += compute_sar(real_out, fake_out)  # Placeholder, update with actual computation if needed
 
                 num_valid_samples = len(val_loader.dataset) - torch.isnan(sdr_total).sum()
                 val_loss /= len(val_loader)
@@ -272,7 +341,7 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_st
     if tensorboard_flag:
         writer.close()
 
-def start_training_wrapper(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_str_g, loss_function_str_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep, suppress_detailed_logs):
+def start_training_wrapper(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_str_g, loss_function_str_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep, discriminator_update_interval, label_smoothing_real, label_smoothing_fake, suppress_detailed_logs):
     global training_process
     loss_function_map = {
         "MSELoss": nn.MSELoss(),
@@ -283,7 +352,7 @@ def start_training_wrapper(data_dir, val_dir, batch_size, num_epochs, learning_r
     }
     loss_function_g = loss_function_map[loss_function_str_g]
     loss_function_d = loss_function_map[loss_function_str_d]
-    training_process = mp.Process(target=start_training, args=(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep, suppress_detailed_logs))
+    training_process = mp.Process(target=start_training, args=(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep, discriminator_update_interval, label_smoothing_real, label_smoothing_fake, suppress_detailed_logs))
     training_process.start()
     return f"Training Started with {loss_function_str_g} for Generator and {loss_function_str_d} for Discriminator, using {optimizer_name_g} for Generator Optimizer and {optimizer_name_d} for Discriminator Optimizer"
     
@@ -294,6 +363,14 @@ def stop_training_wrapper():
         training_process = None
         return "Training Stopped"
     return "No Training Process Running"
+
+def compute_sir(real_out, fake_out):
+    # Placeholder for actual SIR computation
+    return torch.mean(real_out - fake_out)
+
+def compute_sar(real_out, fake_out):
+    # Placeholder for actual SAR computation
+    return torch.mean(real_out + fake_out)
 
 if __name__ == '__main__':
     # Call your start_training_wrapper or any other function here as needed

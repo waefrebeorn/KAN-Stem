@@ -78,6 +78,11 @@ def evaluate_model(input_audio_path, checkpoint_path, n_mels, target_length, n_f
 
     return sdr, sir, sar
 
+def log_training_parameters(params):
+    logger.info("Training Parameters Selected:")
+    for key, value in params.items():
+        logger.info(f"{key}: {value}")
+
 with gr.Blocks() as demo:
     with gr.Tab("Training"):
         gr.Markdown("### Train the Model")
@@ -112,20 +117,75 @@ with gr.Blocks() as demo:
         suppress_reading_messages = gr.Checkbox(label="Suppress Reading Messages", value=False)
         use_cpu_for_prep = gr.Checkbox(label="Use CPU for Preparation", value=True)
         suppress_detailed_logs = gr.Checkbox(label="Suppress Detailed Logs", value=False)
+        discriminator_update_interval = gr.Number(label="Discriminator Update Interval", value=10)
+        label_smoothing_real = gr.Slider(label="Label Smoothing Real", minimum=0.7, maximum=0.9, value=0.9, step=0.1)
+        label_smoothing_fake = gr.Slider(label="Label Smoothing Fake", minimum=0.1, maximum=0.3, value=0.1, step=0.1)
+        perceptual_loss_weight = gr.Number(label="Perceptual Loss Weight", value=1.0)
         start_training_button = gr.Button("Start Training")
         stop_training_button = gr.Button("Stop Training")
         output = gr.Textbox(label="Output")
+
+        def start_training_and_log_params(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval,
+                                          accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
+                                          perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation,
+                                          add_noise, noise_amount, early_stopping_patience, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep,
+                                          suppress_detailed_logs, discriminator_update_interval, label_smoothing_real, label_smoothing_fake, perceptual_loss_weight):
+            params = {
+                "Data Directory": data_dir,
+                "Validation Directory": val_dir,
+                "Batch Size": batch_size,
+                "Number of Epochs": num_epochs,
+                "Generator Learning Rate": learning_rate_g,
+                "Discriminator Learning Rate": learning_rate_d,
+                "Use CUDA": use_cuda,
+                "Checkpoint Directory": checkpoint_dir,
+                "Save Interval": save_interval,
+                "Accumulation Steps": accumulation_steps,
+                "Number of Stems": num_stems,
+                "Number of Workers": num_workers,
+                "Cache Directory": cache_dir,
+                "Generator Loss Function": loss_function_g,
+                "Discriminator Loss Function": loss_function_d,
+                "Generator Optimizer": optimizer_name_g,
+                "Discriminator Optimizer": optimizer_name_d,
+                "Use Perceptual Loss": perceptual_loss_flag,
+                "Gradient Clipping Value": clip_value,
+                "Scheduler Step Size": scheduler_step_size,
+                "Scheduler Gamma": scheduler_gamma,
+                "Enable TensorBoard Logging": tensorboard_flag,
+                "Apply Data Augmentation": apply_data_augmentation,
+                "Add Noise": add_noise,
+                "Noise Amount": noise_amount,
+                "Early Stopping Patience": early_stopping_patience,
+                "Weight Decay": weight_decay,
+                "Suppress Warnings": suppress_warnings,
+                "Suppress Reading Messages": suppress_reading_messages,
+                "Use CPU for Preparation": use_cpu_for_prep,
+                "Suppress Detailed Logs": suppress_detailed_logs,
+                "Discriminator Update Interval": discriminator_update_interval,
+                "Label Smoothing Real": label_smoothing_real,
+                "Label Smoothing Fake": label_smoothing_fake,
+                "Perceptual Loss Weight": perceptual_loss_weight
+            }
+            log_training_parameters(params)
+            return start_training_wrapper(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval,
+                                          accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
+                                          perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation,
+                                          add_noise, noise_amount, early_stopping_patience, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep,
+                                          suppress_detailed_logs, discriminator_update_interval, label_smoothing_real, label_smoothing_fake, perceptual_loss_weight)
+
         start_training_button.click(
-            start_training_wrapper,
+            start_training_and_log_params,
             inputs=[
                 data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval,
                 accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
                 perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation,
                 add_noise, noise_amount, early_stopping_patience, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep,
-                suppress_detailed_logs
+                suppress_detailed_logs, discriminator_update_interval, label_smoothing_real, label_smoothing_fake, perceptual_loss_weight
             ],
             outputs=output
         )
+
         stop_training_button.click(
             stop_training_wrapper,
             outputs=output

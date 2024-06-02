@@ -29,37 +29,31 @@ class KANWithDepthwiseConv(nn.Module):
         self.cache_dir = cache_dir
         self.device = device
 
-        self.fc1 = None  # To be initialized later
-        self.fc2 = None  # To be initialized later
-
-    def _initialize_fc_layers(self, conv_output_size):
-        self.fc1 = nn.Linear(conv_output_size, 1024).to(self.device)
-        self.fc2 = nn.Linear(1024, self.n_mels * self.target_length * self.num_stems).to(self.device)
-
-    def _get_conv_output(self, shape):
+        # Initialize fully connected layers
         with torch.no_grad():
-            x = torch.rand(1, 1, shape[0], shape[1]).to(self.device)
-            x = self.pool1(F.relu(self.conv1(x.clone())))
-            x = self.pool2(F.relu(self.conv2(x.clone())))
-            x = self.pool3(F.relu(self.conv3(x.clone())))
-            x = self.pool4(F.relu(self.conv4(x.clone())))
-            x = self.pool5(x)
-            x = self.flatten(x)
-            return x.shape[1]
+            dummy_input = torch.zeros(1, in_channels, n_mels, target_length, device=device)
+            dummy_output = self.pool4(self.conv4(self.pool3(self.conv3(self.pool2(self.conv2(self.pool1(self.conv1(dummy_input))))))))
+            dummy_output = self.pool5(dummy_output)
+            dummy_output = self.flatten(dummy_output)
+            fc_input_size = dummy_output.shape[1]
+        self.fc1 = nn.Linear(fc_input_size, 1024).to(device)
+        nn.init.xavier_normal_(self.fc1.weight)  # Initialize fc1 weights
+        self.fc2 = nn.Linear(1024, self.n_mels * self.target_length * self.num_stems).to(device)
+        nn.init.xavier_normal_(self.fc2.weight)  # Initialize fc2 weights
 
     def forward(self, x):
         x = x.to(self.device)  # Ensure x is on the correct device
         x = F.relu(self.conv1(x.clone()))  # Clone x before passing to conv1
         x = self.pool1(x)
-        conv1_cache_path = self.cache_activation(x, 'conv1')
+        self.cache_activation(x, 'conv1')
 
         x = F.relu(self.conv2(x.clone()))  # Clone x before passing to conv2
         x = self.pool2(x)
-        conv2_cache_path = self.cache_activation(x, 'conv2')
+        self.cache_activation(x, 'conv2')
 
         x = F.relu(self.conv3(x.clone()))  # Clone x before passing to conv3
         x = self.pool3(x)
-        conv3_cache_path = self.cache_activation(x, 'conv3')
+        self.cache_activation(x, 'conv3')
 
         x = F.relu(self.conv4(x.clone()))  # Clone x before passing to conv4
         x = self.pool4(x)
@@ -67,13 +61,9 @@ class KANWithDepthwiseConv(nn.Module):
 
         x = self.flatten(x)
 
-        # Initialize fc1 and fc2 based on the actual input size only once
-        if self.fc1 is None or self.fc2 is None:
-            conv_output_size = self._get_conv_output([self.n_mels, self.target_length])
-            self._initialize_fc_layers(conv_output_size)
-
         x = F.relu(self.fc1(x))
         x = self.fc2(x)
+        x = torch.tanh(x)  # Use tanh activation to restrict output to [-1, 1]
         x = x.view(-1, self.num_stems, self.n_mels, self.target_length)
 
         return x
@@ -111,11 +101,11 @@ class KANDiscriminator(nn.Module):
         self.device = device
 
         self.conv1 = nn.Conv2d(in_channels, 64, kernel_size=3, padding=1).to(device)
-        self.bn1 = nn.BatchNorm2d(64).to(device)
+        self.bn1 = nn.InstanceNorm2d(64).to(device)
         self.conv2 = nn.Conv2d(64, 128, kernel_size=3, padding=1).to(device)
-        self.bn2 = nn.BatchNorm2d(128).to(device)
+        self.bn2 = nn.InstanceNorm2d(128).to(device)
         self.conv3 = nn.Conv2d(128, out_channels, kernel_size=3, padding=1).to(device)
-        self.bn3 = nn.BatchNorm2d(out_channels).to(device)
+        self.bn3 = nn.InstanceNorm2d(out_channels).to(device)
 
         # Calculate the flattened size based on the convolutional layers' output
         with torch.no_grad():
@@ -125,6 +115,7 @@ class KANDiscriminator(nn.Module):
 
         # Modify the input size of fc1 to match the calculated flattened size
         self.fc1 = nn.Linear(flattened_size, 1).to(device)
+        nn.init.xavier_normal_(self.fc1.weight)  # Initialize fc1 weights
 
     def _forward_conv_layers(self, x):
         x = F.relu(self.bn1(self.conv1(x)))
