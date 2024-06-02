@@ -2,7 +2,7 @@ import os
 import torch
 import torchaudio
 import torchaudio.transforms as T
-import torch.nn.functional as F  # Add this import
+import torch.nn.functional as F
 import logging
 import soundfile as sf
 import psutil
@@ -84,13 +84,13 @@ class PerceptualLoss(nn.Module):
         return loss
 
 def compute_adversarial_loss(discriminator, y_true, y_pred, device):
-    y_true = y_true.squeeze(1)
-    y_pred = y_pred.squeeze(1)
+    y_true = y_true.unsqueeze(1) if y_true.dim() == 3 else y_true
+    y_pred = y_pred.unsqueeze(1) if y_pred.dim() == 3 else y_pred
     real_labels = torch.ones(y_true.size(0), 1, device=device)
     fake_labels = torch.zeros(y_pred.size(0), 1, device=device)
     real_loss = F.binary_cross_entropy_with_logits(discriminator(y_true), real_labels)
     fake_loss = F.binary_cross_entropy_with_logits(discriminator(y_pred), fake_labels)
-    return real_loss, fake_loss  # Return only two values to avoid unpacking error
+    return real_loss, fake_loss
 
 def read_audio(file_path, device='cuda' if torch.cuda.is_available() else 'cpu', suppress_messages=False):
     try:

@@ -60,12 +60,12 @@ def start_training(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, l
     
     for stem in range(num_stems):
         try:
-            train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_str, checkpoint_dir, save_interval, accumulation_steps, learning_rate_g, learning_rate_d, optimizer_name_g, optimizer_name_d, loss_function_g, loss_function_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, num_workers, early_stopping_patience, weight_decay, use_cpu_for_prep, suppress_warnings, suppress_reading_messages, cache_dir, device_prep, suppress_detailed_logs)
+            train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_str, checkpoint_dir, save_interval, accumulation_steps, learning_rate_g, learning_rate_d, optimizer_name_g, optimizer_name_d, loss_function_g, loss_function_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, num_workers, early_stopping_patience, weight_decay, use_cpu_for_prep, suppress_warnings, suppress_reading_messages, cache_dir, device_prep)
         except Exception as e:
             logger.error(f"Error in train_single_stem: {e}", exc_info=True)
             raise  # Reraise the exception to halt training on error
 
-def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_str, checkpoint_dir, save_interval, accumulation_steps, learning_rate_g, learning_rate_d, optimizer_name_g, optimizer_name_d, loss_function_g, loss_function_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, num_workers, early_stopping_patience, weight_decay, use_cpu_for_prep, suppress_warnings, suppress_reading_messages, cache_dir, device_prep, suppress_detailed_logs):
+def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_str, checkpoint_dir, save_interval, accumulation_steps, learning_rate_g, learning_rate_d, optimizer_name_g, optimizer_name_d, loss_function_g, loss_function_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, num_workers, early_stopping_patience, weight_decay, use_cpu_for_prep, suppress_warnings, suppress_reading_messages, cache_dir, device_prep):
     logger.info("Starting training for single stem: %s", stem)
     writer = SummaryWriter(log_dir=os.path.join(checkpoint_dir, 'runs', f'stem_{stem}_{datetime.now().strftime("%Y%m%d-%H%M%S")}')) if tensorboard_flag else None
 
@@ -113,8 +113,7 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_st
             if data is None:
                 continue
 
-            if not suppress_detailed_logs:
-                logger.debug(f"Processing batch {i+1}/{len(train_loader)}")
+            logger.debug(f"Processing batch {i+1}/{len(train_loader)}")
 
             inputs = data['input'].to(device_str)
             targets = data['target'][:, stem].to(device_str)
@@ -128,9 +127,9 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_st
                 outputs = outputs.unsqueeze(1)
 
                 if outputs.dim() == 5:
-                    outputs = outputs.squeeze(1)
+                    outputs = outputs.squeeze(2)
                 if targets.dim() == 5:
-                    targets = targets.squeeze(1)
+                    targets = targets.squeeze(2)
 
                 loss_g = loss_function_g(outputs.to(device_str), targets.to(device_str))
                 scaler.scale(loss_g).backward()
@@ -181,8 +180,7 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_st
                     if data is None:
                         continue
 
-                    if not suppress_detailed_logs:
-                        logger.debug(f"Validating batch {i+1}/{len(val_loader)}")
+                    logger.debug(f"Validating batch {i+1}/{len(val_loader)}")
 
                     inputs = data['input'].to(device_str)
                     targets = data['target'][:, stem].to(device_str)
@@ -193,16 +191,29 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_st
                     targets = targets.unsqueeze(1)
                     outputs = outputs.unsqueeze(1)
 
+                    if outputs.dim() == 5:
+                        outputs = outputs.squeeze(2)
+                    if targets.dim() == 5:
+                        targets = targets.squeeze(2)
+
                     loss = loss_function_g(outputs, targets)
                     val_loss += loss.item()
 
                     for j in range(outputs.size(0)):
-                        sdr, sir = compute_adversarial_loss(discriminator, targets[j], outputs[j], device_str)
+                        real_out = discriminator(targets[j].unsqueeze(0))
+                        fake_out = discriminator(outputs[j].unsqueeze(0))
+
+                        real_labels = torch.ones(real_out.size(0), 1, device=device_str)
+                        fake_labels = torch.zeros(fake_out.size(0), 1, device=device_str)
+
+                        real_loss = F.binary_cross_entropy_with_logits(real_out, real_labels)
+                        fake_loss = F.binary_cross_entropy_with_logits(fake_out, fake_labels)
+                        sdr = (real_loss + fake_loss) / 2
+
                         if not torch.isnan(sdr):
                             sdr_total += sdr.mean()
-                            sir_total += sir.mean()
-                            # Placeholder for SAR calculation if needed
-                            sar_total += 0.0
+                            sir_total += 0.0  # Placeholder, update with actual computation if needed
+                            sar_total += 0.0  # Placeholder, update with actual computation if needed
 
                 num_valid_samples = len(val_loader.dataset) - torch.isnan(sdr_total).sum()
                 val_loss /= len(val_loader)
@@ -249,7 +260,7 @@ def start_training_wrapper(data_dir, val_dir, batch_size, num_epochs, learning_r
     training_process = mp.Process(target=start_training, args=(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep, suppress_detailed_logs))
     training_process.start()
     return f"Training Started with {loss_function_str_g} for Generator and {loss_function_str_d} for Discriminator, using {optimizer_name_g} for Generator Optimizer and {optimizer_name_d} for Discriminator Optimizer"
-
+    
 def stop_training_wrapper():
     global training_process
     if training_process is not None:

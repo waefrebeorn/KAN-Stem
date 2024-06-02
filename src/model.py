@@ -4,7 +4,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 import logging
 
+# Configure logging
 logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 class KANWithDepthwiseConv(nn.Module):
     def __init__(self, in_channels, out_channels, n_mels, target_length, num_stems, cache_dir, device):
@@ -29,7 +31,7 @@ class KANWithDepthwiseConv(nn.Module):
 
         self.fc1 = None  # To be initialized later
         self.fc2 = None  # To be initialized later
-    
+
     def _initialize_fc_layers(self, conv_output_size):
         self.fc1 = nn.Linear(conv_output_size, 1024).to(self.device)
         self.fc2 = nn.Linear(1024, self.n_mels * self.target_length * self.num_stems).to(self.device)
@@ -86,7 +88,7 @@ class KANWithDepthwiseConv(nn.Module):
         if os.path.exists(cache_metadata_path):
             try:
                 cache_metadata = torch.load(cache_metadata_path)
-            except (EOFError, RuntimeError, FileNotFoundError) as e:
+            except (FileNotFoundError, EOFError, RuntimeError) as e:
                 logger.error(f"Error loading cache metadata file: {e}")
                 cache_metadata = {}
 
@@ -95,11 +97,12 @@ class KANWithDepthwiseConv(nn.Module):
 
         # Save the updated cache metadata
         try:
-            tmp_path = cache_metadata_path + ".tmp"
-            torch.save(cache_metadata, tmp_path)
-            os.replace(tmp_path, cache_metadata_path)
+            temp_cache_path = f"{cache_metadata_path}.tmp"
+            torch.save(cache_metadata, temp_cache_path)
+            os.replace(temp_cache_path, cache_metadata_path)
         except Exception as e:
             logger.error(f"Error saving cache metadata file: {e}")
+
         return cache_metadata_path
 
 class KANDiscriminator(nn.Module):
@@ -119,7 +122,7 @@ class KANDiscriminator(nn.Module):
             dummy_input = torch.randn(1, in_channels, n_mels, target_length, device=device)
             dummy_output = self._forward_conv_layers(dummy_input)
             flattened_size = dummy_output.view(-1).shape[0]
-        
+
         # Modify the input size of fc1 to match the calculated flattened size
         self.fc1 = nn.Linear(flattened_size, 1).to(device)
 
@@ -130,8 +133,8 @@ class KANDiscriminator(nn.Module):
         return x
 
     def forward(self, x):
-        if x.dim() == 5:
-            x = x.squeeze(1)
+        if x.dim() == 3:
+            x = x.unsqueeze(1)
         x = x.to(self.device)  # Ensure x is on the correct device
         x = self._forward_conv_layers(x)
         x = x.view(x.size(0), -1)  # Flatten the tensor
@@ -139,7 +142,7 @@ class KANDiscriminator(nn.Module):
         return x
 
 def load_model(checkpoint_path, in_channels, out_channels, n_mels, target_length, num_stems, device, freeze_fc_layers=False):
-    model = KANWithDepthwiseConv(in_channels, out_channels, n_mels, target_length, num_stems, None, device)
+    model = KANWithDepthwiseConv(in_channels, out_channels, n_mels, target_length, num_stems, "./cache", device)
     model.load_state_dict(torch.load(checkpoint_path, map_location=device))
 
     model.train()  # Switch to training mode

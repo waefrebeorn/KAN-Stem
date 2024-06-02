@@ -16,15 +16,17 @@ from generate_other_noise import generate_shuffled_noise_gradio
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-# Suppress httpx, httpcore, urllib3, and tensorflow logs below WARNING level
+# Suppress httpx, httpcore, urllib3, tensorflow, and asyncio logs below WARNING level
 httpx_logger = logging.getLogger("httpx")
 httpcore_logger = logging.getLogger("httpcore")
 urllib3_logger = logging.getLogger("urllib3")
 tensorflow_logger = logging.getLogger("tensorflow")
+asyncio_logger = logging.getLogger("asyncio")
 httpx_logger.setLevel(logging.WARNING)
 httpcore_logger.setLevel(logging.WARNING)
 urllib3_logger.setLevel(logging.WARNING)
 tensorflow_logger.setLevel(logging.WARNING)
+asyncio_logger.setLevel(logging.WARNING)
 
 def read_audio(file_path, suppress_messages=False):
     try:
@@ -115,7 +117,13 @@ with gr.Blocks() as demo:
         output = gr.Textbox(label="Output")
         start_training_button.click(
             start_training_wrapper,
-            inputs=[data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep, suppress_detailed_logs],
+            inputs=[
+                data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval,
+                accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
+                perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation,
+                add_noise, noise_amount, early_stopping_patience, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep,
+                suppress_detailed_logs
+            ],
             outputs=output
         )
         stop_training_button.click(
