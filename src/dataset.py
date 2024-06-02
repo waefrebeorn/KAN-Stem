@@ -24,6 +24,19 @@ class StemSeparationDataset(Dataset):
             raise ValueError(f"No valid audio files found in {data_dir}")
 
         os.makedirs(cache_dir, exist_ok=True)
+        self.cache = self._load_cache_metadata()
+
+    def _load_cache_metadata(self):
+        cache_path = os.path.join(self.cache_dir, "cache_metadata.pt")
+        if os.path.exists(cache_path):
+            try:
+                cache = torch.load(cache_path)
+                logger.info(f"Loaded cache metadata from {cache_path}")
+                return cache
+            except Exception as e:
+                logger.error(f"Error loading cache metadata file: {e}")
+                return {}
+        return {}
 
     def __len__(self):
         return len(self.valid_stems)
@@ -31,44 +44,43 @@ class StemSeparationDataset(Dataset):
     def __getitem__(self, idx):
         stem_name = self.valid_stems[idx]
         cache_key = self._get_cache_key(stem_name)
-        cache_path = self._get_cache_path(cache_key)
 
-        cached_data = self._load_from_cache(cache_path)
-        if cached_data is not None:
-            return cached_data
+        if cache_key in self.cache:
+            stem_cache_path = self.cache[cache_key]
+            if os.path.exists(stem_cache_path):
+                return torch.load(stem_cache_path)
 
         logger.info(f"Processing stem: {stem_name}")
         data = self._process_single_stem(stem_name)
         if data is not None:
-            # Move tensors to CPU before saving to cache
             data['input'] = data['input'].cpu()
             data['target'] = data['target'].cpu()
-            self._save_to_cache(cache_path, data)
+            self.cache[cache_key] = self._save_individual_cache(stem_name, data)
+            self._save_cache_metadata()
         return data
 
     def _get_cache_key(self, stem_name):
         return f"{stem_name}_{self.apply_data_augmentation}_{self.n_mels}_{self.target_length}_{self.n_fft}"
 
-    def _get_cache_path(self, cache_key):
-        return os.path.join(self.cache_dir, f"{cache_key}.pt")
-
-    def _load_from_cache(self, cache_path):
+    def _save_individual_cache(self, stem_name, data):
+        stem_cache_path = os.path.join(self.cache_dir, f"{stem_name}.pt")
         try:
-            logger.info(f"Attempting to load from cache: {cache_path}")
-            data = torch.load(cache_path)
-            logger.info(f"Successfully loaded from cache: {cache_path}")
-            return data
-        except (FileNotFoundError, RuntimeError) as e:
-            logger.warning(f"Cache not found or corrupted: {cache_path}. Error: {e}")
+            logger.info(f"Saving stem cache: {stem_cache_path}")
+            torch.save(data, stem_cache_path)
+            logger.info(f"Successfully saved stem cache: {stem_cache_path}")
+            return stem_cache_path
+        except Exception as e:
+            logger.error(f"Error saving stem cache: {stem_cache_path}. Error: {e}")
             return None
 
-    def _save_to_cache(self, cache_path, data):
+    def _save_cache_metadata(self):
+        cache_path = os.path.join(self.cache_dir, "cache_metadata.pt")
         try:
-            logger.info(f"Saving to cache: {cache_path}")
-            torch.save(data, cache_path)
-            logger.info(f"Successfully saved to cache: {cache_path}")
+            logger.info(f"Saving cache metadata to {cache_path}")
+            torch.save(self.cache, cache_path)
+            logger.info(f"Successfully saved cache metadata to {cache_path}")
         except Exception as e:
-            logger.error(f"Error saving to cache: {cache_path}. Error: {e}")
+            logger.error(f"Error saving cache metadata file: {e}")
 
     def _process_single_stem(self, stem_name):
         try:
@@ -87,10 +99,7 @@ class StemSeparationDataset(Dataset):
             if input_mel is None:
                 return None
 
-            # Simulate target data for now. In practice, this should be the actual target stem
             target_mel = input_mel.clone()
-
-            # Add an extra dimension to make it 4D: (batch_size, channels, height, width)
             input_mel = input_mel.unsqueeze(0)
             target_mel = target_mel.unsqueeze(0)
 

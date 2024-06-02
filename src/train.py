@@ -34,7 +34,6 @@ def preprocess_and_cache_dataset(data_dir, n_mels, target_length, n_fft, cache_d
     for idx in range(len(dataset)):
         try:
             data = dataset[idx]
-            # Add logging statements or assertions to check the cached data
         except Exception as e:
             logger.error(f"Error during preprocessing and caching: {e}")
     
@@ -57,7 +56,6 @@ def start_training(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, l
     sample_rate, n_mels, n_fft = detect_parameters(data_dir)
     target_length = 256
 
-    # Preprocess and cache the dataset
     preprocess_and_cache_dataset(data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation, suppress_warnings, num_workers, device_prep)
     
     for stem in range(num_stems):
@@ -125,11 +123,9 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_st
                 target_length = targets.size(-1)
                 outputs = outputs[..., :target_length]
 
-                # Ensure targets and outputs are 4D tensors
                 targets = targets.unsqueeze(1)
                 outputs = outputs.unsqueeze(1)
 
-                # Remove unnecessary extra dimension from outputs tensor before passing to the discriminator
                 if outputs.dim() == 5:
                     outputs = outputs.squeeze(2)
                 if targets.dim() == 5:
@@ -176,6 +172,7 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_st
             torch.save(model.state_dict(), checkpoint_path)
             logger.info(f'Saved checkpoint: {checkpoint_path}')
 
+        # Validation step only after training epoch completes
         model.eval()
         val_loss = 0.0
         sdr_total, sir_total, sar_total = 0.0, 0.0, 0.0
@@ -192,7 +189,6 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_st
                 target_length = targets.size(-1)
                 outputs = outputs[..., :target_length]
 
-                # Ensure targets and outputs are 4D tensors
                 targets = targets.unsqueeze(1)
                 outputs = outputs.unsqueeze(1)
 
@@ -200,7 +196,7 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_st
                 val_loss += loss.item()
 
                 for j in range(outputs.size(0)):
-                    sdr, sir, sar = compute_adversarial_loss(targets[j], outputs[j], device_str)
+                    sdr, sir, sar = compute_adversarial_loss(discriminator, targets[j], outputs[j], device_str)
                     if not torch.isnan(sdr):
                         sdr_total += sdr.mean()
                         sir_total += sir.mean()

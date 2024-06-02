@@ -2,6 +2,7 @@ import os
 import torch
 import torchaudio
 import torchaudio.transforms as T
+import torch.nn.functional as F  # Add this import
 import logging
 import soundfile as sf
 import psutil

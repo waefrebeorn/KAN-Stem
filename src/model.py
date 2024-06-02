@@ -83,9 +83,25 @@ class KANWithDepthwiseConv(nn.Module):
     def cache_activation(self, x, name):
         if not os.path.exists(self.cache_dir):
             os.makedirs(self.cache_dir)
+        cache_metadata_path = os.path.join(self.cache_dir, "cache_metadata.pt")
+
+        # Load existing cache metadata
+        if os.path.exists(cache_metadata_path):
+            cache_metadata = torch.load(cache_metadata_path)
+        else:
+            cache_metadata = {}
+
+        # Save the activation tensor to a temporary file
         with tempfile.NamedTemporaryFile(dir=self.cache_dir, delete=False) as temp_file:
             x = x.detach().cpu().numpy()  # Move tensor to CPU before saving
             np.save(temp_file.name, x)
+
+            # Update cache metadata with the path of the saved tensor
+            cache_key = f"{name}_{temp_file.name}"
+            cache_metadata[cache_key] = temp_file.name
+
+            # Save the updated cache metadata
+            torch.save(cache_metadata, cache_metadata_path)
             return temp_file.name
 
 class KANDiscriminator(nn.Module):
