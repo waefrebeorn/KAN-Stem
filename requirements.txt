@@ -29,3 +29,4 @@ mir_eval
 gputil
 ffmpeg
 pydub
+mir_eval

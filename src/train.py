@@ -22,7 +22,7 @@ import warnings
 warnings.filterwarnings("ignore", category=UserWarning, message="Lazy modules are a new feature under heavy development")
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname=s - %(message)s')
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
@@ -268,6 +268,8 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_st
         model.eval()
         val_loss = 0.0
         sdr_total, sir_total, sar_total = 0.0, 0.0, 0.0
+        num_sdr_samples, num_sir_samples, num_sar_samples = 0, 0, 0
+
         with torch.no_grad():
             try:
                 for i, data in enumerate(val_loader):
@@ -293,27 +295,22 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_st
                     loss = loss_function_g(outputs, targets)
                     val_loss += loss.item()
 
-                    for j in range(outputs.size(0)):
-                        real_out = discriminator(targets[j].unsqueeze(0))
-                        fake_out = discriminator(outputs[j].unsqueeze(0))
+                    sdr = compute_sdr(targets, outputs)
+                    sir = compute_sir(targets, outputs)
+                    sar = compute_sar(targets, outputs)
 
-                        real_labels = torch.ones(real_out.size(0), 1, device=device_str)
-                        fake_labels = torch.zeros(fake_out.size(0), 1, device=device_str)
+                    sdr_total += torch.nan_to_num(sdr, nan=0.0).sum()
+                    sir_total += torch.nan_to_num(sir, nan=0.0).sum()
+                    sar_total += torch.nan_to_num(sar, nan=0.0).sum()
 
-                        real_loss = F.binary_cross_entropy_with_logits(real_out, real_labels)
-                        fake_loss = F.binary_cross_entropy_with_logits(fake_out, fake_labels)
-                        sdr = (real_loss + fake_loss) / 2
+                    num_sdr_samples += torch.isfinite(sdr).sum().item()
+                    num_sir_samples += torch.isfinite(sir).sum().item()
+                    num_sar_samples += torch.isfinite(sar).sum().item()
 
-                        if not torch.isnan(sdr):
-                            sdr_total += sdr.mean()
-                            sir_total += compute_sir(real_out, fake_out)  # Placeholder, update with actual computation if needed
-                            sar_total += compute_sar(real_out, fake_out)  # Placeholder, update with actual computation if needed
-
-                num_valid_samples = len(val_loader.dataset) - torch.isnan(sdr_total).sum()
                 val_loss /= len(val_loader)
-                sdr_avg = sdr_total / num_valid_samples
-                sir_avg = sir_total / num_valid_samples
-                sar_avg = sar_total / num_valid_samples
+                sdr_avg = sdr_total / max(num_sdr_samples, 1)  # Avoid division by zero
+                sir_avg = sir_total / max(num_sir_samples, 1)  # Avoid division by zero
+                sar_avg = sar_total / max(num_sar_samples, 1)  # Avoid division by zero
 
                 logger.info(f'Validation Loss: {val_loss:.4f}, SDR: {sdr_avg:.4f}, SIR: {sir_avg:.4f}, SAR: {sar_avg:.4f}')
                 if tensorboard_flag:
@@ -364,13 +361,26 @@ def stop_training_wrapper():
         return "Training Stopped"
     return "No Training Process Running"
 
-def compute_sir(real_out, fake_out):
-    # Placeholder for actual SIR computation
-    return torch.mean(real_out - fake_out)
+def compute_sdr(true, pred):
+    noise = true - pred
+    s_true = torch.sum(true ** 2, dim=[1, 2, 3])
+    s_noise = torch.sum(noise ** 2, dim=[1, 2, 3])
+    sdr = 10 * torch.log10(s_true / (s_noise + 1e-8))
+    return sdr
 
-def compute_sar(real_out, fake_out):
-    # Placeholder for actual SAR computation
-    return torch.mean(real_out + fake_out)
+def compute_sir(true, pred):
+    noise = true - pred
+    s_true = torch.sum(true ** 2, dim=[1, 2, 3])
+    s_interf = torch.sum((true - noise) ** 2, dim=[1, 2, 3])
+    sir = 10 * torch.log10(s_true / (s_interf + 1e-8))
+    return sir
+
+def compute_sar(true, pred):
+    noise = true - pred
+    s_noise = torch.sum(noise ** 2, dim=[1, 2, 3])
+    s_artif = torch.sum((pred - noise) ** 2, dim=[1, 2, 3])
+    sar = 10 * torch.log10(s_noise / (s_artif + 1e-8))
+    return sar
 
 if __name__ == '__main__':
     # Call your start_training_wrapper or any other function here as needed
