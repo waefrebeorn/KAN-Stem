@@ -16,7 +16,7 @@ from generate_other_noise import generate_shuffled_noise_gradio
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-# Suppress httpx, httpcore, urllib3, tensorflow, and asyncio logs below WARNING level
+# Suppress httpx, httpcore, urllib3, asyncio, and tensorflow logs below WARNING level
 httpx_logger = logging.getLogger("httpx")
 httpcore_logger = logging.getLogger("httpcore")
 urllib3_logger = logging.getLogger("urllib3")
