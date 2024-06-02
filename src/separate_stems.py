@@ -28,11 +28,9 @@ def write_audio(file_path, data, samplerate):
     except Exception as e:
         logger.error(f"Error writing audio file {file_path}: {e}")
 
-def perform_separation(checkpoint_path, file_path, n_mels, target_length, n_fft, num_stems, cache_dir, suppress_reading_messages):
+def perform_separation(checkpoint_dir, file_path, n_mels, target_length, n_fft, num_stems, cache_dir, suppress_reading_messages):
     logger.info("Loading model for separation...")
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = load_model(checkpoint_path, 1, 64, n_mels, target_length, num_stems, device)
-    model.eval()
 
     input_audio, sr = read_audio(file_path, suppress_messages=suppress_reading_messages)
     if input_audio is None:
@@ -40,16 +38,20 @@ def perform_separation(checkpoint_path, file_path, n_mels, target_length, n_fft,
         return []
 
     input_mel = T.MelSpectrogram(sample_rate=sr, n_mels=n_mels, n_fft=n_fft)(input_audio.float()).unsqueeze(0).to(device)
-    output_mel = model(input_mel).cpu()
 
-    inverse_mel_transform = T.InverseMelScale(n_stft=n_fft // 2 + 1, n_mels=n_mels)
-    griffin_lim_transform = T.GriffinLim(n_fft=n_fft, n_iter=32)
-    
     output_audio = []
-    for i in range(num_stems):
-        mel = output_mel[:, i, :, :]
-        audio = griffin_lim_transform(inverse_mel_transform(mel)).numpy()
-        output_audio.append(audio)
+
+    for stem in range(num_stems):
+        checkpoint_path = os.path.join(checkpoint_dir, f'checkpoint_stem_{stem}.pt')
+        model = load_model(checkpoint_path, 1, 64, n_mels, target_length, 1, device)  # 1 stem per model
+        model.eval()
+
+        with torch.no_grad():
+            output_mel = model(input_mel).cpu()
+            inverse_mel_transform = T.InverseMelScale(n_stft=n_fft // 2 + 1, n_mels=n_mels)
+            griffin_lim_transform = T.GriffinLim(n_fft=n_fft, n_iter=32)
+            audio = griffin_lim_transform(inverse_mel_transform(output_mel.squeeze(0))).numpy()
+            output_audio.append(audio)
 
     result_paths = []
     if not os.path.exists(cache_dir):
@@ -61,3 +63,17 @@ def perform_separation(checkpoint_path, file_path, n_mels, target_length, n_fft,
         result_paths.append(result_path)
 
     return result_paths
+
+if __name__ == '__main__':
+    # Example usage of perform_separation
+    checkpoint_dir = 'path_to_checkpoint_directory'
+    file_path = 'path_to_input_audio.wav'
+    n_mels = 128
+    target_length = 256
+    n_fft = 2048
+    num_stems = 2
+    cache_dir = './cache'
+    suppress_reading_messages = False
+    
+    separated_files = perform_separation(checkpoint_dir, file_path, n_mels, target_length, n_fft, num_stems, cache_dir, suppress_reading_messages)
+    logger.info(f'Separated files: {separated_files}')

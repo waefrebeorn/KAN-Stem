@@ -14,7 +14,7 @@ from generate_other_noise import generate_shuffled_noise_gradio
 
 # Configure logging
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime=s - %(name)s - %(levelname=s - %(message=s')
 
 # Suppress httpx, httpcore, urllib3, asyncio, and tensorflow logs below WARNING level
 httpx_logger = logging.getLogger("httpx")
@@ -46,9 +46,9 @@ def calculate_metrics(true_audio, predicted_audio, sample_rate):
     sdr, sir, sar, _ = mir_eval.separation.bss_eval_sources(true_audio, predicted_audio)
     return sdr, sir, sar
 
-def perform_separation_wrapper(checkpoint_path, file_path, n_mels, target_length, n_fft, num_stems, cache_dir, suppress_reading_messages):
+def perform_separation_wrapper(checkpoint_dir, file_path, n_mels, target_length, n_fft, num_stems, cache_dir, suppress_reading_messages):
     logger.info("Starting separation...")
-    result_paths = perform_separation(checkpoint_path, file_path, n_mels, target_length, n_fft, num_stems, cache_dir, suppress_reading_messages)
+    result_paths = perform_separation(checkpoint_dir, file_path, n_mels, target_length, n_fft, num_stems, cache_dir, suppress_reading_messages)
     logger.info("Separation completed.")
     return result_paths
 
@@ -57,22 +57,26 @@ def get_checkpoints(checkpoint_dir="./checkpoints"):
         return []
     return [os.path.join(checkpoint_dir, f) for f in os.listdir(checkpoint_dir) if f.endswith(".pt")]
 
-def evaluate_model(input_audio_path, checkpoint_path, n_mels, target_length, n_fft, num_stems, cache_dir, suppress_reading_messages):
+def evaluate_model(input_audio_path, checkpoint_dir, n_mels, target_length, n_fft, num_stems, cache_dir, suppress_reading_messages):
     input_audio, sr = read_audio(input_audio_path, suppress_messages=suppress_reading_messages)
     if input_audio is None:
         return "Error: Input audio could not be read", "", ""
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = load_model(checkpoint_path, 1, 64, n_mels, target_length, num_stems, device)
-    model.eval()
+    output_audio = []
 
-    with torch.no_grad():
-        input_mel = T.MelSpectrogram(sample_rate=sr, n_mels=n_mels, n_fft=n_fft)(input_audio.float()).unsqueeze(0).to(device)
-        output_mel = model(input_mel).cpu()
-    
-    inverse_mel_transform = T.InverseMelScale(n_stft=n_fft // 2 + 1, n_mels=n_mels)
-    griffin_lim_transform = T.GriffinLim(n_fft=n_fft, n_iter=32)
-    output_audio = griffin_lim_transform(inverse_mel_transform(output_mel.squeeze(0))).numpy()
+    for stem in range(num_stems):
+        checkpoint_path = os.path.join(checkpoint_dir, f'checkpoint_stem_{stem}.pt')
+        model = load_model(checkpoint_path, 1, 64, n_mels, target_length, 1, device)  # 1 stem per model
+        model.eval()
+
+        with torch.no_grad():
+            input_mel = T.MelSpectrogram(sample_rate=sr, n_mels=n_mels, n_fft=n_fft)(input_audio.float()).unsqueeze(0).to(device)
+            output_mel = model(input_mel).cpu()
+            inverse_mel_transform = T.InverseMelScale(n_stft=n_fft // 2 + 1, n_mels=n_mels)
+            griffin_lim_transform = T.GriffinLim(n_fft=n_fft, n_iter=32)
+            audio = griffin_lim_transform(inverse_mel_transform(output_mel.squeeze(0))).numpy()
+            output_audio.append(audio)
 
     sdr, sir, sar = calculate_metrics(input_audio.numpy(), output_audio, sr)
 
@@ -86,41 +90,41 @@ def log_training_parameters(params):
 with gr.Blocks() as demo:
     with gr.Tab("Training"):
         gr.Markdown("### Train the Model")
-        data_dir = gr.Textbox(label="Data Directory")
-        val_dir = gr.Textbox(label="Validation Directory")
-        batch_size = gr.Number(label="Batch Size", value=4)
-        num_epochs = gr.Number(label="Number of Epochs", value=10)
-        learning_rate_g = gr.Number(label="Generator Learning Rate", value=0.001)
-        learning_rate_d = gr.Number(label="Discriminator Learning Rate", value=0.00005)
+        data_dir = gr.Textbox(label="Data Directory", value="K:/KAN-Stem DataSet/ProcessedDataset")
+        val_dir = gr.Textbox(label="Validation Directory", value="K:/KAN-Stem DataSet/Chunk_0_Sample")
+        batch_size = gr.Number(label="Batch Size", value=32)
+        num_epochs = gr.Number(label="Number of Epochs", value=200)
+        learning_rate_g = gr.Number(label="Generator Learning Rate", value=0.01)
+        learning_rate_d = gr.Number(label="Discriminator Learning Rate", value=1e-5)
         use_cuda = gr.Checkbox(label="Use CUDA", value=True)
         checkpoint_dir = gr.Textbox(label="Checkpoint Directory", value="./checkpoints")
-        save_interval = gr.Number(label="Save Interval", value=1)
+        save_interval = gr.Number(label="Save Interval", value=10)
         accumulation_steps = gr.Number(label="Accumulation Steps", value=4)
         num_stems = gr.Number(label="Number of Stems", value=7)
         num_workers = gr.Number(label="Number of Workers", value=4)
         cache_dir = gr.Textbox(label="Cache Directory", value="./cache")
-        loss_function_g = gr.Dropdown(label="Generator Loss Function", choices=["MSELoss", "L1Loss", "SmoothL1Loss", "BCEWithLogitsLoss", "WassersteinLoss"], value="MSELoss")
-        loss_function_d = gr.Dropdown(label="Discriminator Loss Function", choices=["MSELoss", "L1Loss", "SmoothL1Loss", "BCEWithLogitsLoss", "WassersteinLoss"], value="BCEWithLogitsLoss")
-        optimizer_name_g = gr.Dropdown(label="Generator Optimizer", choices=["SGD", "Momentum", "Adagrad", "RMSProp", "Adadelta", "Adam"], value="Adam")
-        optimizer_name_d = gr.Dropdown(label="Discriminator Optimizer", choices=["SGD", "Momentum", "Adagrad", "RMSProp", "Adadelta", "Adam"], value="Adam")
+        loss_function_g = gr.Dropdown(label="Generator Loss Function", choices=["MSELoss", "L1Loss", "SmoothL1Loss", "BCEWithLogitsLoss", "WassersteinLoss"], value="L1Loss")
+        loss_function_d = gr.Dropdown(label="Discriminator Loss Function", choices=["MSELoss", "L1Loss", "SmoothL1Loss", "BCEWithLogitsLoss", "WassersteinLoss"], value="WassersteinLoss")
+        optimizer_name_g = gr.Dropdown(label="Generator Optimizer", choices=["SGD", "Momentum", "Adagrad", "RMSProp", "Adadelta", "Adam"], value="SGD")
+        optimizer_name_d = gr.Dropdown(label="Discriminator Optimizer", choices=["SGD", "Momentum", "Adagrad", "RMSProp", "Adadelta", "Adam"], value="RMSProp")
         perceptual_loss_flag = gr.Checkbox(label="Use Perceptual Loss", value=True)
         clip_value = gr.Number(label="Gradient Clipping Value", value=1.0)
-        scheduler_step_size = gr.Number(label="Scheduler Step Size", value=5)
-        scheduler_gamma = gr.Number(label="Scheduler Gamma", value=0.5)
+        scheduler_step_size = gr.Number(label="Scheduler Step Size", value=10)
+        scheduler_gamma = gr.Number(label="Scheduler Gamma", value=0.9)
         tensorboard_flag = gr.Checkbox(label="Enable TensorBoard Logging", value=True)
-        apply_data_augmentation = gr.Checkbox(label="Apply Data Augmentation", value=False)
-        add_noise = gr.Checkbox(label="Add Noise", value=False)
+        apply_data_augmentation = gr.Checkbox(label="Apply Data Augmentation", value=True)
+        add_noise = gr.Checkbox(label="Add Noise", value=True)
         noise_amount = gr.Number(label="Noise Amount", value=0.1)
         early_stopping_patience = gr.Number(label="Early Stopping Patience", value=3)
         weight_decay = gr.Number(label="Weight Decay", value=1e-4)
-        suppress_warnings = gr.Checkbox(label="Suppress Warnings", value=False)
-        suppress_reading_messages = gr.Checkbox(label="Suppress Reading Messages", value=False)
-        use_cpu_for_prep = gr.Checkbox(label="Use CPU for Preparation", value=True)
-        suppress_detailed_logs = gr.Checkbox(label="Suppress Detailed Logs", value=False)
-        discriminator_update_interval = gr.Number(label="Discriminator Update Interval", value=10)
-        label_smoothing_real = gr.Slider(label="Label Smoothing Real", minimum=0.7, maximum=0.9, value=0.9, step=0.1)
-        label_smoothing_fake = gr.Slider(label="Label Smoothing Fake", minimum=0.1, maximum=0.3, value=0.1, step=0.1)
-        perceptual_loss_weight = gr.Number(label="Perceptual Loss Weight", value=1.0)
+        suppress_warnings = gr.Checkbox(label="Suppress Warnings", value=True)
+        suppress_reading_messages = gr.Checkbox(label="Suppress Reading Messages", value=True)
+        use_cpu_for_prep = gr.Checkbox(label="Use CPU for Preparation", value=False)
+        suppress_detailed_logs = gr.Checkbox(label="Suppress Detailed Logs", value=True)
+        discriminator_update_interval = gr.Number(label="Discriminator Update Interval", value=5)
+        label_smoothing_real = gr.Slider(label="Label Smoothing Real", minimum=0.7, maximum=0.9, value=0.8, step=0.1)
+        label_smoothing_fake = gr.Slider(label="Label Smoothing Fake", minimum=0.1, maximum=0.3, value=0.2, step=0.1)
+        perceptual_loss_weight = gr.Number(label="Perceptual Loss Weight", value=0.1)
         start_training_button = gr.Button("Start Training")
         stop_training_button = gr.Button("Stop Training")
         output = gr.Textbox(label="Output")
@@ -193,11 +197,11 @@ with gr.Blocks() as demo:
 
     with gr.Tab("Separation"):
         gr.Markdown("### Perform Separation")
-        checkpoint_path = gr.Dropdown(label="Checkpoint Path", choices=get_checkpoints(), value=None, allow_custom_value=True)
-        file_path = gr.Textbox(label="File Path")
-        n_mels = gr.Number(label="Number of Mels", value=64)
+        checkpoint_dir = gr.Textbox(label="Checkpoint Directory", value="path_to_checkpoint_directory")
+        file_path = gr.Textbox(label="File Path", value='path_to_input_audio.wav')
+        n_mels = gr.Number(label="Number of Mels", value=128)
         target_length = gr.Number(label="Target Length", value=256)
-        n_fft = gr.Number(label="Number of FFT", value=1024)
+        n_fft = gr.Number(label="Number of FFT", value=2048)
         num_stems = gr.Number(label="Number of Stems", value=7)
         cache_dir = gr.Textbox(label="Cache Directory", value="./cache")
         suppress_reading_messages = gr.Checkbox(label="Suppress Reading Messages", value=False)
@@ -205,17 +209,17 @@ with gr.Blocks() as demo:
         result = gr.File(label="Separated Stems")
         perform_separation_button.click(
             perform_separation_wrapper,
-            inputs=[checkpoint_path, file_path, n_mels, target_length, n_fft, num_stems, cache_dir, suppress_reading_messages],
+            inputs=[checkpoint_dir, file_path, n_mels, target_length, n_fft, num_stems, cache_dir, suppress_reading_messages],
             outputs=result
         )
 
     with gr.Tab("Evaluation"):
         gr.Markdown("### Evaluate Model")
-        eval_checkpoint_path = gr.Dropdown(label="Checkpoint Path", choices=get_checkpoints(), value=None, allow_custom_value=True)
+        eval_checkpoint_dir = gr.Textbox(label="Checkpoint Directory", value="path_to_checkpoint_directory")
         eval_file_path = gr.Textbox(label="File Path")
-        eval_n_mels = gr.Number(label="Number of Mels", value=64)
+        eval_n_mels = gr.Number(label="Number of Mels", value=128)
         eval_target_length = gr.Number(label="Target Length", value=256)
-        eval_n_fft = gr.Number(label="Number of FFT", value=1024)
+        eval_n_fft = gr.Number(label="Number of FFT", value=2048)
         eval_num_stems = gr.Number(label="Number of Stems", value=7)
         eval_cache_dir = gr.Textbox(label="Cache Directory", value="./cache")
         suppress_reading_messages = gr.Checkbox(label="Suppress Reading Messages", value=False)
@@ -225,7 +229,7 @@ with gr.Blocks() as demo:
         sar_output = gr.Textbox(label="Signal-to-Artifacts Ratio (SAR)")
         eval_button.click(
             evaluate_model,
-            inputs=[eval_file_path, eval_checkpoint_path, eval_n_mels, eval_target_length, eval_n_fft, eval_num_stems, eval_cache_dir, suppress_reading_messages],
+            inputs=[eval_file_path, eval_checkpoint_dir, eval_n_mels, eval_target_length, eval_n_fft, eval_num_stems, eval_cache_dir, suppress_reading_messages],
             outputs=[sdr_output, sir_output, sar_output]
         )
 
