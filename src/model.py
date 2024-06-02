@@ -2,8 +2,9 @@ import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import tempfile
-import numpy as np
+import logging
+
+logger = logging.getLogger(__name__)
 
 class KANWithDepthwiseConv(nn.Module):
     def __init__(self, in_channels, out_channels, n_mels, target_length, num_stems, cache_dir, device):
@@ -73,11 +74,6 @@ class KANWithDepthwiseConv(nn.Module):
         x = self.fc2(x)
         x = x.view(-1, self.num_stems, self.n_mels, self.target_length)
 
-        # Clean up cached activation files
-        for cache_path in [conv1_cache_path, conv2_cache_path, conv3_cache_path]:
-            if os.path.exists(cache_path):
-                os.remove(cache_path)
-
         return x
 
     def cache_activation(self, x, name):
@@ -86,23 +82,25 @@ class KANWithDepthwiseConv(nn.Module):
         cache_metadata_path = os.path.join(self.cache_dir, "cache_metadata.pt")
 
         # Load existing cache metadata
+        cache_metadata = {}
         if os.path.exists(cache_metadata_path):
-            cache_metadata = torch.load(cache_metadata_path)
-        else:
-            cache_metadata = {}
+            try:
+                cache_metadata = torch.load(cache_metadata_path)
+            except (EOFError, RuntimeError, FileNotFoundError) as e:
+                logger.error(f"Error loading cache metadata file: {e}")
+                cache_metadata = {}
 
-        # Save the activation tensor to a temporary file
-        with tempfile.NamedTemporaryFile(dir=self.cache_dir, delete=False) as temp_file:
-            x = x.detach().cpu().numpy()  # Move tensor to CPU before saving
-            np.save(temp_file.name, x)
+        # Store the activation tensor in the cache metadata dictionary
+        cache_metadata[name] = x.detach().cpu()
 
-            # Update cache metadata with the path of the saved tensor
-            cache_key = f"{name}_{temp_file.name}"
-            cache_metadata[cache_key] = temp_file.name
-
-            # Save the updated cache metadata
-            torch.save(cache_metadata, cache_metadata_path)
-            return temp_file.name
+        # Save the updated cache metadata
+        try:
+            tmp_path = cache_metadata_path + ".tmp"
+            torch.save(cache_metadata, tmp_path)
+            os.replace(tmp_path, cache_metadata_path)
+        except Exception as e:
+            logger.error(f"Error saving cache metadata file: {e}")
+        return cache_metadata_path
 
 class KANDiscriminator(nn.Module):
     def __init__(self, in_channels=1, out_channels=64, n_mels=128, target_length=256, device="cpu"):
@@ -132,6 +130,8 @@ class KANDiscriminator(nn.Module):
         return x
 
     def forward(self, x):
+        if x.dim() == 5:
+            x = x.squeeze(1)
         x = x.to(self.device)  # Ensure x is on the correct device
         x = self._forward_conv_layers(x)
         x = x.view(x.size(0), -1)  # Flatten the tensor

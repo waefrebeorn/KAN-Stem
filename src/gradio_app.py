@@ -14,7 +14,7 @@ from generate_other_noise import generate_shuffled_noise_gradio
 
 # Configure logging
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levellevel)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 # Suppress httpx, httpcore, urllib3, and tensorflow logs below WARNING level
 httpx_logger = logging.getLogger("httpx")
@@ -109,12 +109,13 @@ with gr.Blocks() as demo:
         suppress_warnings = gr.Checkbox(label="Suppress Warnings", value=False)
         suppress_reading_messages = gr.Checkbox(label="Suppress Reading Messages", value=False)
         use_cpu_for_prep = gr.Checkbox(label="Use CPU for Preparation", value=True)
+        suppress_detailed_logs = gr.Checkbox(label="Suppress Detailed Logs", value=False)
         start_training_button = gr.Button("Start Training")
         stop_training_button = gr.Button("Stop Training")
         output = gr.Textbox(label="Output")
         start_training_button.click(
             start_training_wrapper,
-            inputs=[data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep],
+            inputs=[data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep, suppress_detailed_logs],
             outputs=output
         )
         stop_training_button.click(
