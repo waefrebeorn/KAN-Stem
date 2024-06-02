@@ -14,7 +14,7 @@ from generate_other_noise import generate_shuffled_noise_gradio
 
 # Configure logging
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levellevel)s - %(message)s')
 
 # Suppress httpx, httpcore, urllib3, asyncio, and tensorflow logs below WARNING level
 httpx_logger = logging.getLogger("httpx")
@@ -94,8 +94,8 @@ with gr.Blocks() as demo:
         num_stems = gr.Number(label="Number of Stems", value=7)
         num_workers = gr.Number(label="Number of Workers", value=4)
         cache_dir = gr.Textbox(label="Cache Directory", value="./cache")
-        loss_function_g = gr.Dropdown(label="Generator Loss Function", choices=["MSELoss", "L1Loss", "SmoothL1Loss", "BCEWithLogitsLoss"], value="MSELoss")
-        loss_function_d = gr.Dropdown(label="Discriminator Loss Function", choices=["MSELoss", "L1Loss", "SmoothL1Loss", "BCEWithLogitsLoss"], value="BCEWithLogitsLoss")
+        loss_function_g = gr.Dropdown(label="Generator Loss Function", choices=["MSELoss", "L1Loss", "SmoothL1Loss", "BCEWithLogitsLoss", "WassersteinLoss"], value="MSELoss")
+        loss_function_d = gr.Dropdown(label="Discriminator Loss Function", choices=["MSELoss", "L1Loss", "SmoothL1Loss", "BCEWithLogitsLoss", "WassersteinLoss"], value="BCEWithLogitsLoss")
         optimizer_name_g = gr.Dropdown(label="Generator Optimizer", choices=["SGD", "Momentum", "Adagrad", "RMSProp", "Adadelta", "Adam"], value="Adam")
         optimizer_name_d = gr.Dropdown(label="Discriminator Optimizer", choices=["SGD", "Momentum", "Adagrad", "RMSProp", "Adadelta", "Adam"], value="Adam")
         perceptual_loss_flag = gr.Checkbox(label="Use Perceptual Loss", value=True)

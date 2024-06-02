@@ -1,18 +1,16 @@
 import os
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import DataLoader
 from datetime import datetime
 import torch.multiprocessing as mp
-import torch.nn.functional as F
 import logging
 
 from dataset import StemSeparationDataset, collate_fn
-from utils import (
-    detect_parameters, get_optimizer, compute_adversarial_loss, PerceptualLoss
-)
+from utils import detect_parameters, get_optimizer, compute_adversarial_loss, PerceptualLoss
 from model import KANWithDepthwiseConv, KANDiscriminator
 
 mp.set_start_method('spawn', force=True)
@@ -22,12 +20,35 @@ import warnings
 warnings.filterwarnings("ignore", category=UserWarning, message="Lazy modules are a new feature under heavy development")
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levellevel)s - %(message)s')
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 training_process = None
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+def wasserstein_loss(y_true, y_pred):
+    return torch.mean(y_true * y_pred)
+
+def gradient_penalty(discriminator, real_data, fake_data, device):
+    batch_size = real_data.size(0)
+    epsilon = torch.rand(batch_size, 1, 1, 1, device=device)
+    interpolated = epsilon * real_data + (1 - epsilon) * fake_data
+    interpolated.requires_grad_(True)
+
+    interpolated_out = discriminator(interpolated)
+    gradients = torch.autograd.grad(
+        outputs=interpolated_out,
+        inputs=interpolated,
+        grad_outputs=torch.ones_like(interpolated_out),
+        create_graph=True,
+        retain_graph=True
+    )[0]
+
+    gradients = gradients.view(batch_size, -1)
+    gradient_norm = gradients.norm(2, dim=1)
+    penalty = ((gradient_norm - 1) ** 2).mean()
+    return penalty
 
 def preprocess_and_cache_dataset(data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation, suppress_warnings, num_workers, device_prep):
     dataset = StemSeparationDataset(data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation, suppress_warnings, num_workers, device_prep)
@@ -47,7 +68,7 @@ def create_model_and_optimizer(device, n_mels, target_length, cache_dir, learnin
     optimizer_d = get_optimizer(optimizer_name_d, discriminator.parameters(), learning_rate_d, weight_decay)
     return model, discriminator, optimizer_g, optimizer_d
 
-def start_training(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep, suppress_detailed_logs):
+def start_training(data_dir, val_dir, batch_size, num_epochs, initial_lr_g, initial_lr_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep):
     global device
     logger.info(f"Starting training with dataset at {data_dir}")
     device_str = 'cuda' if use_cuda and torch.cuda.is_available() else 'cpu'
@@ -61,22 +82,22 @@ def start_training(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, l
     
     for stem in range(num_stems):
         try:
-            train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_str, checkpoint_dir, save_interval, accumulation_steps, learning_rate_g, learning_rate_d, optimizer_name_g, optimizer_name_d, loss_function_g, loss_function_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, num_workers, early_stopping_patience, weight_decay, use_cpu_for_prep, suppress_warnings, suppress_reading_messages, cache_dir, device_prep)
+            train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_str, checkpoint_dir, save_interval, accumulation_steps, initial_lr_g, initial_lr_d, optimizer_name_g, optimizer_name_d, loss_function_g, loss_function_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, num_workers, early_stopping_patience, weight_decay, use_cpu_for_prep, suppress_warnings, suppress_reading_messages, cache_dir)
         except Exception as e:
             logger.error(f"Error in train_single_stem: {e}", exc_info=True)
             raise  # Reraise the exception to halt training on error
 
-def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_str, checkpoint_dir, save_interval, accumulation_steps, learning_rate_g, learning_rate_d, optimizer_name_g, optimizer_name_d, loss_function_g, loss_function_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, num_workers, early_stopping_patience, weight_decay, use_cpu_for_prep, suppress_warnings, suppress_reading_messages, cache_dir, device_prep):
+def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_str, checkpoint_dir, save_interval, accumulation_steps, initial_lr_g, initial_lr_d, optimizer_name_g, optimizer_name_d, loss_function_g, loss_function_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, num_workers, early_stopping_patience, weight_decay, use_cpu_for_prep, suppress_warnings, suppress_reading_messages, cache_dir):
     logger.info("Starting training for single stem: %s", stem)
     writer = SummaryWriter(log_dir=os.path.join(checkpoint_dir, 'runs', f'stem_{stem}_{datetime.now().strftime("%Y%m%d-%H%M%S")}')) if tensorboard_flag else None
 
     sample_rate, n_mels, n_fft = detect_parameters(data_dir)
     target_length = 256
 
-    model, discriminator, optimizer_g, optimizer_d = create_model_and_optimizer(device_str, n_mels, target_length, cache_dir, learning_rate_g, learning_rate_d, optimizer_name_g, optimizer_name_d, weight_decay)
+    model, discriminator, optimizer_g, optimizer_d = create_model_and_optimizer(device_str, n_mels, target_length, cache_dir, initial_lr_g, initial_lr_d, optimizer_name_g, optimizer_name_d, weight_decay)
 
     train_loader = DataLoader(
-        StemSeparationDataset(data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation, suppress_warnings, num_workers, device_prep),
+        StemSeparationDataset(data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation, suppress_warnings, num_workers, use_cpu_for_prep),
         batch_size=batch_size,
         shuffle=True,
         pin_memory=True,
@@ -85,7 +106,7 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_st
     )
     
     val_loader = DataLoader(
-        StemSeparationDataset(val_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation=False, suppress_warnings=suppress_warnings, num_workers=num_workers, device_prep=device_prep),
+        StemSeparationDataset(val_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation=False, suppress_warnings=suppress_warnings, num_workers=num_workers, device_prep=use_cpu_for_prep),
         batch_size=batch_size,
         shuffle=False,
         pin_memory=True,
@@ -133,7 +154,7 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_st
                     targets = targets.squeeze(2)
 
                 loss_g = loss_function_g(outputs.to(device_str), targets.to(device_str))
-                scaler.scale(loss_g).backward()
+                scaler.scale(loss_g).backward(retain_graph=True)
 
                 real_labels = torch.ones(inputs.size(0), 1, device=device_str)
                 fake_labels = torch.zeros(inputs.size(0), 1, device=device_str)
@@ -142,7 +163,8 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_st
 
                 loss_d_real = loss_function_d(real_out, real_labels)
                 loss_d_fake = loss_function_d(fake_out, fake_labels)
-                loss_d = (loss_d_real + loss_d_fake) / 2
+                gp = gradient_penalty(discriminator, targets.to(device_str), outputs.to(device_str), device_str)
+                loss_d = (loss_d_real + loss_d_fake) / 2 + 10 * gp  # Adding gradient penalty term
 
                 scaler.scale(loss_d).backward()
 
@@ -254,11 +276,12 @@ def start_training_wrapper(data_dir, val_dir, batch_size, num_epochs, learning_r
         "MSELoss": nn.MSELoss(),
         "L1Loss": nn.L1Loss(),
         "SmoothL1Loss": nn.SmoothL1Loss(),
-        "BCEWithLogitsLoss": nn.BCEWithLogitsLoss()
+        "BCEWithLogitsLoss": nn.BCEWithLogitsLoss(),
+        "WassersteinLoss": wasserstein_loss
     }
     loss_function_g = loss_function_map[loss_function_str_g]
     loss_function_d = loss_function_map[loss_function_str_d]
-    training_process = mp.Process(target=start_training, args=(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep, suppress_detailed_logs))
+    training_process = mp.Process(target=start_training, args=(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep))
     training_process.start()
     return f"Training Started with {loss_function_str_g} for Generator and {loss_function_str_d} for Discriminator, using {optimizer_name_g} for Generator Optimizer and {optimizer_name_d} for Discriminator Optimizer"
     
