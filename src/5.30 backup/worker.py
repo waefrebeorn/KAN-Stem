@@ -6,7 +6,6 @@ import logging
 import time
 from utils import load_and_preprocess
 import hashlib
-import pickle
 
 logger = logging.getLogger(__name__)
 
@@ -26,11 +25,11 @@ def worker(input_queue, output_queue, mel_spectrogram_params, data_dir, target_l
         cache_subdir = "augmented" if apply_data_augmentation else "original"
         cache_dir_path = os.path.join(cache_dir, cache_subdir)
         os.makedirs(cache_dir_path, exist_ok=True)
-        return os.path.join(cache_dir_path, cache_key + ".pkl")
+        return os.path.join(cache_dir_path, cache_key + ".pt")
 
     def verify_data(data):
         # Add any specific checks to verify the integrity of the data
-        if data is None or not isinstance(data, dict) or 'tensor' not in data or 'metadata' not in data:
+        if data is None or not isinstance(data, torch.Tensor):
             return False
         return True
 
@@ -44,15 +43,14 @@ def worker(input_queue, output_queue, mel_spectrogram_params, data_dir, target_l
             if os.path.exists(cache_path):
                 logger.info(f"{process_name}: Loading from cache: {cache_path}")
                 try:
-                    with open(cache_path, 'rb') as f:
-                        data = pickle.load(f)
+                    data = torch.load(cache_path)
                     if verify_data(data):
                         logger.info(f"{process_name}: Successfully loaded from cache: {cache_path}")
-                        logger.debug(f"{process_name}: Loaded data size: {data['tensor'].size() if isinstance(data['tensor'], torch.Tensor) else len(data['tensor'])}")
+                        logger.debug(f"{process_name}: Loaded data size: {data.size() if isinstance(data, torch.Tensor) else len(data)}")
                     else:
                         logger.warning(f"{process_name}: Cache data verification failed, reprocessing: {cache_path}")
                         data = None
-                except (FileNotFoundError, pickle.UnpicklingError, RuntimeError) as e:
+                except (FileNotFoundError, RuntimeError) as e:
                     logger.warning(f"{process_name}: Error loading from cache, reprocessing: {e}")
                     data = None
             else:
@@ -60,21 +58,14 @@ def worker(input_queue, output_queue, mel_spectrogram_params, data_dir, target_l
 
             if data is None:
                 start_time = time.time()
-                tensor = load_and_preprocess(file_path, mel_spectrogram, target_length, apply_data_augmentation, device)
+                data = load_and_preprocess(file_path, mel_spectrogram, target_length, apply_data_augmentation, device)
                 end_time = time.time()
 
-                if tensor is not None:
-                    metadata = {
-                        'apply_data_augmentation': apply_data_augmentation,
-                        'mel_spectrogram_params': mel_spectrogram_params,
-                        'processing_time': end_time - start_time,
-                    }
-                    data = {'tensor': tensor, 'metadata': metadata}
+                if data is not None:
                     logger.info(f"{process_name}: Successfully processed {file_path} in {end_time - start_time:.2f} seconds")
-                    logger.debug(f"{process_name}: Processed data size: {tensor.size() if isinstance(tensor, torch.Tensor) else len(tensor)}")
+                    logger.debug(f"{process_name}: Processed data size: {data.size() if isinstance(data, torch.Tensor) else len(data)}")
                     try:
-                        with open(cache_path, 'wb') as f:
-                            pickle.dump(data, f)
+                        torch.save(data, cache_path)
                         logger.info(f"{process_name}: Saved to cache: {cache_path}")
                     except Exception as e:
                         logger.error(f"{process_name}: Error saving to cache: {e}")
@@ -90,5 +81,4 @@ def worker(input_queue, output_queue, mel_spectrogram_params, data_dir, target_l
             logger.error(f"{process_name}: Error processing {file_path}: {e}")
             output_queue.put((stem_name, None))
 
-    output_queue.close()
-    logger.info(f"{process_name}: Finished processing. Output queue closed.")
+    logger.info(f"{process_name}: Finished processing.")

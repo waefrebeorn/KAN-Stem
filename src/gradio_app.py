@@ -14,7 +14,7 @@ from generate_other_noise import generate_shuffled_noise_gradio
 
 # Configure logging
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levellevel)s - %(message)s')
 
 # Suppress httpx, httpcore, urllib3, and tensorflow logs below WARNING level
 httpx_logger = logging.getLogger("httpx")
@@ -25,8 +25,6 @@ httpx_logger.setLevel(logging.WARNING)
 httpcore_logger.setLevel(logging.WARNING)
 urllib3_logger.setLevel(logging.WARNING)
 tensorflow_logger.setLevel(logging.WARNING)
-
-training_process = None
 
 def read_audio(file_path, suppress_messages=False):
     try:

@@ -1,15 +1,14 @@
 import os
 import torch
 import torchaudio
-import torch.nn.functional as F
 import torchaudio.transforms as T
 import logging
 import soundfile as sf
 import psutil
 import GPUtil
 import time
-from multiprocessing import Value, Lock
 import torch.nn as nn
+from multiprocessing import Value, Lock
 
 logger = logging.getLogger(__name__)
 
@@ -179,10 +178,11 @@ def load_and_preprocess(file_path, mel_spectrogram, target_length, apply_data_au
             input_audio = data_augmentation(input_audio, device=device)
             logger.debug(f"After data augmentation, input_audio device: {input_audio.device}")
         else:
-            input_audio = input_audio.float()
+            input_audio = input_audio.float().to(device)
 
-        input_mel = mel_spectrogram(input_audio.to(device)).squeeze(0)[:, :target_length]
+        input_mel = mel_spectrogram(input_audio).squeeze(0)[:, :target_length]
 
+        # Move input_mel back to CPU after processing on GPU
         input_mel = input_mel.to('cpu')
         logger.debug(f"input_mel device: {input_mel.device}")
 

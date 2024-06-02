@@ -1,118 +1,29 @@
 import os
 import torch
 import torchaudio.transforms as T
-from torch.utils.data import Dataset
-from torch.multiprocessing import Manager, Queue, Value, Lock, Process
 import logging
-import queue
-import hashlib
+from torch.utils.data import Dataset
 from utils import load_and_preprocess
-from worker import worker  # Import the worker function
 
 logger = logging.getLogger(__name__)
 
 class StemSeparationDataset(Dataset):
-    def __init__(self, data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation=False, suppress_messages=False, num_workers=4, device_str='cpu'):
+    def __init__(self, data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation, suppress_warnings, num_workers, device_prep):
         self.data_dir = data_dir
         self.n_mels = n_mels
         self.target_length = target_length
         self.n_fft = n_fft
         self.cache_dir = cache_dir
         self.apply_data_augmentation = apply_data_augmentation
-        self.suppress_messages = suppress_messages
+        self.suppress_warnings = suppress_warnings
         self.num_workers = num_workers
-        self.device_str = device_str
+        self.device_prep = device_prep
 
-        manager = Manager()
-        self.input_queue = manager.Queue()
-        self.output_queue = manager.Queue()
-        self.valid_stems = [f for f in os.listdir(data_dir) if f.endswith(('.wav', '.ogg'))]
+        self.valid_stems = [f for f in os.listdir(data_dir) if f.endswith('.wav')]
+        if not self.valid_stems:
+            raise ValueError(f"No valid audio files found in {data_dir}")
 
-        self.num_processed_stems = Value('i', 0)
-        self.lock = Lock()
-
-        self.mel_spectrogram_params = {
-            'sample_rate': 22050,
-            'n_fft': self.n_fft,
-            'win_length': None,
-            'hop_length': self.n_fft // 4,
-            'n_mels': self.n_mels,
-            'power': 2.0
-        }
-
-        self.workers = self._start_workers()
-        self._process_stems()
-
-    def _get_cache_key(self, stem_name):
-        cache_key = f"{stem_name}_{self.apply_data_augmentation}_{self.mel_spectrogram_params}"
-        cache_key = hashlib.md5(cache_key.encode()).hexdigest()
-        logger.debug(f"Generated cache key for {stem_name}: {cache_key}")
-        return cache_key
-
-    def _get_cache_path(self, cache_key):
-        cache_subdir = "augmented" if self.apply_data_augmentation else "original"
-        cache_dir = os.path.join(self.cache_dir, cache_subdir)
         os.makedirs(cache_dir, exist_ok=True)
-        return os.path.join(cache_dir, cache_key + ".pt")
-
-    def _load_from_cache(self, cache_path):
-        try:
-            logger.info(f"Attempting to load from cache: {cache_path}")
-            data = torch.load(cache_path)
-            logger.info(f"Successfully loaded from cache: {cache_path}")
-            return data
-        except (FileNotFoundError, RuntimeError):  # Handle missing or corrupted cache
-            logger.warning(f"Cache not found or corrupted: {cache_path}")
-            return None
-
-    def _save_to_cache(self, cache_path, data):
-        logger.info(f"Saving to cache: {cache_path}")
-        torch.save(data, cache_path)
-
-    def _start_workers(self):
-        workers = []
-        if self.num_workers > 0:
-            stems_per_worker = len(self.valid_stems) // self.num_workers
-            for i in range(self.num_workers):
-                start_idx = i * stems_per_worker
-                end_idx = start_idx + stems_per_worker if i < self.num_workers - 1 else len(self.valid_stems)
-                worker_stems = self.valid_stems[start_idx:end_idx]
-                
-                p = Process(target=worker, args=(
-                    self.input_queue, self.output_queue, self.mel_spectrogram_params, 
-                    self.data_dir, self.target_length, self.device_str, self.apply_data_augmentation,
-                    worker_stems, self.lock, self.num_processed_stems, self.cache_dir
-                ))
-                p.start()
-                workers.append(p)
-        return workers
-
-    def _process_stems(self):
-        processed_data = []
-        while True:
-            try:
-                stem_name, data = self.output_queue.get(timeout=60)
-                if data is None:
-                    continue
-                logger.info(f"Processed stem: {stem_name}")
-                processed_data.append((stem_name, data))
-            except queue.Empty:
-                with self.lock:
-                    if self.num_processed_stems.value >= len(self):
-                        logger.info("All stems processed, ending iteration.")
-                        break
-            except (ConnectionResetError, EOFError) as e:
-                logger.error(f"Connection error in _process_stems: {e}")
-                self._restart_workers()
-
-        processed_data.sort(key=lambda x: x[0])
-        self.processed_data = [x[1] for x in processed_data]
-
-    def _restart_workers(self):
-        logger.info("Restarting workers due to connection error.")
-        for worker in self.workers:
-            worker.terminate()
-        self.workers = self._start_workers()
 
     def __len__(self):
         return len(self.valid_stems)
@@ -128,18 +39,67 @@ class StemSeparationDataset(Dataset):
 
         logger.info(f"Processing stem: {stem_name}")
         data = self._process_single_stem(stem_name)
-        self._save_to_cache(cache_path, data)
+        if data is not None:
+            # Move tensors to CPU before saving to cache
+            data['input'] = data['input'].cpu()
+            data['target'] = data['target'].cpu()
+            self._save_to_cache(cache_path, data)
         return data
 
+    def _get_cache_key(self, stem_name):
+        return f"{stem_name}_{self.apply_data_augmentation}_{self.n_mels}_{self.target_length}_{self.n_fft}"
+
+    def _get_cache_path(self, cache_key):
+        return os.path.join(self.cache_dir, f"{cache_key}.pt")
+
+    def _load_from_cache(self, cache_path):
+        try:
+            logger.info(f"Attempting to load from cache: {cache_path}")
+            data = torch.load(cache_path)
+            logger.info(f"Successfully loaded from cache: {cache_path}")
+            return data
+        except (FileNotFoundError, RuntimeError) as e:
+            logger.warning(f"Cache not found or corrupted: {cache_path}. Error: {e}")
+            return None
+
+    def _save_to_cache(self, cache_path, data):
+        try:
+            logger.info(f"Saving to cache: {cache_path}")
+            torch.save(data, cache_path)
+            logger.info(f"Successfully saved to cache: {cache_path}")
+        except Exception as e:
+            logger.error(f"Error saving to cache: {cache_path}. Error: {e}")
+
     def _process_single_stem(self, stem_name):
-        file_path = os.path.join(self.data_dir, stem_name)
-        logger.info(f"Loading and preprocessing: {file_path}")
-        device = torch.device(self.device_str)
-        mel_spectrogram = T.MelSpectrogram(**self.mel_spectrogram_params).to(device)
-        return load_and_preprocess(file_path, mel_spectrogram, self.target_length, self.apply_data_augmentation, device)
+        try:
+            file_path = os.path.join(self.data_dir, stem_name)
+            mel_spectrogram = T.MelSpectrogram(
+                sample_rate=22050,
+                n_fft=self.n_fft,
+                win_length=None,
+                hop_length=self.n_fft // 4,
+                n_mels=self.n_mels,
+                power=2.0
+            ).to(torch.float32).to(self.device_prep)
+
+            input_mel = load_and_preprocess(file_path, mel_spectrogram, self.target_length, self.apply_data_augmentation, self.device_prep)
+
+            if input_mel is None:
+                return None
+
+            # Simulate target data for now. In practice, this should be the actual target stem
+            target_mel = input_mel.clone()
+
+            # Add an extra dimension to make it 4D: (batch_size, channels, height, width)
+            input_mel = input_mel.unsqueeze(0)
+            target_mel = target_mel.unsqueeze(0)
+
+            return {"input": input_mel, "target": target_mel}
+        except Exception as e:
+            logger.error(f"Error processing stem {stem_name}: {e}")
+            return None
 
 def collate_fn(batch):
-    batch = [b for b in batch if b is not None]
-    if not batch:
-        return None
-    return torch.utils.data.dataloader.default_collate(batch)
+    inputs = torch.stack([item['input'] for item in batch])
+    targets = torch.stack([item['target'] for item in batch])
+    return {'input': inputs, 'target': targets}

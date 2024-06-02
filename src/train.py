@@ -1,23 +1,24 @@
 import os
 import torch
-import torchaudio.transforms as T
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import DataLoader
 from datetime import datetime
-from torch.multiprocessing import Process, Value, Lock
+import torch.multiprocessing as mp
 import logging
-import multiprocessing as mp
 
 from dataset import StemSeparationDataset, collate_fn
 from utils import (
-    detect_parameters, get_optimizer, custom_loss, write_audio, check_device,
-    compute_adversarial_loss, load_and_preprocess, data_augmentation, read_audio
+    detect_parameters, get_optimizer, compute_adversarial_loss, PerceptualLoss
 )
 from model import KANWithDepthwiseConv, KANDiscriminator
 
 mp.set_start_method('spawn', force=True)
+
+# Suppress specific warnings
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, message="Lazy modules are a new feature under heavy development")
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -26,9 +27,18 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 training_process = None
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-num_processed_stems = Value('i', 0)
-total_num_stems = Value('i', 0)
-dataset_lock = Lock()
+
+def preprocess_and_cache_dataset(data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation, suppress_warnings, num_workers, device_prep):
+    dataset = StemSeparationDataset(data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation, suppress_warnings, num_workers, device_prep)
+    
+    for idx in range(len(dataset)):
+        try:
+            data = dataset[idx]
+            # Add logging statements or assertions to check the cached data
+        except Exception as e:
+            logger.error(f"Error during preprocessing and caching: {e}")
+    
+    logger.info("Preprocessing and caching completed.")
 
 def create_model_and_optimizer(device, n_mels, target_length, cache_dir, learning_rate_g, learning_rate_d, optimizer_name_g, optimizer_name_d, weight_decay):
     model = KANWithDepthwiseConv(in_channels=1, out_channels=64, n_mels=n_mels, target_length=target_length, num_stems=1, cache_dir=cache_dir, device=device).to(device)
@@ -37,48 +47,27 @@ def create_model_and_optimizer(device, n_mels, target_length, cache_dir, learnin
     optimizer_d = get_optimizer(optimizer_name_d, discriminator.parameters(), learning_rate_d, weight_decay)
     return model, discriminator, optimizer_g, optimizer_d
 
-def run_training(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep):
-    start_training(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep)
-
-def start_training_wrapper(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_str_g, loss_function_str_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep):
-    global training_process
-    loss_function_map = {
-        "MSELoss": nn.MSELoss(),
-        "L1Loss": nn.L1Loss(),
-        "SmoothL1Loss": nn.SmoothL1Loss(),
-        "BCEWithLogitsLoss": nn.BCEWithLogitsLoss()
-    }
-    loss_function_g = loss_function_map[loss_function_str_g]
-    loss_function_d = loss_function_map[loss_function_str_d]
-    training_process = Process(target=run_training, args=(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep))
-    training_process.start()
-    return f"Training Started with {loss_function_str_g} for Generator and {loss_function_str_d} for Discriminator, using {optimizer_name_g} for Generator Optimizer and {optimizer_name_d} for Discriminator Optimizer"
-
-def stop_training_wrapper():
-    global training_process
-    if training_process is not None:
-        training_process.terminate()
-        training_process = None
-        return "Training Stopped"
-    return "No Training Process Running"
-
 def start_training(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep):
     global device
     logger.info(f"Starting training with dataset at {data_dir}")
     device_str = 'cuda' if use_cuda and torch.cuda.is_available() else 'cpu'
-    logger.info(f"Using device: {device_str}")
+    device_prep = 'cpu' if use_cpu_for_prep else device_str
+    logger.info(f"Using device: {device_str} for training and {device_prep} for preprocessing")
 
     sample_rate, n_mels, n_fft = detect_parameters(data_dir)
     target_length = 256
 
+    # Preprocess and cache the dataset
+    preprocess_and_cache_dataset(data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation, suppress_warnings, num_workers, device_prep)
+    
     for stem in range(num_stems):
         try:
-            train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_str, checkpoint_dir, save_interval, accumulation_steps, learning_rate_g, learning_rate_d, optimizer_name_g, optimizer_name_d, loss_function_g, loss_function_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, num_workers, early_stopping_patience, weight_decay, use_cpu_for_prep, suppress_warnings, suppress_reading_messages, cache_dir)
+            train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_str, checkpoint_dir, save_interval, accumulation_steps, learning_rate_g, learning_rate_d, optimizer_name_g, optimizer_name_d, loss_function_g, loss_function_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, num_workers, early_stopping_patience, weight_decay, use_cpu_for_prep, suppress_warnings, suppress_reading_messages, cache_dir, device_prep)
         except Exception as e:
             logger.error(f"Error in train_single_stem: {e}", exc_info=True)
             raise  # Reraise the exception to halt training on error
 
-def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_str, checkpoint_dir, save_interval, accumulation_steps, learning_rate_g, learning_rate_d, optimizer_name_g, optimizer_name_d, loss_function_g, loss_function_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, num_workers, early_stopping_patience, weight_decay, use_cpu_for_prep, suppress_warnings, suppress_reading_messages, cache_dir):
+def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_str, checkpoint_dir, save_interval, accumulation_steps, learning_rate_g, learning_rate_d, optimizer_name_g, optimizer_name_d, loss_function_g, loss_function_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, num_workers, early_stopping_patience, weight_decay, use_cpu_for_prep, suppress_warnings, suppress_reading_messages, cache_dir, device_prep):
     logger.info("Starting training for single stem: %s", stem)
     writer = SummaryWriter(log_dir=os.path.join(checkpoint_dir, 'runs', f'stem_{stem}_{datetime.now().strftime("%Y%m%d-%H%M%S")}')) if tensorboard_flag else None
 
@@ -88,7 +77,7 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_st
     model, discriminator, optimizer_g, optimizer_d = create_model_and_optimizer(device_str, n_mels, target_length, cache_dir, learning_rate_g, learning_rate_d, optimizer_name_g, optimizer_name_d, weight_decay)
 
     train_loader = DataLoader(
-        StemSeparationDataset(data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation, suppress_warnings, num_workers, device_str),
+        StemSeparationDataset(data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation, suppress_warnings, num_workers, device_prep),
         batch_size=batch_size,
         shuffle=True,
         pin_memory=True,
@@ -97,7 +86,7 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_st
     )
     
     val_loader = DataLoader(
-        StemSeparationDataset(val_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation=False, suppress_messages=suppress_warnings, num_workers=num_workers, device=device_str),
+        StemSeparationDataset(val_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation=False, suppress_warnings=suppress_warnings, num_workers=num_workers, device_prep=device_prep),
         batch_size=batch_size,
         shuffle=False,
         pin_memory=True,
@@ -128,32 +117,23 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_st
 
             logger.debug(f"Processing batch {i+1}/{len(train_loader)}")
 
-            _, available_memory = torch.cuda.mem_get_info()
-            input_size = data['tensor'].numel() * data['tensor'].element_size()
-            target_size = data['metadata']['target'][:, stem].numel() * data['metadata']['target'][:, stem].element_size()
-            total_size = input_size + target_size
-
-            inputs = data['tensor'].unsqueeze(1)
-            targets = data['metadata']['target'][:, stem].unsqueeze(1)
-
-            if available_memory > total_size:
-                inputs = inputs.to(device_str)
-                targets = targets.to(device_str)
-            elif available_memory > input_size:
-                inputs = inputs.to(device_str)
-                targets = targets.to('cpu')
-            else:
-                inputs = inputs.to('cpu')
-                targets = targets.to('cpu')
-
-            if available_memory < (input_size + target_size):
-                model.to('cpu')
-                model.to(device_str)
+            inputs = data['input'].to(device_str)
+            targets = data['target'][:, stem].to(device_str)
 
             with torch.cuda.amp.autocast():
-                outputs = model(inputs.to(device_str))
+                outputs = model(inputs)
                 target_length = targets.size(-1)
                 outputs = outputs[..., :target_length]
+
+                # Ensure targets and outputs are 4D tensors
+                targets = targets.unsqueeze(1)
+                outputs = outputs.unsqueeze(1)
+
+                # Remove unnecessary extra dimension from outputs tensor before passing to the discriminator
+                if outputs.dim() == 5:
+                    outputs = outputs.squeeze(2)
+                if targets.dim() == 5:
+                    targets = targets.squeeze(2)
 
                 loss_g = loss_function_g(outputs.to(device_str), targets.to(device_str))
                 scaler.scale(loss_g).backward()
@@ -206,11 +186,16 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_st
 
                 logger.debug(f"Validating batch {i+1}/{len(val_loader)}")
 
-                inputs = data['tensor'].unsqueeze(1).to(device_str)
-                targets = data['metadata']['target'][:, stem].unsqueeze(1).to(device_str)
+                inputs = data['input'].to(device_str)
+                targets = data['target'][:, stem].to(device_str)
                 outputs = model(inputs)
                 target_length = targets.size(-1)
                 outputs = outputs[..., :target_length]
+
+                # Ensure targets and outputs are 4D tensors
+                targets = targets.unsqueeze(1)
+                outputs = outputs.unsqueeze(1)
+
                 loss = loss_function_g(outputs, targets)
                 val_loss += loss.item()
 
@@ -250,6 +235,28 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_st
 
     if tensorboard_flag:
         writer.close()
+
+def start_training_wrapper(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_str_g, loss_function_str_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep):
+    global training_process
+    loss_function_map = {
+        "MSELoss": nn.MSELoss(),
+        "L1Loss": nn.L1Loss(),
+        "SmoothL1Loss": nn.SmoothL1Loss(),
+        "BCEWithLogitsLoss": nn.BCEWithLogitsLoss()
+    }
+    loss_function_g = loss_function_map[loss_function_str_g]
+    loss_function_d = loss_function_map[loss_function_str_d]
+    training_process = mp.Process(target=start_training, args=(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep))
+    training_process.start()
+    return f"Training Started with {loss_function_str_g} for Generator and {loss_function_str_d} for Discriminator, using {optimizer_name_g} for Generator Optimizer and {optimizer_name_d} for Discriminator Optimizer"
+
+def stop_training_wrapper():
+    global training_process
+    if training_process is not None:
+        training_process.terminate()
+        training_process = None
+        return "Training Stopped"
+    return "No Training Process Running"
 
 if __name__ == '__main__':
     # Call your start_training_wrapper or any other function here as needed
