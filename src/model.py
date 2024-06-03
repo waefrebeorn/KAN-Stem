@@ -37,22 +37,35 @@ class DepthwiseSeparableConv(nn.Module):
         return x
 
 class ResidualBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, dilation=1):
+    def __init__(self, in_channels, out_channels, dilation_rates=[1, 2, 4]):
         super(ResidualBlock, self).__init__()
-        self.conv1 = DepthwiseSeparableConv(in_channels, out_channels, kernel_size=3, padding=dilation, dilation=dilation)
-        self.bn1 = nn.BatchNorm2d(out_channels)
-        self.conv2 = DepthwiseSeparableConv(out_channels, out_channels, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm2d(out_channels)
+        self.convs = nn.ModuleList([
+            DepthwiseSeparableConv(in_channels, out_channels, kernel_size=3, padding=rate, dilation=rate)
+            for rate in dilation_rates
+        ])
+        self.bns = nn.ModuleList([nn.BatchNorm2d(out_channels) for _ in dilation_rates])
         self.dropout = nn.Dropout(p=0.3)  # Dropout regularization
 
     def forward(self, x):
         residual = x
-        out = F.relu_(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
-        out = self.dropout(out)  # Apply dropout
-        out.add_(residual)
-        out = F.relu_(out)
-        return out
+        for conv, bn in zip(self.convs, self.bns):
+            x = F.relu_(bn(conv(x)))
+        x = self.dropout(x)  # Apply dropout
+        x += residual
+        return F.relu_(x)
+
+class ContextAggregationNetwork(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(ContextAggregationNetwork, self).__init__()
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm2d(out_channels)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(out_channels)
+
+    def forward(self, x):
+        x = F.relu_(self.bn1(self.conv1(x)))
+        x = F.relu_(self.bn2(self.conv2(x)))
+        return x
 
 class KANWithDepthwiseConv(nn.Module):
     def __init__(self, in_channels, out_channels, n_mels, target_length, num_stems, cache_dir, device):
@@ -72,6 +85,8 @@ class KANWithDepthwiseConv(nn.Module):
         self.pool4 = nn.MaxPool2d(kernel_size=(2, 2), stride=2).to(device)
         self.pool5 = nn.MaxPool2d(kernel_size=(2, 2), stride=2).to(device)
         self.flatten = nn.Flatten().to(device)
+
+        self.context_aggregation = ContextAggregationNetwork(out_channels * 8, out_channels * 8).to(device)
 
         self.n_mels = n_mels
         self.target_length = target_length
@@ -110,6 +125,7 @@ class KANWithDepthwiseConv(nn.Module):
         x = self.pool5(x)
 
         x = self.flatten(x)
+        x = self.context_aggregation(x)
 
         x = F.relu_(self.fc1(x))
         x = self.fc2(x)

@@ -37,15 +37,20 @@ def perform_separation(checkpoints, file_path, n_mels, target_length, n_fft, cac
         logger.error(f"Error reading input audio from {file_path}")
         return []
 
-    input_mel = T.MelSpectrogram(sample_rate=sr, n_mels=n_mels, n_fft=n_fft)(input_audio.float()).unsqueeze(0).to(device)
-
     output_audio = []
 
     for checkpoint_path in checkpoints:
-        model = load_model(checkpoint_path, 1, 64, n_mels, target_length, 1, device)  # 1 stem per model
+        model = load_model(checkpoint_path, 1, 64, n_mels, target_length, 1, device)
         model.eval()
-
+        
         with torch.no_grad():
+            input_mel = []
+            for hop_length in [512, 1024]:  # Different hop lengths for multi-scale
+                mel_spectrogram = T.MelSpectrogram(
+                    sample_rate=sr, n_mels=n_mels, n_fft=n_fft, hop_length=hop_length
+                )(input_audio.float()).unsqueeze(0).to(device)
+                input_mel.append(mel_spectrogram)
+            input_mel = torch.cat(input_mel, dim=1)  # Concatenate along channel dimension
             output_mel = model(input_mel).cpu()
             inverse_mel_transform = T.InverseMelScale(n_stft=n_fft // 2 + 1, n_mels=n_mels)
             griffin_lim_transform = T.GriffinLim(n_fft=n_fft, n_iter=32)

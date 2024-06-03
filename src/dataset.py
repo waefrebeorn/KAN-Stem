@@ -48,7 +48,12 @@ class StemSeparationDataset(Dataset):
         if cache_key in self.cache:
             stem_cache_path = self.cache[cache_key]
             if os.path.exists(stem_cache_path):
-                return torch.load(stem_cache_path)
+                data = torch.load(stem_cache_path)
+                if data and 'input' in data and 'target' in data:
+                    return data
+                else:
+                    logger.warning(f"Incomplete data in cache for {stem_name}. Reprocessing.")
+                    os.remove(stem_cache_path)
 
         logger.info(f"Processing stem: {stem_name}")
         data = self._process_single_stem(stem_name)
@@ -99,9 +104,17 @@ class StemSeparationDataset(Dataset):
             if input_mel is None:
                 return None
 
+            # Ensure the mel spectrogram has the expected shape
+            if input_mel.shape[-1] < self.target_length:
+                input_mel = torch.nn.functional.pad(input_mel, (0, self.target_length - input_mel.shape[-1]), mode='constant')
+
             target_mel = input_mel.clone()
             input_mel = input_mel.unsqueeze(0)
             target_mel = target_mel.unsqueeze(0)
+
+            # Debugging statements
+            logger.debug(f"Processed input mel shape: {input_mel.shape}")
+            logger.debug(f"Processed target mel shape: {target_mel.shape}")
 
             return {"input": input_mel, "target": target_mel}
         except Exception as e:

@@ -2,7 +2,7 @@ import os
 import gradio as gr
 import torch
 import torch.nn as nn
-from train import start_training_wrapper, stop_training_wrapper
+from train import start_training_wrapper, stop_training_wrapper, objective_optuna, train_ray_tune
 from separate_stems import perform_separation
 from model import load_model
 import torchaudio.transforms as T
@@ -11,6 +11,10 @@ import soundfile as sf
 import mir_eval
 from prepare_dataset import organize_and_prepare_dataset_gradio
 from generate_other_noise import generate_shuffled_noise_gradio
+import optuna
+import ray
+from ray import tune
+from ray.tune.schedulers import ASHAScheduler
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -87,6 +91,31 @@ def log_training_parameters(params):
     for key, value in params.items():
         logger.info(f"{key}: {value}")
 
+def start_optuna_optimization(n_trials):
+    study = optuna.create_study(direction='minimize')
+    study.optimize(objective_optuna, n_trials=n_trials)
+    return "Optuna optimization completed"
+
+def start_ray_tune_optimization(num_samples):
+    ray.init()
+    config = {
+        'batch_size': tune.choice([16, 32, 64]),
+        'num_epochs': tune.choice([10, 20, 50, 100]),
+        'learning_rate_g': tune.loguniform(1e-5, 1e-1),
+        'learning_rate_d': tune.loguniform(1e-5, 1e-1),
+        'perceptual_loss_weight': tune.uniform(0.0, 1.0),
+        'clip_value': tune.uniform(0.5, 1.5)
+    }
+    scheduler = ASHAScheduler(
+        metric='metric',
+        mode='min',
+        max_t=100,
+        grace_period=10,
+        reduction_factor=2
+    )
+    tune.run(train_ray_tune, config=config, scheduler=scheduler, num_samples=num_samples)
+    return "Ray Tune optimization completed"
+
 with gr.Blocks() as demo:
     with gr.Tab("Training"):
         gr.Markdown("### Train the Model")
@@ -126,6 +155,9 @@ with gr.Blocks() as demo:
         label_smoothing_real = gr.Slider(label="Label Smoothing Real", minimum=0.7, maximum=0.9, value=0.7, step=0.1)
         label_smoothing_fake = gr.Slider(label="Label Smoothing Fake", minimum=0.1, maximum=0.3, value=0.1, step=0.1)
         perceptual_loss_weight = gr.Number(label="Perceptual Loss Weight", value=0.1)
+        optimization_method = gr.Dropdown(label="Optimization Method", choices=["None", "Optuna", "Ray Tune"], value="None")
+        optuna_trials = gr.Number(label="Optuna Trials", value=10)
+        ray_samples = gr.Number(label="Ray Tune Samples", value=10)
         start_training_button = gr.Button("Start Training")
         stop_training_button = gr.Button("Stop Training")
         output = gr.Textbox(label="Output")
@@ -134,7 +166,7 @@ with gr.Blocks() as demo:
                                           accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
                                           perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation,
                                           add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep,
-                                          suppress_detailed_logs, discriminator_update_interval, label_smoothing_real, label_smoothing_fake, perceptual_loss_weight):
+                                          suppress_detailed_logs, discriminator_update_interval, label_smoothing_real, label_smoothing_fake, perceptual_loss_weight, optimization_method, optuna_trials, ray_samples):
             params = {
                 "Data Directory": data_dir,
                 "Validation Directory": val_dir,
@@ -171,10 +203,18 @@ with gr.Blocks() as demo:
                 "Discriminator Update Interval": discriminator_update_interval,
                 "Label Smoothing Real": label_smoothing_real,
                 "Label Smoothing Fake": label_smoothing_fake,
-                "Perceptual Loss Weight": perceptual_loss_weight
+                "Perceptual Loss Weight": perceptual_loss_weight,
+                "Optimization Method": optimization_method,
+                "Optuna Trials": optuna_trials,
+                "Ray Tune Samples": ray_samples
             }
             log_training_parameters(params)
-            return start_training_wrapper(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval,
+            if optimization_method == "Optuna":
+                return start_optuna_optimization(optuna_trials)
+            elif optimization_method == "Ray Tune":
+                return start_ray_tune_optimization(ray_samples)
+            else:
+                return start_training_wrapper(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval,
                                           accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
                                           perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation,
                                           add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep,
@@ -187,7 +227,7 @@ with gr.Blocks() as demo:
                 accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
                 perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation,
                 add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep,
-                suppress_detailed_logs, discriminator_update_interval, label_smoothing_real, label_smoothing_fake, perceptual_loss_weight
+                suppress_detailed_logs, discriminator_update_interval, label_smoothing_real, label_smoothing_fake, perceptual_loss_weight, optimization_method, optuna_trials, ray_samples
             ],
             outputs=output
         )

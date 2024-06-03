@@ -17,6 +17,11 @@ num_processed_stems = Value('i', 0)
 total_num_stems = Value('i', 0)
 dataset_lock = Lock()
 
+def setup_logger(name):
+    logger = logging.getLogger(name)
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    return logger
+
 def analyze_audio(file_path):
     try:
         waveform, sample_rate = torchaudio.load(file_path)
@@ -264,3 +269,30 @@ def get_checkpoints(checkpoints_dir):
     except Exception as e:
         logger.error(f"Error retrieving checkpoints: {e}")
         return []
+
+def compute_sdr(true, pred):
+    noise = true - pred
+    s_true = torch.sum(true ** 2, dim=[1, 2, 3])
+    s_noise = torch.sum(noise ** 2, dim=[1, 2, 3])
+    sdr = 10 * torch.log10(s_true / (s_noise + 1e-8))
+    return sdr
+
+def compute_sir(true, pred):
+    noise = true - pred
+    s_true = torch.sum(true ** 2, dim=[1, 2, 3])
+    s_interf = torch.sum((true - noise) ** 2, dim=[1, 2, 3])
+    sir = 10 * torch.log10(s_true / (s_interf + 1e-8))
+    return sir
+
+def compute_sar(true, pred):
+    noise = true - pred
+    s_noise = torch.sum(noise ** 2, dim=[1, 2, 3])
+    s_artif = torch.sum((pred - noise) ** 2, dim=[1, 2, 3])
+    sar = 10 * torch.log10(s_noise / (s_artif + 1e-8))
+    return sar
+
+def log_training_parameters(params):
+    """Logs the training parameters."""
+    logger.info("Training Parameters Selected:")
+    for key, value in params.items():
+        logger.info(f"{key}: {value}")

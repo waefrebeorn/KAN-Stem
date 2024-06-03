@@ -30,3 +30,5 @@ gputil
 ffmpeg
 pydub
 mir_eval
+optuna
+ray[tune]
