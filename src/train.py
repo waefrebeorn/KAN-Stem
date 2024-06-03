@@ -134,6 +134,10 @@ def start_training(data_dir, val_dir, batch_size, num_epochs, initial_lr_g, init
     }
     log_training_parameters(params)
 
+    if scheduler_gamma >= 1.0:
+        scheduler_gamma = 0.9  # Ensure the factor is less than 1.0
+        logger.warning("scheduler_gamma should be < 1.0. Setting scheduler_gamma to 0.9")
+
     for stem in range(num_stems):
         try:
             train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_str, checkpoint_dir, save_interval, accumulation_steps, initial_lr_g, initial_lr_d, optimizer_name_g, optimizer_name_d, loss_function_g, loss_function_d, perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, num_workers, early_stopping_patience, disable_early_stopping, weight_decay, use_cpu_for_prep, suppress_warnings, suppress_reading_messages, cache_dir, device_prep, add_noise, noise_amount, discriminator_update_interval, label_smoothing_real, label_smoothing_fake)
@@ -245,6 +249,7 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_st
                     scaler.scale(loss_d).backward()
                     torch.nn.utils.clip_grad_norm_(discriminator.parameters(), clip_value)
                     scaler.step(optimizer_d)
+                    scaler.update()
                     optimizer_d.zero_grad()
                     running_loss_d += loss_d.item()
 
