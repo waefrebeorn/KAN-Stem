@@ -48,12 +48,15 @@ class StemSeparationDataset(Dataset):
         if cache_key in self.cache:
             stem_cache_path = self.cache[cache_key]
             if os.path.exists(stem_cache_path):
-                data = torch.load(stem_cache_path)
-                if data and 'input' in data and 'target' in data:
-                    return data
-                else:
-                    logger.warning(f"Incomplete data in cache for {stem_name}. Reprocessing.")
-                    os.remove(stem_cache_path)
+                try:
+                    data = torch.load(stem_cache_path)
+                    if data and 'input' in data and 'target' in data:
+                        return data
+                    else:
+                        logger.warning(f"Incomplete data in cache for {stem_name}. Reprocessing.")
+                        os.remove(stem_cache_path)
+                except Exception as e:
+                    logger.error(f"Error loading cached data for {stem_name}: {e}")
 
         logger.info(f"Processing stem: {stem_name}")
         data = self._process_single_stem(stem_name)
