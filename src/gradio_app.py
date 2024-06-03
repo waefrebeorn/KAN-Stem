@@ -93,12 +93,12 @@ with gr.Blocks() as demo:
         data_dir = gr.Textbox(label="Data Directory", value="K:/KAN-Stem DataSet/ProcessedDataset")
         val_dir = gr.Textbox(label="Validation Directory", value="K:/KAN-Stem DataSet/Chunk_0_Sample")
         batch_size = gr.Number(label="Batch Size", value=32)
-        num_epochs = gr.Number(label="Number of Epochs", value=666)
+        num_epochs = gr.Number(label="Number of Epochs", value=200)
         learning_rate_g = gr.Number(label="Generator Learning Rate", value=0.01)
-        learning_rate_d = gr.Number(label="Discriminator Learning Rate", value=2e-5)
+        learning_rate_d = gr.Number(label="Discriminator Learning Rate", value=1e-5)
         use_cuda = gr.Checkbox(label="Use CUDA", value=True)
         checkpoint_dir = gr.Textbox(label="Checkpoint Directory", value="./checkpoints")
-        save_interval = gr.Number(label="Save Interval", value=25)
+        save_interval = gr.Number(label="Save Interval", value=10)
         accumulation_steps = gr.Number(label="Accumulation Steps", value=4)
         num_stems = gr.Number(label="Number of Stems", value=7)
         num_workers = gr.Number(label="Number of Workers", value=4)
@@ -108,7 +108,7 @@ with gr.Blocks() as demo:
         optimizer_name_g = gr.Dropdown(label="Generator Optimizer", choices=["SGD", "Momentum", "Adagrad", "RMSProp", "Adadelta", "Adam"], value="SGD")
         optimizer_name_d = gr.Dropdown(label="Discriminator Optimizer", choices=["SGD", "Momentum", "Adagrad", "RMSProp", "Adadelta", "Adam"], value="RMSProp")
         perceptual_loss_flag = gr.Checkbox(label="Use Perceptual Loss", value=True)
-        clip_value = gr.Number(label="Gradient Clipping Value", value=10.0)
+        clip_value = gr.Number(label="Gradient Clipping Value", value=1.0)
         scheduler_step_size = gr.Number(label="Scheduler Step Size", value=10)
         scheduler_gamma = gr.Number(label="Scheduler Gamma", value=0.9)
         tensorboard_flag = gr.Checkbox(label="Enable TensorBoard Logging", value=True)
@@ -116,15 +116,16 @@ with gr.Blocks() as demo:
         add_noise = gr.Checkbox(label="Add Noise", value=True)
         noise_amount = gr.Number(label="Noise Amount", value=0.1)
         early_stopping_patience = gr.Number(label="Early Stopping Patience", value=3)
+        disable_early_stopping = gr.Checkbox(label="Disable Early Stopping", value=False)
         weight_decay = gr.Number(label="Weight Decay", value=1e-4)
         suppress_warnings = gr.Checkbox(label="Suppress Warnings", value=True)
-        suppress_reading_messages = gr.Checkbox(label="Suppress Reading Messages", value=False)
-        use_cpu_for_prep = gr.Checkbox(label="Use CPU for Preparation", value=True)
+        suppress_reading_messages = gr.Checkbox(label="Suppress Reading Messages", value=True)
+        use_cpu_for_prep = gr.Checkbox(label="Use CPU for Preparation", value=False)
         suppress_detailed_logs = gr.Checkbox(label="Suppress Detailed Logs", value=True)
         discriminator_update_interval = gr.Number(label="Discriminator Update Interval", value=5)
         label_smoothing_real = gr.Slider(label="Label Smoothing Real", minimum=0.7, maximum=0.9, value=0.8, step=0.1)
         label_smoothing_fake = gr.Slider(label="Label Smoothing Fake", minimum=0.1, maximum=0.3, value=0.2, step=0.1)
-        perceptual_loss_weight = gr.Number(label="Perceptual Loss Weight", value=1.0)
+        perceptual_loss_weight = gr.Number(label="Perceptual Loss Weight", value=0.1)
         start_training_button = gr.Button("Start Training")
         stop_training_button = gr.Button("Stop Training")
         output = gr.Textbox(label="Output")
@@ -132,7 +133,7 @@ with gr.Blocks() as demo:
         def start_training_and_log_params(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval,
                                           accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
                                           perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation,
-                                          add_noise, noise_amount, early_stopping_patience, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep,
+                                          add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep,
                                           suppress_detailed_logs, discriminator_update_interval, label_smoothing_real, label_smoothing_fake, perceptual_loss_weight):
             params = {
                 "Data Directory": data_dir,
@@ -161,6 +162,7 @@ with gr.Blocks() as demo:
                 "Add Noise": add_noise,
                 "Noise Amount": noise_amount,
                 "Early Stopping Patience": early_stopping_patience,
+                "Disable Early Stopping": disable_early_stopping,
                 "Weight Decay": weight_decay,
                 "Suppress Warnings": suppress_warnings,
                 "Suppress Reading Messages": suppress_reading_messages,
@@ -175,7 +177,7 @@ with gr.Blocks() as demo:
             return start_training_wrapper(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval,
                                           accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
                                           perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation,
-                                          add_noise, noise_amount, early_stopping_patience, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep,
+                                          add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep,
                                           suppress_detailed_logs, discriminator_update_interval, label_smoothing_real, label_smoothing_fake, perceptual_loss_weight)
 
         start_training_button.click(
@@ -184,7 +186,7 @@ with gr.Blocks() as demo:
                 data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval,
                 accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
                 perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation,
-                add_noise, noise_amount, early_stopping_patience, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep,
+                add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep,
                 suppress_detailed_logs, discriminator_update_interval, label_smoothing_real, label_smoothing_fake, perceptual_loss_weight
             ],
             outputs=output

@@ -1,24 +1,74 @@
-import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import logging
+import os
 
 # Configure logging
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
+class AttentionLayer(nn.Module):
+    def __init__(self, channels, reduction=16):
+        super(AttentionLayer, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(channels, channels // reduction),
+            nn.ReLU(inplace=True),
+            nn.Linear(channels // reduction, channels),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        b, c, _, _ = x.size()
+        y = self.avg_pool(x).view(b, c)
+        y = self.fc(y).view(b, c, 1, 1)
+        return x * y
+
+class DepthwiseSeparableConv(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1, dilation=1):
+        super(DepthwiseSeparableConv, self).__init__()
+        self.depthwise = nn.Conv2d(in_channels, in_channels, kernel_size, stride, padding, dilation, groups=in_channels)
+        self.pointwise = nn.Conv2d(in_channels, out_channels, 1)
+
+    def forward(self, x):
+        x = self.depthwise(x)
+        x = self.pointwise(x)
+        return x
+
+class ResidualBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, dilation=1):
+        super(ResidualBlock, self).__init__()
+        self.conv1 = DepthwiseSeparableConv(in_channels, out_channels, kernel_size=3, padding=dilation, dilation=dilation)
+        self.bn1 = nn.BatchNorm2d(out_channels)
+        self.conv2 = DepthwiseSeparableConv(out_channels, out_channels, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(out_channels)
+        self.dropout = nn.Dropout(p=0.3)  # Dropout regularization
+
+    def forward(self, x):
+        residual = x
+        out = F.relu_(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        out = self.dropout(out)  # Apply dropout
+        out.add_(residual)
+        out = F.relu_(out)
+        return out
+
 class KANWithDepthwiseConv(nn.Module):
     def __init__(self, in_channels, out_channels, n_mels, target_length, num_stems, cache_dir, device):
         super(KANWithDepthwiseConv, self).__init__()
 
-        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=(3, 3), padding=1).to(device)
+        self.conv1 = DepthwiseSeparableConv(in_channels, out_channels, kernel_size=(3, 3), padding=1).to(device)
         self.pool1 = nn.MaxPool2d(kernel_size=(2, 2), stride=2).to(device)
-        self.conv2 = nn.Conv2d(out_channels, out_channels * 2, kernel_size=(3, 3), padding=1).to(device)
+        self.res_block1 = ResidualBlock(out_channels, out_channels).to(device)
+        self.attention1 = AttentionLayer(out_channels)  # Add attention layer
+        self.conv2 = DepthwiseSeparableConv(out_channels, out_channels * 2, kernel_size=(3, 3), padding=1).to(device)
         self.pool2 = nn.MaxPool2d(kernel_size=(2, 2), stride=2).to(device)
-        self.conv3 = nn.Conv2d(out_channels * 2, out_channels * 4, kernel_size=(3, 3), padding=1).to(device)
+        self.res_block2 = ResidualBlock(out_channels * 2, out_channels * 2).to(device)
+        self.attention2 = AttentionLayer(out_channels * 2)  # Add attention layer
+        self.conv3 = DepthwiseSeparableConv(out_channels * 2, out_channels * 4, kernel_size=(3, 3), padding=1, dilation=2).to(device)
         self.pool3 = nn.MaxPool2d(kernel_size=(2, 2), stride=2).to(device)
-        self.conv4 = nn.Conv2d(out_channels * 4, out_channels * 8, kernel_size=(3, 3), padding=1).to(device)
+        self.conv4 = DepthwiseSeparableConv(out_channels * 4, out_channels * 8, kernel_size=(3, 3), padding=1, dilation=2).to(device)
         self.pool4 = nn.MaxPool2d(kernel_size=(2, 2), stride=2).to(device)
         self.pool5 = nn.MaxPool2d(kernel_size=(2, 2), stride=2).to(device)
         self.flatten = nn.Flatten().to(device)
@@ -43,25 +93,25 @@ class KANWithDepthwiseConv(nn.Module):
 
     def forward(self, x):
         x = x.to(self.device)  # Ensure x is on the correct device
-        x = F.relu(self.conv1(x.clone()))  # Clone x before passing to conv1
+        x = F.relu_(self.conv1(x.clone()))  # Clone x before passing to conv1
         x = self.pool1(x)
-        self.cache_activation(x, 'conv1')
+        x = self.res_block1(x)  # Add residual block
+        x = self.attention1(x)  # Apply attention
 
-        x = F.relu(self.conv2(x.clone()))  # Clone x before passing to conv2
+        x = F.relu_(self.conv2(x.clone()))  # Clone x before passing to conv2
         x = self.pool2(x)
-        self.cache_activation(x, 'conv2')
+        x = self.res_block2(x)  # Add residual block
+        x = self.attention2(x)  # Apply attention
 
-        x = F.relu(self.conv3(x.clone()))  # Clone x before passing to conv3
+        x = F.relu_(self.conv3(x.clone()))  # Clone x before passing to conv3
         x = self.pool3(x)
-        self.cache_activation(x, 'conv3')
-
-        x = F.relu(self.conv4(x.clone()))  # Clone x before passing to conv4
+        x = F.relu_(self.conv4(x.clone()))  # Clone x before passing to conv4
         x = self.pool4(x)
         x = self.pool5(x)
 
         x = self.flatten(x)
 
-        x = F.relu(self.fc1(x))
+        x = F.relu_(self.fc1(x))
         x = self.fc2(x)
         x = torch.tanh(x)  # Use tanh activation to restrict output to [-1, 1]
         x = x.view(-1, self.num_stems, self.n_mels, self.target_length)
@@ -107,6 +157,11 @@ class KANDiscriminator(nn.Module):
         self.conv3 = nn.Conv2d(128, out_channels, kernel_size=3, padding=1).to(device)
         self.bn3 = nn.InstanceNorm2d(out_channels).to(device)
 
+        # Apply spectral normalization to conv layers
+        self.conv1 = nn.utils.spectral_norm(self.conv1)
+        self.conv2 = nn.utils.spectral_norm(self.conv2)
+        self.conv3 = nn.utils.spectral_norm(self.conv3)
+
         # Calculate the flattened size based on the convolutional layers' output
         with torch.no_grad():
             dummy_input = torch.randn(1, in_channels, n_mels, target_length, device=device)
@@ -118,9 +173,9 @@ class KANDiscriminator(nn.Module):
         nn.init.xavier_normal_(self.fc1.weight)  # Initialize fc1 weights
 
     def _forward_conv_layers(self, x):
-        x = F.relu(self.bn1(self.conv1(x)))
-        x = F.relu(self.bn2(self.conv2(x)))
-        x = F.relu(self.bn3(self.conv3(x)))
+        x = F.relu_(self.bn1(self.conv1(x)))
+        x = F.relu_(self.bn2(self.conv2(x)))
+        x = F.relu_(self.bn3(self.conv3(x)))
         return x
 
     def forward(self, x):
@@ -132,7 +187,10 @@ class KANDiscriminator(nn.Module):
         x = torch.sigmoid(self.fc1(x))
         return x
 
-def load_model(checkpoint_path, in_channels, out_channels, n_mels, target_length, num_stems, device, freeze_fc_layers=False):
+def load_model(checkpoint_path, in_channels, out_channels, n_mels, target_length, num_stems, device=None, freeze_fc_layers=False):
+    if device is None:
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')  # Automatic device selection
+
     model = KANWithDepthwiseConv(in_channels, out_channels, n_mels, target_length, num_stems, "./cache", device)
     model.load_state_dict(torch.load(checkpoint_path, map_location=device))
 

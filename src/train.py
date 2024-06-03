@@ -10,6 +10,8 @@ import logging
 import torch.nn.functional as F
 import torchvision.models as models
 from torchvision.models import VGG16_Weights
+from torch.cuda.amp import autocast, GradScaler
+from torch.profiler import profile, record_function, ProfilerActivity
 
 from dataset import StemSeparationDataset, collate_fn
 from utils import detect_parameters, get_optimizer, PerceptualLoss
@@ -22,7 +24,7 @@ import warnings
 warnings.filterwarnings("ignore", category=UserWarning, message="Lazy modules are a new feature under heavy development")
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname=s - %(message)s')
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
@@ -78,7 +80,7 @@ def log_training_parameters(params):
 def convert_to_3_channels(tensor):
     return tensor.expand(-1, 3, -1, -1)
 
-def start_training(data_dir, val_dir, batch_size, num_epochs, initial_lr_g, initial_lr_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep, discriminator_update_interval, label_smoothing_real, label_smoothing_fake, suppress_detailed_logs):
+def start_training(data_dir, val_dir, batch_size, num_epochs, initial_lr_g, initial_lr_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep, discriminator_update_interval, label_smoothing_real, label_smoothing_fake, suppress_detailed_logs):
     global device
 
     logger.info(f"Starting training with dataset at {data_dir}")
@@ -120,6 +122,7 @@ def start_training(data_dir, val_dir, batch_size, num_epochs, initial_lr_g, init
         "Add Noise": add_noise,
         "Noise Amount": noise_amount,
         "Early Stopping Patience": early_stopping_patience,
+        "Disable Early Stopping": disable_early_stopping,
         "Weight Decay": weight_decay,
         "Suppress Warnings": suppress_warnings,
         "Suppress Reading Messages": suppress_reading_messages,
@@ -133,12 +136,12 @@ def start_training(data_dir, val_dir, batch_size, num_epochs, initial_lr_g, init
 
     for stem in range(num_stems):
         try:
-            train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_str, checkpoint_dir, save_interval, accumulation_steps, initial_lr_g, initial_lr_d, optimizer_name_g, optimizer_name_d, loss_function_g, loss_function_d, perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, num_workers, early_stopping_patience, weight_decay, use_cpu_for_prep, suppress_warnings, suppress_reading_messages, cache_dir, device_prep, add_noise, noise_amount, discriminator_update_interval, label_smoothing_real, label_smoothing_fake)
+            train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_str, checkpoint_dir, save_interval, accumulation_steps, initial_lr_g, initial_lr_d, optimizer_name_g, optimizer_name_d, loss_function_g, loss_function_d, perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, num_workers, early_stopping_patience, disable_early_stopping, weight_decay, use_cpu_for_prep, suppress_warnings, suppress_reading_messages, cache_dir, device_prep, add_noise, noise_amount, discriminator_update_interval, label_smoothing_real, label_smoothing_fake)
         except Exception as e:
             logger.error(f"Error in train_single_stem: {e}", exc_info=True)
             raise  # Reraise the exception to halt training on error
 
-def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_str, checkpoint_dir, save_interval, accumulation_steps, initial_lr_g, initial_lr_d, optimizer_name_g, optimizer_name_d, loss_function_g, loss_function_d, perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, num_workers, early_stopping_patience, weight_decay, use_cpu_for_prep, suppress_warnings, suppress_reading_messages, cache_dir, device_prep, add_noise, noise_amount, discriminator_update_interval, label_smoothing_real, label_smoothing_fake):
+def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_str, checkpoint_dir, save_interval, accumulation_steps, initial_lr_g, initial_lr_d, optimizer_name_g, optimizer_name_d, loss_function_g, loss_function_d, perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, num_workers, early_stopping_patience, disable_early_stopping, weight_decay, use_cpu_for_prep, suppress_warnings, suppress_reading_messages, cache_dir, device_prep, add_noise, noise_amount, discriminator_update_interval, label_smoothing_real, label_smoothing_fake):
     logger.info("Starting training for single stem: %s", stem)
     writer = SummaryWriter(log_dir=os.path.join(checkpoint_dir, 'runs', f'stem_{stem}_{datetime.now().strftime("%Y%m%d-%H%M%S")}')) if tensorboard_flag else None
 
@@ -169,10 +172,11 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_st
         collate_fn=collate_fn
     )
 
-    scheduler_g = optim.lr_scheduler.CosineAnnealingLR(optimizer_g, T_max=num_epochs)
-    scheduler_d = optim.lr_scheduler.CosineAnnealingLR(optimizer_d, T_max=num_epochs)
+    # Updated to use ReduceLROnPlateau scheduler
+    scheduler_g = optim.lr_scheduler.ReduceLROnPlateau(optimizer_g, mode='min', factor=scheduler_gamma, patience=scheduler_step_size)
+    scheduler_d = optim.lr_scheduler.ReduceLROnPlateau(optimizer_d, mode='min', factor=scheduler_gamma, patience=scheduler_step_size)
 
-    scaler = torch.cuda.amp.GradScaler()
+    scaler = GradScaler()
     early_stopping_counter = 0
     best_val_loss = float('inf')
 
@@ -192,14 +196,17 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_st
 
             logger.debug(f"Processing batch {i+1}/{len(train_loader)}")
 
-            inputs = data['input'].to(device_str)
-            targets = data['target'][:, stem].to(device_str)
+            inputs = data['input'].to(device_str, non_blocking=True)
+            targets = data['target'][:, stem].to(device_str, non_blocking=True)
 
-            with torch.cuda.amp.autocast():
+            with autocast():
                 outputs = model(inputs)
                 target_length = targets.size(-1)
                 outputs = outputs[..., :target_length]
 
+                # Ensure outputs and targets have the same number of channels
+                outputs = outputs[:, :targets.size(1), :, :]
+                
                 targets = targets.unsqueeze(1)
                 outputs = outputs.unsqueeze(1)
 
@@ -256,13 +263,6 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_st
 
         optimizer_g.step()
         optimizer_d.step()
-        scheduler_g.step()
-        scheduler_d.step()
-
-        if (epoch + 1) % save_interval == 0:
-            checkpoint_path = os.path.join(checkpoint_dir, f'checkpoint_stem_{stem}_epoch_{epoch+1}.pt')
-            torch.save(model.state_dict(), checkpoint_path)
-            logger.info(f'Saved checkpoint: {checkpoint_path}')
 
         # Validation step only after training epoch completes
         model.eval()
@@ -278,12 +278,15 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_st
 
                     logger.debug(f"Validating batch {i+1}/{len(val_loader)}")
 
-                    inputs = data['input'].to(device_str)
-                    targets = data['target'][:, stem].to(device_str)
+                    inputs = data['input'].to(device_str, non_blocking=True)
+                    targets = data['target'][:, stem].to(device_str, non_blocking=True)
                     outputs = model(inputs)
                     target_length = targets.size(-1)
                     outputs = outputs[..., :target_length]
 
+                    # Ensure outputs and targets have the same number of channels
+                    outputs = outputs[:, :targets.size(1), :, :]
+                    
                     targets = targets.unsqueeze(1)
                     outputs = outputs.unsqueeze(1)
 
@@ -325,11 +328,19 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_st
                 else:
                     early_stopping_counter += 1
 
-                if early_stopping_counter >= early_stopping_patience:
+                if not disable_early_stopping and early_stopping_counter >= early_stopping_patience:
                     logger.info('Early stopping triggered.')
                     break
             except Exception as e:
                 logger.error(f"Error during validation step: {e}", exc_info=True)
+
+        scheduler_g.step(val_loss)
+        scheduler_d.step(val_loss)
+
+        if (epoch + 1) % save_interval == 0:
+            checkpoint_path = os.path.join(checkpoint_dir, f'checkpoint_stem_{stem}_epoch_{epoch+1}.pt')
+            torch.save(model.state_dict(), checkpoint_path)
+            logger.info(f'Saved checkpoint: {checkpoint_path}')
 
     final_model_path = f"{checkpoint_dir}/model_final_stem_{stem}.pt"
     torch.save(model.state_dict(), final_model_path)
@@ -338,7 +349,7 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_st
     if tensorboard_flag:
         writer.close()
 
-def start_training_wrapper(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_str_g, loss_function_str_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep, discriminator_update_interval, label_smoothing_real, label_smoothing_fake, suppress_detailed_logs):
+def start_training_wrapper(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_str_g, loss_function_str_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep, discriminator_update_interval, label_smoothing_real, label_smoothing_fake, suppress_detailed_logs):
     global training_process
     loss_function_map = {
         "MSELoss": nn.MSELoss(),
@@ -349,7 +360,7 @@ def start_training_wrapper(data_dir, val_dir, batch_size, num_epochs, learning_r
     }
     loss_function_g = loss_function_map[loss_function_str_g]
     loss_function_d = loss_function_map[loss_function_str_d]
-    training_process = mp.Process(target=start_training, args=(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep, discriminator_update_interval, label_smoothing_real, label_smoothing_fake, suppress_detailed_logs))
+    training_process = mp.Process(target=start_training, args=(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep, discriminator_update_interval, label_smoothing_real, label_smoothing_fake, suppress_detailed_logs))
     training_process.start()
     return f"Training Started with {loss_function_str_g} for Generator and {loss_function_str_d} for Discriminator, using {optimizer_name_g} for Generator Optimizer and {optimizer_name_d} for Discriminator Optimizer"
     
