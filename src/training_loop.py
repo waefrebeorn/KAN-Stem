@@ -85,18 +85,42 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
             inputs = data['input'].to(training_params['device_str'], non_blocking=True)
             targets = data['target'].to(training_params['device_str'], non_blocking=True)
 
+            logger.debug(f"Input shape before reshaping: {inputs.shape}")
+
+            # Ensure the inputs have the correct dimensions
+            if inputs.dim() == 2:
+                inputs = inputs.view(inputs.size(0), 1, n_mels, target_length)
+            elif inputs.dim() == 3:
+                inputs = inputs.unsqueeze(1)
+            elif inputs.dim() == 4 and inputs.size(1) != 1:
+                inputs = inputs.view(inputs.size(0), 1, n_mels, target_length)
+
+            logger.debug(f"Input shape after reshaping: {inputs.shape}")
+
             with autocast():
-                inputs = inputs.squeeze(2)
                 outputs = model(inputs)
                 outputs = outputs[..., :target_length]
 
-                targets = targets.unsqueeze(1)
-                outputs = outputs.unsqueeze(1)
+                # Ensure targets and outputs have the correct dimensions
+                if targets.dim() == 2:
+                    targets = targets.view(targets.size(0), 1, n_mels, target_length)
+                if targets.dim() == 3:
+                    targets = targets.unsqueeze(1)
+                if outputs.dim() == 2:
+                    outputs = outputs.view(outputs.size(0), 1, n_mels, target_length)
+                if outputs.dim() == 3:
+                    outputs = outputs.unsqueeze(1)
+
+                logger.debug(f"Output shape before squeezing: {outputs.shape}")
+                logger.debug(f"Target shape before squeezing: {targets.shape}")
 
                 if outputs.dim() == 5:
                     outputs = outputs.squeeze(2)
                 if targets.dim() == 5:
                     targets = targets.squeeze(2)
+
+                logger.debug(f"Output shape after squeezing: {outputs.shape}")
+                logger.debug(f"Target shape after squeezing: {targets.shape}")
 
                 loss_g = model_params['loss_function_g'](outputs.to(training_params['device_str']), targets.to(training_params['device_str']))
 
@@ -165,19 +189,38 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
 
                     inputs = data['input'].to(training_params['device_str'], non_blocking=True)
                     targets = data['target'].to(training_params['device_str'], non_blocking=True)
-                    inputs = inputs.squeeze(2)
+
+                    logger.debug(f"Validation input shape before reshaping: {inputs.shape}")
+
+                    # Ensure inputs have the correct dimensions
+                    if inputs.dim() == 2:
+                        inputs = inputs.view(inputs.size(0), 1, n_mels, target_length)
+                    elif inputs.dim() == 3:
+                        inputs = inputs.view(inputs.size(0), 1, n_mels, target_length)
+                    elif inputs.dim() == 4 and inputs.size(1) != 1:
+                        inputs = inputs.view(inputs.size(0), 1, n_mels, target_length)
+
+                    logger.debug(f"Validation input shape after reshaping: {inputs.shape}")
+
                     outputs = model(inputs)
                     outputs = outputs[..., :target_length]
 
-                    targets = targets.unsqueeze(1)
-                    outputs = outputs.unsqueeze(1)
+                    # Ensure targets and outputs have the correct dimensions
+                    if targets.dim() == 2:
+                        targets = targets.view(targets.size(0), 1, n_mels, target_length)
+                    if targets.dim() == 3:
+                        targets = targets.view(targets.size(0), 1, n_mels, target_length)
+                    if outputs.dim() == 2:
+                        outputs = outputs.view(outputs.size(0), 1, n_mels, target_length)
+                    if outputs.dim() == 3:
+                        outputs = outputs.view(outputs.size(0), 1, n_mels, target_length)
 
                     if outputs.dim() == 5:
                         outputs = outputs.squeeze(2)
                     if targets.dim() == 5:
                         targets = targets.squeeze(2)
 
-                    loss = model_params['loss_function_g'](outputs, targets)
+                    loss = model_params['loss_function_g'](outputs.to(training_params['device_str']), targets.to(training_params['device_str']))
                     val_loss += loss.item()
 
                     sdr = compute_sdr(targets, outputs)

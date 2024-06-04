@@ -1,8 +1,8 @@
+import os
 import torch
 import torchaudio
-import os
 import logging
-from dataset import StemSeparationDataset  # Import the dataset class
+from dataset import StemSeparationDataset  # Ensure this import matches your project structure
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +27,15 @@ def load_and_preprocess(file_path, mel_spectrogram, target_length, apply_data_au
         wave = wave.to(device_prep)
 
         mel = mel_spectrogram(wave)
-        mel = torch.nn.functional.interpolate(mel, size=(mel.size(0), target_length), mode='linear')
+        mel = torch.nn.functional.interpolate(mel, size=(mel.size(1), target_length), mode='linear')
+
+        # Ensure the input tensor has the correct number of dimensions and channels
+        mel = mel.unsqueeze(0)  # Add batch dimension
+        if mel.dim() == 3:
+            mel = mel.unsqueeze(1)  # Add channel dimension if not present
+
+        # Move mel back to CPU after processing on GPU
+        mel = mel.to('cpu')
         return mel
     except Exception as e:
         logger.error(f"Error processing file {file_path}: {e}")

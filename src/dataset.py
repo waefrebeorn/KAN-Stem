@@ -206,7 +206,4 @@ def collate_fn(batch):
     inputs = torch.stack([pad_tensor(item['input'], max_length, max_width) for item in batch])
     targets = torch.stack([pad_tensor(item['target'], max_length, max_width) for item in batch])
     
-    inputs = inputs.squeeze(1)
-    targets = targets.squeeze(1)
-
     return {'input': inputs, 'target': targets}

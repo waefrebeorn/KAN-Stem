@@ -15,6 +15,10 @@ import optuna
 import ray
 from ray import tune
 from ray.tune.schedulers import ASHAScheduler
+import warnings
+
+warnings.filterwarnings("ignore", message="Lazy modules are a new feature under heavy development")
+warnings.filterwarnings("ignore", message="oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders.")
 
 # Configure logging
 logger = logging.getLogger(__name__)
