@@ -55,12 +55,12 @@ class ResidualBlock(nn.Module):
         return F.relu_(x)
 
 class ContextAggregationNetwork(nn.Module):
-    def __init__(self, in_channels, out_channels):
+    def __init__(self, channels):
         super(ContextAggregationNetwork, self).__init__()
-        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
-        self.bn1 = nn.BatchNorm2d(out_channels)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm2d(out_channels)
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm2d(channels)
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(channels)
 
     def forward(self, x):
         x = F.relu_(self.bn1(self.conv1(x)))
@@ -86,7 +86,7 @@ class KANWithDepthwiseConv(nn.Module):
         self.pool5 = nn.MaxPool2d(kernel_size=(2, 2), stride=2).to(device)
         self.flatten = nn.Flatten().to(device)
 
-        self.context_aggregation = ContextAggregationNetwork(out_channels * 8, out_channels * 8).to(device)
+        self.context_aggregation = ContextAggregationNetwork(out_channels * 8).to(device)
 
         self.n_mels = n_mels
         self.target_length = target_length
@@ -202,6 +202,45 @@ class KANDiscriminator(nn.Module):
         x = x.view(x.size(0), -1)  # Flatten the tensor
         x = torch.sigmoid(self.fc1(x))
         return x
+
+def convert_to_3_channels(x):
+    if x.shape[1] == 1:
+        x = x.repeat(1, 3, 1, 1)
+    elif x.shape[1] == 2:
+        x = torch.cat((x, torch.zeros_like(x[:, :1])), dim=1)
+    return x
+
+class PerceptualLoss(nn.Module):
+    def __init__(self, feature_extractor):
+        super(PerceptualLoss, self).__init__()
+        self.feature_extractor = feature_extractor
+        self.criterion = nn.MSELoss()
+
+    def forward(self, x, target):
+        x_features = self.feature_extractor(x)
+        target_features = self.feature_extractor(target)
+        loss = self.criterion(x_features, target_features)
+        return loss
+
+def gradient_penalty(discriminator, real_data, fake_data, device):
+    batch_size = real_data.size(0)
+    alpha = torch.rand(batch_size, 1, 1, 1).to(device)
+    interpolated = alpha * real_data + ((1 - alpha) * fake_data)
+    interpolated.requires_grad_(True)
+
+    d_interpolated = discriminator(interpolated)
+    gradients = torch.autograd.grad(
+        outputs=d_interpolated,
+        inputs=interpolated,
+        grad_outputs=torch.ones_like(d_interpolated),
+        create_graph=True,
+        retain_graph=True
+    )[0]
+
+    gradients = gradients.view(batch_size, -1)
+    gradient_norm = gradients.norm(2, dim=1)
+    penalty = ((gradient_norm - 1) ** 2).mean()
+    return penalty
 
 def load_model(checkpoint_path, in_channels, out_channels, n_mels, target_length, num_stems, device=None, freeze_fc_layers=False):
     if device is None:

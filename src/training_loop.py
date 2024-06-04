@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
@@ -11,51 +12,54 @@ from torchvision.models import VGG16_Weights
 from data_preprocessing import preprocess_and_cache_dataset
 from model_setup import create_model_and_optimizer
 from dataset import StemSeparationDataset, collate_fn
-from utils import compute_sdr, compute_sir, compute_sar, log_training_parameters, detect_parameters
+from utils import compute_sdr, compute_sir, compute_sar, log_training_parameters, detect_parameters, convert_to_3_channels, gradient_penalty, PerceptualLoss
+
+import warnings
+
+warnings.filterwarnings("ignore", message="Lazy modules are a new feature under heavy development")
+warnings.filterwarnings("ignore", message="oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders.")
 
 logger = logging.getLogger(__name__)
 
-def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_str, checkpoint_dir, save_interval, accumulation_steps, initial_lr_g, initial_lr_d, optimizer_name_g, optimizer_name_d, loss_function_g, loss_function_d, perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, num_workers, early_stopping_patience, disable_early_stopping, weight_decay, use_cpu_for_prep, suppress_warnings, suppress_reading_messages, cache_dir, device_prep, add_noise, noise_amount, discriminator_update_interval, label_smoothing_real, label_smoothing_fake):
+def train_single_stem(stem, dataset, val_dir, training_params, model_params, sample_rate, n_mels, n_fft, target_length):
     logger.info("Starting training for single stem: %s", stem)
-    writer = SummaryWriter(log_dir=os.path.join(checkpoint_dir, 'runs', f'stem_{stem}_{datetime.now().strftime("%Y%m%d-%H%M%S")}')) if tensorboard_flag else None
+    writer = SummaryWriter(log_dir=os.path.join(training_params['checkpoint_dir'], 'runs', f'stem_{stem}_{datetime.now().strftime("%Y%m%d-%H%M%S")}')) if model_params['tensorboard_flag'] else None
 
-    sample_rate, n_mels, n_fft = detect_parameters(data_dir)
-    target_length = 256
+    model, discriminator, optimizer_g, optimizer_d = create_model_and_optimizer(training_params['device_str'], n_mels, target_length, training_params['cache_dir'], model_params['initial_lr_g'], model_params['initial_lr_d'], model_params['optimizer_name_g'], model_params['optimizer_name_d'], model_params['weight_decay'])
 
-    model, discriminator, optimizer_g, optimizer_d = create_model_and_optimizer(device_str, n_mels, target_length, cache_dir, initial_lr_g, initial_lr_d, optimizer_name_g, optimizer_name_d, weight_decay)
-
-    feature_extractor = models.vgg16(weights=VGG16_Weights.IMAGENET1K_V1).features.to(device_str).eval()
+    feature_extractor = models.vgg16(weights=VGG16_Weights.IMAGENET1K_V1).features.to(training_params['device_str']).eval()
     for param in feature_extractor.parameters():
         param.requires_grad = False
 
+    prep_device = 'cpu' if training_params['use_cpu_for_prep'] else training_params['device_str']
+
     train_loader = DataLoader(
-        StemSeparationDataset(data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation, suppress_warnings, num_workers, device_prep),
-        batch_size=batch_size,
+        dataset,
+        batch_size=training_params['batch_size'],
         shuffle=True,
         pin_memory=True,
-        num_workers=num_workers,
-        collate_fn=collate_fn
-    )
-    
-    val_loader = DataLoader(
-        StemSeparationDataset(val_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation=False, suppress_warnings=suppress_warnings, num_workers=num_workers, device_prep=device_prep),
-        batch_size=batch_size,
-        shuffle=False,
-        pin_memory=True,
-        num_workers=num_workers,
+        num_workers=training_params['num_workers'],
         collate_fn=collate_fn
     )
 
-    # Updated to use ReduceLROnPlateau scheduler
-    scheduler_g = optim.lr_scheduler.ReduceLROnPlateau(optimizer_g, mode='min', factor=scheduler_gamma, patience=scheduler_step_size)
-    scheduler_d = optim.lr_scheduler.ReduceLROnPlateau(optimizer_d, mode='min', factor=scheduler_gamma, patience=scheduler_step_size)
+    val_loader = DataLoader(
+        StemSeparationDataset(val_dir, n_mels, target_length, n_fft, training_params['cache_dir'], apply_data_augmentation=False, suppress_warnings=training_params['suppress_warnings'], num_workers=training_params['num_workers'], device_prep=prep_device),
+        batch_size=training_params['batch_size'],
+        shuffle=False,
+        pin_memory=True,
+        num_workers=training_params['num_workers'],
+        collate_fn=collate_fn
+    )
+
+    scheduler_g = optim.lr_scheduler.ReduceLROnPlateau(optimizer_g, mode='min', factor=model_params['scheduler_gamma'], patience=model_params['scheduler_step_size'])
+    scheduler_d = optim.lr_scheduler.ReduceLROnPlateau(optimizer_d, mode='min', factor=model_params['scheduler_gamma'], patience=model_params['scheduler_step_size'])
 
     scaler = GradScaler()
     early_stopping_counter = 0
     best_val_loss = float('inf')
 
-    for epoch in range(num_epochs):
-        logger.info(f"Epoch {epoch+1}/{num_epochs} started.")
+    for epoch in range(training_params['num_epochs']):
+        logger.info(f"Epoch {epoch+1}/{training_params['num_epochs']} started.")
         model.train()
         discriminator.train()
         running_loss_g = 0.0
@@ -70,17 +74,14 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_st
 
             logger.debug(f"Processing batch {i+1}/{len(train_loader)}")
 
-            inputs = data['input'].to(device_str, non_blocking=True)
-            targets = data['target'][:, stem].to(device_str, non_blocking=True)
+            inputs = data['input'].to(training_params['device_str'], non_blocking=True)
+            targets = data['target'].to(training_params['device_str'], non_blocking=True)
 
             with autocast():
+                inputs = inputs.squeeze(2)  # Ensure inputs are 4D
                 outputs = model(inputs)
-                target_length = targets.size(-1)
                 outputs = outputs[..., :target_length]
 
-                # Ensure outputs and targets have the same number of channels
-                outputs = outputs[:, :targets.size(1), :, :]
-                
                 targets = targets.unsqueeze(1)
                 outputs = outputs.unsqueeze(1)
 
@@ -89,35 +90,33 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_st
                 if targets.dim() == 5:
                     targets = targets.squeeze(2)
 
-                loss_g = loss_function_g(outputs.to(device_str), targets.to(device_str))
-                
-                if perceptual_loss_flag:
+                loss_g = model_params['loss_function_g'](outputs.to(training_params['device_str']), targets.to(training_params['device_str']))
+
+                if model_params['perceptual_loss_flag']:
                     outputs_3ch = convert_to_3_channels(outputs)
                     targets_3ch = convert_to_3_channels(targets)
-                    perceptual_loss = PerceptualLoss(feature_extractor)(outputs_3ch.to(device_str), targets_3ch.to(device_str)) * perceptual_loss_weight
+                    perceptual_loss = PerceptualLoss(feature_extractor)(outputs_3ch.to(training_params['device_str']), targets_3ch.to(training_params['device_str'])) * model_params['perceptual_loss_weight']
                     loss_g += perceptual_loss
-                
+
                 scaler.scale(loss_g).backward(retain_graph=True)
 
-                if (i + 1) % discriminator_update_interval == 0:
-                    # Add noise to the discriminator's input
-                    if add_noise:
-                        noise = torch.randn_like(targets) * noise_amount
+                if (i + 1) % training_params['discriminator_update_interval'] == 0:
+                    if training_params['add_noise']:
+                        noise = torch.randn_like(targets) * training_params['noise_amount']
                         targets = targets + noise
 
-                    # Apply label smoothing
-                    real_labels = torch.full((inputs.size(0), 1), label_smoothing_real, device=device_str, dtype=torch.float)
-                    fake_labels = torch.full((inputs.size(0), 1), label_smoothing_fake, device=device_str, dtype=torch.float)
-                    real_out = discriminator(targets.to(device_str).clone().detach())
+                    real_labels = torch.full((inputs.size(0), 1), training_params['label_smoothing_real'], device=training_params['device_str'], dtype=torch.float)
+                    fake_labels = torch.full((inputs.size(0), 1), training_params['label_smoothing_fake'], device=training_params['device_str'], dtype=torch.float)
+                    real_out = discriminator(targets.to(training_params['device_str']).clone().detach())
                     fake_out = discriminator(outputs.clone().detach())
 
-                    loss_d_real = loss_function_d(real_out, real_labels)
-                    loss_d_fake = loss_function_d(fake_out, fake_labels)
-                    gp = gradient_penalty(discriminator, targets.to(device_str), outputs.to(device_str), device_str)
-                    loss_d = (loss_d_real + loss_d_fake) / 2 + gp  # Adding gradient penalty term
+                    loss_d_real = model_params['loss_function_d'](real_out, real_labels)
+                    loss_d_fake = model_params['loss_function_d'](fake_out, fake_labels)
+                    gp = gradient_penalty(discriminator, targets.to(training_params['device_str']), outputs.to(training_params['device_str']), training_params['device_str'])
+                    loss_d = (loss_d_real + loss_d_fake) / 2 + gp
 
                     scaler.scale(loss_d).backward()
-                    torch.nn.utils.clip_grad_norm_(discriminator.parameters(), clip_value)
+                    torch.nn.utils.clip_grad_norm_(discriminator.parameters(), model_params['clip_value'])
                     scaler.step(optimizer_d)
                     scaler.update()
                     optimizer_d.zero_grad()
@@ -125,21 +124,20 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_st
 
                 running_loss_g += loss_g.item()
 
-                if (i + 1) % accumulation_steps == 0 or (i + 1) == len(train_loader):
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), clip_value)
+                if (i + 1) % training_params['accumulation_steps'] == 0 or (i + 1) == len(train_loader):
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), model_params['clip_value'])
                     scaler.step(optimizer_g)
                     scaler.update()
                     optimizer_g.zero_grad()
 
-                    logger.info(f'Epoch [{epoch+1}/{num_epochs}], Step [{i+1}/{len(train_loader)}], Loss G: {running_loss_g / (i + 1):.4f}, Loss D: {running_loss_d / (i + 1):.4f}')
-                    if tensorboard_flag:
+                    logger.info(f"Epoch [{epoch+1}/{training_params['num_epochs']}], Step [{i+1}/{len(train_loader)}], Loss G: {running_loss_g / (i + 1):.4f}, Loss D: {running_loss_d / (i + 1):.4f}")
+                    if model_params['tensorboard_flag']:
                         writer.add_scalar('Loss/Generator', running_loss_g / (i + 1), epoch * len(train_loader) + i)
                         writer.add_scalar('Loss/Discriminator', running_loss_d / (i + 1), epoch * len(train_loader) + i)
 
         optimizer_g.step()
         optimizer_d.step()
 
-        # Validation step only after training epoch completes
         model.eval()
         val_loss = 0.0
         sdr_total, sir_total, sar_total = 0.0, 0.0, 0.0
@@ -153,15 +151,12 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_st
 
                     logger.debug(f"Validating batch {i+1}/{len(val_loader)}")
 
-                    inputs = data['input'].to(device_str, non_blocking=True)
-                    targets = data['target'][:, stem].to(device_str, non_blocking=True)
+                    inputs = data['input'].to(training_params['device_str'], non_blocking=True)
+                    targets = data['target'].to(training_params['device_str'], non_blocking=True)
+                    inputs = inputs.squeeze(2)  # Ensure inputs are 4D
                     outputs = model(inputs)
-                    target_length = targets.size(-1)
                     outputs = outputs[..., :target_length]
 
-                    # Ensure outputs and targets have the same number of channels
-                    outputs = outputs[:, :targets.size(1), :, :]
-                    
                     targets = targets.unsqueeze(1)
                     outputs = outputs.unsqueeze(1)
 
@@ -170,7 +165,7 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_st
                     if targets.dim() == 5:
                         targets = targets.squeeze(2)
 
-                    loss = loss_function_g(outputs, targets)
+                    loss = model_params['loss_function_g'](outputs, targets)
                     val_loss += loss.item()
 
                     sdr = compute_sdr(targets, outputs)
@@ -186,12 +181,12 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_st
                     num_sar_samples += torch.isfinite(sar).sum().item()
 
                 val_loss /= len(val_loader)
-                sdr_avg = sdr_total / max(num_sdr_samples, 1)  # Avoid division by zero
-                sir_avg = sir_total / max(num_sir_samples, 1)  # Avoid division by zero
-                sar_avg = sar_total / max(num_sar_samples, 1)  # Avoid division by zero
+                sdr_avg = sdr_total / max(num_sdr_samples, 1)
+                sir_avg = sir_total / max(num_sir_samples, 1)
+                sar_avg = sar_total / max(num_sar_samples, 1)
 
                 logger.info(f'Validation Loss: {val_loss:.4f}, SDR: {sdr_avg:.4f}, SIR: {sir_avg:.4f}, SAR: {sar_avg:.4f}')
-                if tensorboard_flag:
+                if model_params['tensorboard_flag']:
                     writer.add_scalar('Loss/Validation', val_loss, epoch + 1)
                     writer.add_scalar('Metrics/SDR', sdr_avg, epoch + 1)
                     writer.add_scalar('Metrics/SIR', sir_avg, epoch + 1)
@@ -203,7 +198,7 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_st
                 else:
                     early_stopping_counter += 1
 
-                if not disable_early_stopping and early_stopping_counter >= early_stopping_patience:
+                if not training_params['disable_early_stopping'] and early_stopping_counter >= training_params['early_stopping_patience']:
                     logger.info('Early stopping triggered.')
                     break
             except Exception as e:
@@ -212,14 +207,14 @@ def train_single_stem(stem, data_dir, val_dir, batch_size, num_epochs, device_st
         scheduler_g.step(val_loss)
         scheduler_d.step(val_loss)
 
-        if (epoch + 1) % save_interval == 0:
-            checkpoint_path = os.path.join(checkpoint_dir, f'checkpoint_stem_{stem}_epoch_{epoch+1}.pt')
+        if (epoch + 1) % training_params['save_interval'] == 0:
+            checkpoint_path = os.path.join(training_params['checkpoint_dir'], f'checkpoint_stem_{stem}_epoch_{epoch+1}.pt')
             torch.save(model.state_dict(), checkpoint_path)
             logger.info(f'Saved checkpoint: {checkpoint_path}')
 
-    final_model_path = f"{checkpoint_dir}/model_final_stem_{stem}.pt"
+    final_model_path = f"{training_params['checkpoint_dir']}/model_final_stem_{stem}.pt"
     torch.save(model.state_dict(), final_model_path)
     logger.info(f"Training completed for stem {stem}. Final model saved at {final_model_path}")
 
-    if tensorboard_flag:
+    if model_params['tensorboard_flag']:
         writer.close()

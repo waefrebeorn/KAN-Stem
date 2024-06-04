@@ -2,7 +2,7 @@ import os
 import gradio as gr
 import torch
 import torch.nn as nn
-from train import start_training_wrapper, stop_training_wrapper, objective_optuna, train_ray_tune
+from train import start_training_wrapper, stop_training_wrapper, objective_optuna, train_ray_tune, resume_training_wrapper
 from separate_stems import perform_separation
 from model import load_model
 import torchaudio.transforms as T
@@ -113,7 +113,13 @@ def start_ray_tune_optimization(num_samples):
         grace_period=10,
         reduction_factor=2
     )
-    tune.run(train_ray_tune, config=config, scheduler=scheduler, num_samples=num_samples)
+    tune.run(
+        train_ray_tune,
+        config=config,
+        scheduler=scheduler,
+        num_samples=num_samples,
+        trial_dirname_creator=lambda trial: f"trial_{trial.trial_id}"  # Custom trial directory name creator
+    )
     return "Ray Tune optimization completed"
 
 with gr.Blocks() as demo:
@@ -149,24 +155,24 @@ with gr.Blocks() as demo:
         weight_decay = gr.Number(label="Weight Decay", value=1e-4)
         suppress_warnings = gr.Checkbox(label="Suppress Warnings", value=True)
         suppress_reading_messages = gr.Checkbox(label="Suppress Reading Messages", value=True)
-        use_cpu_for_prep = gr.Checkbox(label="Use CPU for Preparation", value=False)
-        suppress_detailed_logs = gr.Checkbox(label="Suppress Detailed Logs", value=True)
+        use_cpu_for_prep = gr.Checkbox(label="Use CPU for Preparation", value=True)
         discriminator_update_interval = gr.Number(label="Discriminator Update Interval", value=5)
         label_smoothing_real = gr.Slider(label="Label Smoothing Real", minimum=0.7, maximum=0.9, value=0.7, step=0.1)
         label_smoothing_fake = gr.Slider(label="Label Smoothing Fake", minimum=0.1, maximum=0.3, value=0.1, step=0.1)
         perceptual_loss_weight = gr.Number(label="Perceptual Loss Weight", value=0.1)
-        optimization_method = gr.Dropdown(label="Optimization Method", choices=["None", "Optuna", "Ray Tune"], value="None")
-        optuna_trials = gr.Number(label="Optuna Trials", value=10)
-        ray_samples = gr.Number(label="Ray Tune Samples", value=10)
+        optimization_method = gr.Dropdown(label="Optimization Method", choices=["None", "Optuna", "Ray Tune"], value="Optuna")
+        optuna_trials = gr.Number(label="Optuna Trials", value=1)
+        ray_samples = gr.Number(label="Ray Tune Samples", value=1)
         start_training_button = gr.Button("Start Training")
         stop_training_button = gr.Button("Stop Training")
+        resume_training_button = gr.Button("Resume Training")
         output = gr.Textbox(label="Output")
 
         def start_training_and_log_params(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval,
                                           accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
                                           perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation,
                                           add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep,
-                                          suppress_detailed_logs, discriminator_update_interval, label_smoothing_real, label_smoothing_fake, perceptual_loss_weight, optimization_method, optuna_trials, ray_samples):
+                                          discriminator_update_interval, label_smoothing_real, label_smoothing_fake, perceptual_loss_weight, optimization_method, optuna_trials, ray_samples):
             params = {
                 "Data Directory": data_dir,
                 "Validation Directory": val_dir,
@@ -199,7 +205,6 @@ with gr.Blocks() as demo:
                 "Suppress Warnings": suppress_warnings,
                 "Suppress Reading Messages": suppress_reading_messages,
                 "Use CPU for Preparation": use_cpu_for_prep,
-                "Suppress Detailed Logs": suppress_detailed_logs,
                 "Discriminator Update Interval": discriminator_update_interval,
                 "Label Smoothing Real": label_smoothing_real,
                 "Label Smoothing Fake": label_smoothing_fake,
@@ -218,7 +223,7 @@ with gr.Blocks() as demo:
                                           accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
                                           perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation,
                                           add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep,
-                                          suppress_detailed_logs, discriminator_update_interval, label_smoothing_real, label_smoothing_fake)
+                                          discriminator_update_interval, label_smoothing_real, label_smoothing_fake)
 
         start_training_button.click(
             start_training_and_log_params,
@@ -227,13 +232,19 @@ with gr.Blocks() as demo:
                 accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
                 perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation,
                 add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep,
-                suppress_detailed_logs, discriminator_update_interval, label_smoothing_real, label_smoothing_fake, perceptual_loss_weight, optimization_method, optuna_trials, ray_samples
+                discriminator_update_interval, label_smoothing_real, label_smoothing_fake, perceptual_loss_weight, optimization_method, optuna_trials, ray_samples
             ],
             outputs=output
         )
 
         stop_training_button.click(
             stop_training_wrapper,
+            outputs=output
+        )
+
+        resume_training_button.click(
+            resume_training_wrapper,
+            inputs=[checkpoint_dir],
             outputs=output
         )
 

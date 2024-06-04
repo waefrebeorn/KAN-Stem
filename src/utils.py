@@ -1,5 +1,6 @@
 import os
 import torch
+import torch.optim as optim
 import torchaudio
 import torchaudio.transforms as T
 import torch.nn.functional as F
@@ -10,6 +11,11 @@ import GPUtil
 import time
 import torch.nn as nn
 from multiprocessing import Value, Lock
+
+import warnings
+
+warnings.filterwarnings("ignore", message="Lazy modules are a new feature under heavy development")
+warnings.filterwarnings("ignore", message="oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders.")
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +67,10 @@ def detect_parameters(data_dir, default_n_mels=64, default_n_fft=1024):
 
     return int(avg_sample_rate), n_mels, n_fft
 
+def convert_to_3_channels(tensor):
+    """Convert a single-channel tensor to a 3-channel tensor by repeating the single channel."""
+    return tensor.repeat(1, 3, 1, 1)
+
 class MultiScaleSpectralLoss(nn.Module):
     def __init__(self, n_ffts=[2048, 1024, 512, 256, 128]):
         super(MultiScaleSpectralLoss, self).__init__()
@@ -96,6 +106,30 @@ def compute_adversarial_loss(discriminator, y_true, y_pred, device):
     real_loss = F.binary_cross_entropy_with_logits(discriminator(y_true), real_labels)
     fake_loss = F.binary_cross_entropy_with_logits(discriminator(y_pred), fake_labels)
     return real_loss, fake_loss
+
+def gradient_penalty(discriminator, real_data, fake_data, device, lambda_gp=10):
+    batch_size = real_data.size(0)
+    epsilon = torch.rand(batch_size, 1, 1, 1, device=device)
+    interpolated = epsilon * real_data + (1 - epsilon) * fake_data
+    interpolated = interpolated.to(device)
+    
+    interpolated.requires_grad_(True)
+    
+    prob_interpolated = discriminator(interpolated)
+    
+    gradients = torch.autograd.grad(
+        outputs=prob_interpolated,
+        inputs=interpolated,
+        grad_outputs=torch.ones_like(prob_interpolated),
+        create_graph=True,
+        retain_graph=True,
+    )[0]
+    
+    gradients = gradients.view(batch_size, -1)
+    gradient_norm = gradients.norm(2, dim=1)
+    gradient_penalty = lambda_gp * ((gradient_norm - 1) ** 2).mean()
+    
+    return gradient_penalty
 
 def read_audio(file_path, device='cuda' if torch.cuda.is_available() else 'cpu', suppress_messages=False):
     try:

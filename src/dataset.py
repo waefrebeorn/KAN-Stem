@@ -3,6 +3,7 @@ import torch
 import torchaudio.transforms as T
 import logging
 from torch.utils.data import Dataset
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from utils import load_and_preprocess
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,16 @@ class StemSeparationDataset(Dataset):
                 return {}
         return {}
 
+    def _save_cache_metadata(self):
+        cache_path = os.path.join(self.cache_dir, "cache_metadata.pt")
+        if self.cache != self._load_cache_metadata():
+            try:
+                logger.info(f"Saving cache metadata to {cache_path}")
+                torch.save(self.cache, cache_path)
+                logger.info(f"Successfully saved cache metadata to {cache_path}")
+            except Exception as e:
+                logger.error(f"Error saving cache metadata file: {e}")
+
     def __len__(self):
         return len(self.valid_stems)
 
@@ -50,13 +61,15 @@ class StemSeparationDataset(Dataset):
             if os.path.exists(stem_cache_path):
                 try:
                     data = torch.load(stem_cache_path)
-                    if data and 'input' in data and 'target' in data:
+                    if self._validate_data(data):
+                        logger.info(f"Loaded cached data for {stem_name}")
                         return data
                     else:
-                        logger.warning(f"Incomplete data in cache for {stem_name}. Reprocessing.")
+                        logger.warning(f"Invalid cached data for {stem_name}. Reprocessing.")
                         os.remove(stem_cache_path)
                 except Exception as e:
-                    logger.error(f"Error loading cached data for {stem_name}: {e}")
+                    logger.warning(f"Error loading cached data for {stem_name}. Reprocessing. Error: {e}")
+                    os.remove(stem_cache_path)
 
         logger.info(f"Processing stem: {stem_name}")
         data = self._process_single_stem(stem_name)
@@ -72,23 +85,17 @@ class StemSeparationDataset(Dataset):
 
     def _save_individual_cache(self, stem_name, data):
         stem_cache_path = os.path.join(self.cache_dir, f"{stem_name}.pt")
-        try:
-            logger.info(f"Saving stem cache: {stem_cache_path}")
-            torch.save(data, stem_cache_path)
-            logger.info(f"Successfully saved stem cache: {stem_cache_path}")
+        if not os.path.exists(stem_cache_path):
+            try:
+                logger.info(f"Saving stem cache: {stem_cache_path}")
+                torch.save(data, stem_cache_path)
+                logger.info(f"Successfully saved stem cache: {stem_cache_path}")
+                return stem_cache_path
+            except Exception as e:
+                logger.error(f"Error saving stem cache: {stem_cache_path}. Error: {e}")
+                return None
+        else:
             return stem_cache_path
-        except Exception as e:
-            logger.error(f"Error saving stem cache: {stem_cache_path}. Error: {e}")
-            return None
-
-    def _save_cache_metadata(self):
-        cache_path = os.path.join(self.cache_dir, "cache_metadata.pt")
-        try:
-            logger.info(f"Saving cache metadata to {cache_path}")
-            torch.save(self.cache, cache_path)
-            logger.info(f"Successfully saved cache metadata to {cache_path}")
-        except Exception as e:
-            logger.error(f"Error saving cache metadata file: {e}")
 
     def _process_single_stem(self, stem_name):
         try:
@@ -124,7 +131,64 @@ class StemSeparationDataset(Dataset):
             logger.error(f"Error processing stem {stem_name}: {e}")
             return None
 
+    def _validate_data(self, data):
+        if 'input' not in data or 'target' not in data:
+            return False
+        input_shape = data['input'].shape
+        target_shape = data['target'].shape
+        expected_shape = (1, self.n_mels, self.target_length)
+        if input_shape[1:] != expected_shape or target_shape[1:] != expected_shape:
+            return False
+        return True
+
+    def load_all_stems(self):
+        with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
+            futures = [executor.submit(self._load_stem_data, stem_name) for stem_name in self.valid_stems]
+            for future in as_completed(futures):
+                future.result()  # wait for all futures to complete
+
+    def _load_stem_data(self, stem_name):
+        cache_key = self._get_cache_key(stem_name)
+
+        if cache_key in self.cache:
+            stem_cache_path = self.cache[cache_key]
+            if os.path.exists(stem_cache_path):
+                try:
+                    data = torch.load(stem_cache_path)
+                    if self._validate_data(data):
+                        return data
+                    else:
+                        logger.warning(f"Invalid cached data for {stem_name}. Reprocessing.")
+                        os.remove(stem_cache_path)
+                except Exception as e:
+                    logger.warning(f"Error loading cached data for {stem_name}. Reprocessing. Error: {e}")
+                    os.remove(stem_cache_path)
+
+        data = self._process_single_stem(stem_name)
+        if data is not None:
+            data['input'] = data['input'].cpu()
+            data['target'] = data['target'].cpu()
+            self.cache[cache_key] = self._save_individual_cache(stem_name, data)
+            self._save_cache_metadata()
+        return data
+
+def pad_tensor(tensor, target_length, target_width):
+    current_length = tensor.size(2)
+    current_width = tensor.size(1)
+    if current_length < target_length or current_width < target_width:
+        padding = (0, target_length - current_length, 0, target_width - current_width)
+        tensor = torch.nn.functional.pad(tensor, padding)
+    return tensor
+
 def collate_fn(batch):
-    inputs = torch.stack([item['input'] for item in batch])
-    targets = torch.stack([item['target'] for item in batch])
+    max_length = max(item['input'].size(2) for item in batch)
+    max_width = max(item['input'].size(1) for item in batch)
+
+    inputs = torch.stack([pad_tensor(item['input'], max_length, max_width) for item in batch])
+    targets = torch.stack([pad_tensor(item['target'], max_length, max_width) for item in batch])
+    
+    # Ensure the tensors are 4D (batch_size, channels, height, width)
+    inputs = inputs.squeeze(1)  # Remove extra dimension
+    targets = targets.squeeze(1)  # Remove extra dimension
+
     return {'input': inputs, 'target': targets}
