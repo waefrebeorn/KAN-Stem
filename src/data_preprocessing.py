@@ -2,13 +2,22 @@ import torch
 import torchaudio
 import os
 import logging
+from dataset import StemSeparationDataset  # Import the dataset class
 
 logger = logging.getLogger(__name__)
 
 def preprocess_and_cache_dataset(data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation, suppress_warnings, num_workers, device_prep, stop_flag):
     dataset = StemSeparationDataset(
-        data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation, 
-        suppress_warnings, num_workers, device_prep, stop_flag
+        data_dir=data_dir,
+        n_mels=n_mels,
+        target_length=target_length,
+        n_fft=n_fft,
+        cache_dir=cache_dir,
+        apply_data_augmentation=apply_data_augmentation,
+        suppress_warnings=suppress_warnings,
+        num_workers=num_workers,
+        device_prep=device_prep,
+        stop_flag=stop_flag
     )
     dataset.load_all_stems()
 

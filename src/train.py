@@ -12,7 +12,6 @@ import ray
 from ray import tune
 from ray.tune.schedulers import ASHAScheduler
 import librosa
-import gradio as gr
 
 logger = logging.getLogger(__name__)
 
@@ -180,39 +179,9 @@ def resume_training(checkpoint_dir, device_str):
     start_training(
         data_dir=checkpoint['data_dir'],
         val_dir=checkpoint['val_dir'],
-        batch_size=checkpoint['batch_size'],
-        num_epochs=checkpoint['num_epochs'] - epoch,
-        initial_lr_g=checkpoint['initial_lr_g'],
-        initial_lr_d=checkpoint['initial_lr_d'],
-        use_cuda='cuda' in device_str,
-        checkpoint_dir=checkpoint['checkpoint_dir'],
-        save_interval=checkpoint['save_interval'],
-        accumulation_steps=checkpoint['accumulation_steps'],
-        num_stems=checkpoint['num_stems'],
-        num_workers=checkpoint['num_workers'],
-        cache_dir=checkpoint['cache_dir'],
-        loss_function_g=checkpoint['loss_function_g'],
-        loss_function_d=checkpoint['loss_function_d'],
-        optimizer_name_g=checkpoint['optimizer_name_g'],
-        optimizer_name_d=checkpoint['optimizer_name_d'],
-        perceptual_loss_flag=checkpoint['perceptual_loss_flag'],
-        perceptual_loss_weight=checkpoint['perceptual_loss_weight'],
-        clip_value=checkpoint['clip_value'],
-        scheduler_step_size=checkpoint['scheduler_step_size'],
-        scheduler_gamma=checkpoint['scheduler_gamma'],
-        tensorboard_flag=checkpoint['tensorboard_flag'],
-        apply_data_augmentation=checkpoint['apply_data_augmentation'],
-        add_noise=checkpoint['add_noise'],
-        noise_amount=checkpoint['noise_amount'],
-        early_stopping_patience=checkpoint['early_stopping_patience'],
-        disable_early_stopping=checkpoint['disable_early_stopping'],
-        weight_decay=checkpoint['weight_decay'],
-        suppress_warnings=checkpoint['suppress_warnings'],
-        suppress_reading_messages=checkpoint['suppress_reading_messages'],
-        use_cpu_for_prep=checkpoint['use_cpu_for_prep'],
-        discriminator_update_interval=checkpoint['discriminator_update_interval'],
-        label_smoothing_real=checkpoint['label_smoothing_real'],
-        label_smoothing_fake=checkpoint['label_smoothing_fake']
+        training_params=checkpoint['training_params'],
+        model_params=checkpoint['model_params'],
+        stop_flag=stop_flag
     )
 
     return f"Resumed training from checkpoint: {latest_checkpoint}"

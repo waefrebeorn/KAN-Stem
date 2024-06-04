@@ -91,12 +91,60 @@ def log_training_parameters(params):
     for key, value in params.items():
         logger.info(f"{key}: {value}")
 
-def start_optuna_optimization(n_trials):
+def start_optuna_optimization(n_trials, gradio_params):
     study = optuna.create_study(direction='minimize')
-    study.optimize(objective_optuna, n_trials=n_trials)
+    study.optimize(lambda trial: objective_optuna(trial, gradio_params), n_trials=n_trials)
     return "Optuna optimization completed"
 
-def start_ray_tune_optimization(num_samples):
+def train_ray_tune(config, gradio_params):
+    batch_size = config['batch_size']
+    num_epochs = config['num_epochs']
+    learning_rate_g = config['learning_rate_g']
+    learning_rate_d = config['learning_rate_d']
+    perceptual_loss_weight = config['perceptual_loss_weight']
+    clip_value = config['clip_value']
+
+    start_training_wrapper(
+        gradio_params['data_dir'],
+        gradio_params['val_dir'],
+        batch_size,
+        num_epochs,
+        learning_rate_g,
+        learning_rate_d,
+        gradio_params['use_cuda'],
+        gradio_params['checkpoint_dir'],
+        gradio_params['save_interval'],
+        gradio_params['accumulation_steps'],
+        gradio_params['num_stems'],
+        gradio_params['num_workers'],
+        gradio_params['cache_dir'],
+        gradio_params['loss_function_g'],
+        gradio_params['loss_function_d'],
+        gradio_params['optimizer_name_g'],
+        gradio_params['optimizer_name_d'],
+        gradio_params['perceptual_loss_flag'],
+        perceptual_loss_weight,
+        clip_value,
+        gradio_params['scheduler_step_size'],
+        gradio_params['scheduler_gamma'],
+        gradio_params['tensorboard_flag'],
+        gradio_params['apply_data_augmentation'],
+        gradio_params['add_noise'],
+        gradio_params['noise_amount'],
+        gradio_params['early_stopping_patience'],
+        gradio_params['disable_early_stopping'],
+        gradio_params['weight_decay'],
+        gradio_params['suppress_warnings'],
+        gradio_params['suppress_reading_messages'],
+        gradio_params['use_cpu_for_prep'],
+        gradio_params['discriminator_update_interval'],
+        gradio_params['label_smoothing_real'],
+        gradio_params['label_smoothing_fake']
+    )
+
+    tune.report(metric=0.0)
+
+def start_ray_tune_optimization(num_samples, gradio_params):
     ray.init()
     config = {
         'batch_size': tune.choice([16, 32, 64]),
@@ -114,7 +162,7 @@ def start_ray_tune_optimization(num_samples):
         reduction_factor=2
     )
     tune.run(
-        train_ray_tune,
+        lambda config: train_ray_tune(config, gradio_params),
         config=config,
         scheduler=scheduler,
         num_samples=num_samples,
@@ -173,51 +221,48 @@ with gr.Blocks() as demo:
                                           perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation,
                                           add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep,
                                           discriminator_update_interval, label_smoothing_real, label_smoothing_fake, perceptual_loss_weight, optimization_method, optuna_trials, ray_samples):
-            params = {
-                "Data Directory": data_dir,
-                "Validation Directory": val_dir,
-                "Batch Size": batch_size,
-                "Number of Epochs": num_epochs,
-                "Generator Learning Rate": learning_rate_g,
-                "Discriminator Learning Rate": learning_rate_d,
-                "Use CUDA": use_cuda,
-                "Checkpoint Directory": checkpoint_dir,
-                "Save Interval": save_interval,
-                "Accumulation Steps": accumulation_steps,
-                "Number of Stems": num_stems,
-                "Number of Workers": num_workers,
-                "Cache Directory": cache_dir,
-                "Generator Loss Function": loss_function_g,
-                "Discriminator Loss Function": loss_function_d,
-                "Generator Optimizer": optimizer_name_g,
-                "Discriminator Optimizer": optimizer_name_d,
-                "Use Perceptual Loss": perceptual_loss_flag,
-                "Gradient Clipping Value": clip_value,
-                "Scheduler Step Size": scheduler_step_size,
-                "Scheduler Gamma": scheduler_gamma,
-                "Enable TensorBoard Logging": tensorboard_flag,
-                "Apply Data Augmentation": apply_data_augmentation,
-                "Add Noise": add_noise,
-                "Noise Amount": noise_amount,
-                "Early Stopping Patience": early_stopping_patience,
-                "Disable Early Stopping": disable_early_stopping,
-                "Weight Decay": weight_decay,
-                "Suppress Warnings": suppress_warnings,
-                "Suppress Reading Messages": suppress_reading_messages,
-                "Use CPU for Preparation": use_cpu_for_prep,
-                "Discriminator Update Interval": discriminator_update_interval,
-                "Label Smoothing Real": label_smoothing_real,
-                "Label Smoothing Fake": label_smoothing_fake,
-                "Perceptual Loss Weight": perceptual_loss_weight,
-                "Optimization Method": optimization_method,
-                "Optuna Trials": optuna_trials,
-                "Ray Tune Samples": ray_samples
+            gradio_params = {
+                "data_dir": data_dir,
+                "val_dir": val_dir,
+                "batch_size": batch_size,
+                "num_epochs": num_epochs,
+                "learning_rate_g": learning_rate_g,
+                "learning_rate_d": learning_rate_d,
+                "use_cuda": use_cuda,
+                "checkpoint_dir": checkpoint_dir,
+                "save_interval": save_interval,
+                "accumulation_steps": accumulation_steps,
+                "num_stems": num_stems,
+                "num_workers": num_workers,
+                "cache_dir": cache_dir,
+                "loss_function_g": loss_function_g,
+                "loss_function_d": loss_function_d,
+                "optimizer_name_g": optimizer_name_g,
+                "optimizer_name_d": optimizer_name_d,
+                "perceptual_loss_flag": perceptual_loss_flag,
+                "clip_value": clip_value,
+                "scheduler_step_size": scheduler_step_size,
+                "scheduler_gamma": scheduler_gamma,
+                "tensorboard_flag": tensorboard_flag,
+                "apply_data_augmentation": apply_data_augmentation,
+                "add_noise": add_noise,
+                "noise_amount": noise_amount,
+                "early_stopping_patience": early_stopping_patience,
+                "disable_early_stopping": disable_early_stopping,
+                "weight_decay": weight_decay,
+                "suppress_warnings": suppress_warnings,
+                "suppress_reading_messages": suppress_reading_messages,
+                "use_cpu_for_prep": use_cpu_for_prep,
+                "discriminator_update_interval": discriminator_update_interval,
+                "label_smoothing_real": label_smoothing_real,
+                "label_smoothing_fake": label_smoothing_fake,
+                "perceptual_loss_weight": perceptual_loss_weight
             }
-            log_training_parameters(params)
+            log_training_parameters(gradio_params)
             if optimization_method == "Optuna":
-                return start_optuna_optimization(optuna_trials)
+                return start_optuna_optimization(optuna_trials, gradio_params)
             elif optimization_method == "Ray Tune":
-                return start_ray_tune_optimization(ray_samples)
+                return start_ray_tune_optimization(ray_samples, gradio_params)
             else:
                 return start_training_wrapper(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval,
                                           accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
