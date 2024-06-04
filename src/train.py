@@ -179,9 +179,39 @@ def resume_training(checkpoint_dir, device_str):
     start_training(
         data_dir=checkpoint['data_dir'],
         val_dir=checkpoint['val_dir'],
-        training_params=checkpoint['training_params'],
-        model_params=checkpoint['model_params'],
-        stop_flag=stop_flag
+        batch_size=checkpoint['batch_size'],
+        num_epochs=checkpoint['num_epochs'] - epoch,
+        initial_lr_g=checkpoint['initial_lr_g'],
+        initial_lr_d=checkpoint['initial_lr_d'],
+        use_cuda='cuda' in device_str,
+        checkpoint_dir=checkpoint['checkpoint_dir'],
+        save_interval=checkpoint['save_interval'],
+        accumulation_steps=checkpoint['accumulation_steps'],
+        num_stems=checkpoint['num_stems'],
+        num_workers=checkpoint['num_workers'],
+        cache_dir=checkpoint['cache_dir'],
+        loss_function_g=checkpoint['loss_function_g'],
+        loss_function_d=checkpoint['loss_function_d'],
+        optimizer_name_g=checkpoint['optimizer_name_g'],
+        optimizer_name_d=checkpoint['optimizer_name_d'],
+        perceptual_loss_flag=checkpoint['perceptual_loss_flag'],
+        perceptual_loss_weight=checkpoint['perceptual_loss_weight'],
+        clip_value=checkpoint['clip_value'],
+        scheduler_step_size=checkpoint['scheduler_step_size'],
+        scheduler_gamma=checkpoint['scheduler_gamma'],
+        tensorboard_flag=checkpoint['tensorboard_flag'],
+        apply_data_augmentation=checkpoint['apply_data_augmentation'],
+        add_noise=checkpoint['add_noise'],
+        noise_amount=checkpoint['noise_amount'],
+        early_stopping_patience=checkpoint['early_stopping_patience'],
+        disable_early_stopping=checkpoint['disable_early_stopping'],
+        weight_decay=checkpoint['weight_decay'],
+        suppress_warnings=checkpoint['suppress_warnings'],
+        suppress_reading_messages=checkpoint['suppress_reading_messages'],
+        use_cpu_for_prep=checkpoint['use_cpu_for_prep'],
+        discriminator_update_interval=checkpoint['discriminator_update_interval'],
+        label_smoothing_real=checkpoint['label_smoothing_real'],
+        label_smoothing_fake=checkpoint['label_smoothing_fake']
     )
 
     return f"Resumed training from checkpoint: {latest_checkpoint}"
@@ -320,41 +350,12 @@ def train_ray_tune(config, gradio_params):
 
     tune.report({"metric": 0.0})
 
-if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-
-    gradio_params = {
-        'data_dir': "K:/KAN-Stem DataSet/ProcessedDataset",
-        'val_dir': "K:/KAN-Stem DataSet/Chunk_0_Sample",
-        'use_cuda': True,
-        'checkpoint_dir': "./checkpoints",
-        'save_interval': 50,
-        'accumulation_steps': 4,
-        'num_stems': 7,
-        'num_workers': 4,
-        'cache_dir': "./cache",
-        'apply_data_augmentation': True,
-        'add_noise': True,
-        'noise_amount': 0.1,
-        'early_stopping_patience': 3,
-        'disable_early_stopping': False,
-        'suppress_warnings': True,
-        'suppress_reading_messages': True,
-        'use_cpu_for_prep': True,
-        'discriminator_update_interval': 5,
-        'label_smoothing_real': 0.8,
-        'label_smoothing_fake': 0.2,
-        'optimizer_name_g': "Adam",
-        'optimizer_name_d': "Adam",
-        'scheduler_step_size': 10,
-        'scheduler_gamma': 0.9,
-        'tensorboard_flag': False,
-        'weight_decay': 1e-4
-    }
-
+def start_optuna_optimization(n_trials, gradio_params):
     study = optuna.create_study(direction='minimize')
-    study.optimize(lambda trial: objective_optuna(trial, gradio_params), n_trials=10)
+    study.optimize(lambda trial: objective_optuna(trial, gradio_params), n_trials=n_trials)
+    return "Optuna optimization completed"
 
+def start_ray_tune_optimization(num_samples, gradio_params):
     ray.init()
     config = {
         'batch_size': tune.choice([16, 32, 64]),
@@ -371,4 +372,11 @@ if __name__ == '__main__':
         grace_period=10,
         reduction_factor=2
     )
-    tune.run(lambda config: train_ray_tune(config, gradio_params), config=config, scheduler=scheduler, num_samples=10)
+    tune.run(
+        lambda config: train_ray_tune(config, gradio_params),
+        config=config,
+        scheduler=scheduler,
+        num_samples=num_samples,
+        trial_dirname_creator=lambda trial: f"trial_{trial.trial_id}"  # Custom trial directory name creator
+    )
+    return "Ray Tune optimization completed"
