@@ -21,7 +21,7 @@ warnings.filterwarnings("ignore", message="oneDNN custom operations are on. You 
 
 logger = logging.getLogger(__name__)
 
-def train_single_stem(stem, dataset, val_dir, training_params, model_params, sample_rate, n_mels, n_fft, target_length):
+def train_single_stem(stem, dataset, val_dir, training_params, model_params, sample_rate, n_mels, n_fft, target_length, stop_flag):
     logger.info("Starting training for single stem: %s", stem)
     writer = SummaryWriter(log_dir=os.path.join(training_params['checkpoint_dir'], 'runs', f'stem_{stem}_{datetime.now().strftime("%Y%m%d-%H%M%S")}')) if model_params['tensorboard_flag'] else None
 
@@ -43,7 +43,7 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
     )
 
     val_loader = DataLoader(
-        StemSeparationDataset(val_dir, n_mels, target_length, n_fft, training_params['cache_dir'], apply_data_augmentation=False, suppress_warnings=training_params['suppress_warnings'], num_workers=training_params['num_workers'], device_prep=prep_device),
+        StemSeparationDataset(val_dir, n_mels, target_length, n_fft, training_params['cache_dir'], apply_data_augmentation=False, suppress_warnings=training_params['suppress_warnings'], num_workers=training_params['num_workers'], device_prep=prep_device, stop_flag=stop_flag),
         batch_size=training_params['batch_size'],
         shuffle=False,
         pin_memory=True,
@@ -59,6 +59,10 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
     best_val_loss = float('inf')
 
     for epoch in range(training_params['num_epochs']):
+        if stop_flag.value == 1:
+            logger.info("Training stopped.")
+            return
+
         logger.info(f"Epoch {epoch+1}/{training_params['num_epochs']} started.")
         model.train()
         discriminator.train()
@@ -69,6 +73,10 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
         optimizer_d.zero_grad()
 
         for i, data in enumerate(train_loader):
+            if stop_flag.value == 1:
+                logger.info("Training stopped.")
+                return
+
             if data is None:
                 continue
 
@@ -78,7 +86,7 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
             targets = data['target'].to(training_params['device_str'], non_blocking=True)
 
             with autocast():
-                inputs = inputs.squeeze(2)  # Ensure inputs are 4D
+                inputs = inputs.squeeze(2)
                 outputs = model(inputs)
                 outputs = outputs[..., :target_length]
 
@@ -146,6 +154,10 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
         with torch.no_grad():
             try:
                 for i, data in enumerate(val_loader):
+                    if stop_flag.value == 1:
+                        logger.info("Training stopped.")
+                        return
+
                     if data is None:
                         continue
 
@@ -153,7 +165,7 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
 
                     inputs = data['input'].to(training_params['device_str'], non_blocking=True)
                     targets = data['target'].to(training_params['device_str'], non_blocking=True)
-                    inputs = inputs.squeeze(2)  # Ensure inputs are 4D
+                    inputs = inputs.squeeze(2)
                     outputs = model(inputs)
                     outputs = outputs[..., :target_length]
 

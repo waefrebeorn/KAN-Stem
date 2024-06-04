@@ -9,7 +9,7 @@ from utils import load_and_preprocess
 logger = logging.getLogger(__name__)
 
 class StemSeparationDataset(Dataset):
-    def __init__(self, data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation, suppress_warnings, num_workers, device_prep):
+    def __init__(self, data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation, suppress_warnings, num_workers, device_prep, stop_flag):
         self.data_dir = data_dir
         self.n_mels = n_mels
         self.target_length = target_length
@@ -19,6 +19,7 @@ class StemSeparationDataset(Dataset):
         self.suppress_warnings = suppress_warnings
         self.num_workers = num_workers
         self.device_prep = device_prep
+        self.stop_flag = stop_flag
 
         self.valid_stems = [f for f in os.listdir(data_dir) if f.endswith('.wav')]
         if not self.valid_stems:
@@ -53,6 +54,9 @@ class StemSeparationDataset(Dataset):
         return len(self.valid_stems)
 
     def __getitem__(self, idx):
+        if self.stop_flag.value == 1:
+            return None
+
         stem_name = self.valid_stems[idx]
         cache_key = self._get_cache_key(stem_name)
 
@@ -98,6 +102,9 @@ class StemSeparationDataset(Dataset):
             return stem_cache_path
 
     def _process_single_stem(self, stem_name):
+        if self.stop_flag.value == 1:
+            return None
+
         try:
             file_path = os.path.join(self.data_dir, stem_name)
             mel_spectrogram = T.MelSpectrogram(
@@ -114,7 +121,6 @@ class StemSeparationDataset(Dataset):
             if input_mel is None:
                 return None
 
-            # Ensure the mel spectrogram has the expected shape
             if input_mel.shape[-1] < self.target_length:
                 input_mel = torch.nn.functional.pad(input_mel, (0, self.target_length - input_mel.shape[-1]), mode='constant')
 
@@ -122,7 +128,6 @@ class StemSeparationDataset(Dataset):
             input_mel = input_mel.unsqueeze(0)
             target_mel = target_mel.unsqueeze(0)
 
-            # Debugging statements
             logger.debug(f"Processed input mel shape: {input_mel.shape}")
             logger.debug(f"Processed target mel shape: {target_mel.shape}")
 
@@ -145,9 +150,14 @@ class StemSeparationDataset(Dataset):
         with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
             futures = [executor.submit(self._load_stem_data, stem_name) for stem_name in self.valid_stems]
             for future in as_completed(futures):
-                future.result()  # wait for all futures to complete
+                if self.stop_flag.value == 1:
+                    break
+                future.result()
 
     def _load_stem_data(self, stem_name):
+        if self.stop_flag.value == 1:
+            return None
+
         cache_key = self._get_cache_key(stem_name)
 
         if cache_key in self.cache:
@@ -187,8 +197,7 @@ def collate_fn(batch):
     inputs = torch.stack([pad_tensor(item['input'], max_length, max_width) for item in batch])
     targets = torch.stack([pad_tensor(item['target'], max_length, max_width) for item in batch])
     
-    # Ensure the tensors are 4D (batch_size, channels, height, width)
-    inputs = inputs.squeeze(1)  # Remove extra dimension
-    targets = targets.squeeze(1)  # Remove extra dimension
+    inputs = inputs.squeeze(1)
+    targets = targets.squeeze(1)
 
     return {'input': inputs, 'target': targets}

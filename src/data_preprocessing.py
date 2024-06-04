@@ -5,9 +5,12 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-def preprocess_and_cache_dataset(data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation, suppress_warnings, num_workers, device_prep):
-    # Add your preprocessing code here
-    pass
+def preprocess_and_cache_dataset(data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation, suppress_warnings, num_workers, device_prep, stop_flag):
+    dataset = StemSeparationDataset(
+        data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation, 
+        suppress_warnings, num_workers, device_prep, stop_flag
+    )
+    dataset.load_all_stems()
 
 def load_and_preprocess(file_path, mel_spectrogram, target_length, apply_data_augmentation, device_prep):
     try:
