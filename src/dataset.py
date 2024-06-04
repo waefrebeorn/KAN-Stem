@@ -138,12 +138,21 @@ class StemSeparationDataset(Dataset):
 
     def _validate_data(self, data):
         if 'input' not in data or 'target' not in data:
+            logger.warning(f"Data validation failed: 'input' or 'target' key missing")
             return False
+
         input_shape = data['input'].shape
         target_shape = data['target'].shape
         expected_shape = (1, self.n_mels, self.target_length)
-        if input_shape[1:] != expected_shape or target_shape[1:] != expected_shape:
+
+        if input_shape != expected_shape or target_shape != expected_shape:
+            logger.warning(f"Data validation failed: shape mismatch. Input shape: {input_shape}, Target shape: {target_shape}, Expected shape: {expected_shape}")
             return False
+
+        if not isinstance(data['input'], torch.Tensor) or not isinstance(data['target'], torch.Tensor):
+            logger.warning(f"Data validation failed: 'input' or 'target' is not a torch.Tensor. Input type: {type(data['input'])}, Target type: {type(data['target'])}")
+            return False
+
         return True
 
     def load_all_stems(self):
