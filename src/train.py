@@ -18,8 +18,9 @@ logger = logging.getLogger(__name__)
 
 mp.set_start_method('spawn', force=True)
 
-# Define the global variable `training_process`
+# Define the global variable `training_process` and `stop_flag`
 training_process = None
+stop_flag = mp.Value('i', 0)  # Shared flag for stopping processes
 
 def detect_parameters(data_dir):
     sample_rates = []
@@ -46,11 +47,7 @@ def log_training_parameters(params):
     for key, value in params.items():
         logger.info(f"{key}: {value}")
 
-def reprocess_dataset(data_dir, cache_dir, n_mels, target_length, n_fft, apply_data_augmentation, suppress_warnings, num_workers, device_prep):
-    dataset = StemSeparationDataset(data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation, suppress_warnings, num_workers, device_prep)
-    dataset.load_all_stems()
-
-def start_training(data_dir, val_dir, training_params, model_params):
+def start_training(data_dir, val_dir, training_params, model_params, stop_flag):
     logger.info(f"Starting training with dataset at {data_dir}")
     device_str = 'cuda' if training_params['use_cuda'] and torch.cuda.is_available() else 'cpu'
     training_params['device_str'] = device_str
@@ -65,9 +62,13 @@ def start_training(data_dir, val_dir, training_params, model_params):
 
     target_length = 256
 
-    reprocess_dataset(data_dir, training_params['cache_dir'], n_mels, target_length, n_fft, training_params['apply_data_augmentation'], training_params['suppress_warnings'], training_params['num_workers'], device_prep)
+    preprocess_and_cache_dataset(data_dir, n_mels, target_length, n_fft, training_params['cache_dir'], training_params['apply_data_augmentation'], training_params['suppress_warnings'], training_params['num_workers'], device_prep, stop_flag)
     
-    dataset = StemSeparationDataset(data_dir, n_mels, target_length, n_fft, training_params['cache_dir'], training_params['apply_data_augmentation'], training_params['suppress_warnings'], training_params['num_workers'], device_prep)
+    if stop_flag.value == 1:
+        logger.info("Training stopped during data preprocessing.")
+        return
+
+    dataset = StemSeparationDataset(data_dir, n_mels, target_length, n_fft, training_params['cache_dir'], training_params['apply_data_augmentation'], training_params['suppress_warnings'], training_params['num_workers'], device_prep, stop_flag)
     
     params = {**training_params, **model_params}
     log_training_parameters(params)
@@ -77,14 +78,18 @@ def start_training(data_dir, val_dir, training_params, model_params):
         logger.warning("scheduler_gamma should be < 1.0. Setting scheduler_gamma to 0.9")
 
     for stem in range(training_params['num_stems']):
+        if stop_flag.value == 1:
+            logger.info("Training stopped.")
+            return
         try:
-            train_single_stem(stem, dataset, val_dir, training_params, model_params, sample_rate, n_mels, n_fft, target_length)
+            train_single_stem(stem, dataset, val_dir, training_params, model_params, sample_rate, n_mels, n_fft, target_length, stop_flag)
         except Exception as e:
             logger.error(f"Error in train_single_stem: {e}", exc_info=True)
             raise
 
 def start_training_wrapper(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_str_g, loss_function_str_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep, discriminator_update_interval, label_smoothing_real, label_smoothing_fake):
-    global training_process
+    global training_process, stop_flag
+    stop_flag.value = 0  # Reset stop flag
     loss_function_map = {
         "MSELoss": nn.MSELoss(),
         "L1Loss": nn.L1Loss(),
@@ -136,13 +141,14 @@ def start_training_wrapper(data_dir, val_dir, batch_size, num_epochs, learning_r
         'weight_decay': weight_decay
     }
 
-    training_process = mp.Process(target=start_training, args=(data_dir, val_dir, training_params, model_params))
+    training_process = mp.Process(target=start_training, args=(data_dir, val_dir, training_params, model_params, stop_flag))
     training_process.start()
     return f"Training Started with {loss_function_str_g} for Generator and {loss_function_str_d} for Discriminator, using {optimizer_name_g} for Generator Optimizer and {optimizer_name_d} for Discriminator Optimizer"
 
 def stop_training_wrapper():
-    global training_process
+    global training_process, stop_flag
     if training_process is not None:
+        stop_flag.value = 1  # Set stop flag to request stopping
         training_process.terminate()
         training_process = None
         return "Training Stopped"
@@ -239,7 +245,7 @@ def compute_sar(true, pred):
     sar = 10 * torch.log10(s_noise / (s_artif + 1e-8))
     return sar
 
-def objective_optuna(trial):
+def objective_optuna(trial, gradio_params):
     batch_size = trial.suggest_int('batch_size', 16, 64)
     num_epochs = trial.suggest_int('num_epochs', 10, 100)
     learning_rate_g = trial.suggest_float('learning_rate_g', 1e-5, 1e-1, log=True)
@@ -248,28 +254,28 @@ def objective_optuna(trial):
     clip_value = trial.suggest_float('clip_value', 0.5, 1.5)
 
     training_params = {
-        'data_dir': "K:/KAN-Stem DataSet/ProcessedDataset",
-        'val_dir': "K:/KAN-Stem DataSet/Chunk_0_Sample",
+        'data_dir': gradio_params['data_dir'],
+        'val_dir': gradio_params['val_dir'],
         'batch_size': batch_size,
         'num_epochs': num_epochs,
-        'use_cuda': True,
-        'checkpoint_dir': "./checkpoints",
-        'save_interval': 50,
-        'accumulation_steps': 4,
-        'num_stems': 7,
-        'num_workers': 4,
-        'cache_dir': "./cache",
-        'apply_data_augmentation': True,
-        'add_noise': True,
-        'noise_amount': 0.1,
-        'early_stopping_patience': 3,
-        'disable_early_stopping': False,
-        'suppress_warnings': True,
-        'suppress_reading_messages': True,
-        'use_cpu_for_prep': True,
-        'discriminator_update_interval': 5,
-        'label_smoothing_real': 0.8,
-        'label_smoothing_fake': 0.2
+        'use_cuda': gradio_params['use_cuda'],
+        'checkpoint_dir': gradio_params['checkpoint_dir'],
+        'save_interval': gradio_params['save_interval'],
+        'accumulation_steps': gradio_params['accumulation_steps'],
+        'num_stems': gradio_params['num_stems'],
+        'num_workers': gradio_params['num_workers'],
+        'cache_dir': gradio_params['cache_dir'],
+        'apply_data_augmentation': gradio_params['apply_data_augmentation'],
+        'add_noise': gradio_params['add_noise'],
+        'noise_amount': gradio_params['noise_amount'],
+        'early_stopping_patience': gradio_params['early_stopping_patience'],
+        'disable_early_stopping': gradio_params['disable_early_stopping'],
+        'suppress_warnings': gradio_params['suppress_warnings'],
+        'suppress_reading_messages': gradio_params['suppress_reading_messages'],
+        'use_cpu_for_prep': gradio_params['use_cpu_for_prep'],
+        'discriminator_update_interval': gradio_params['discriminator_update_interval'],
+        'label_smoothing_real': gradio_params['label_smoothing_real'],
+        'label_smoothing_fake': gradio_params['label_smoothing_fake']
     }
 
     model_params = {
@@ -277,22 +283,22 @@ def objective_optuna(trial):
         'initial_lr_d': learning_rate_d,
         'loss_function_g': nn.L1Loss(),
         'loss_function_d': wasserstein_loss,
-        'optimizer_name_g': "Adam",
-        'optimizer_name_d': "Adam",
+        'optimizer_name_g': gradio_params['optimizer_name_g'],
+        'optimizer_name_d': gradio_params['optimizer_name_d'],
         'perceptual_loss_flag': True,
         'perceptual_loss_weight': perceptual_loss_weight,
         'clip_value': clip_value,
-        'scheduler_step_size': 10,
-        'scheduler_gamma': 0.9,
-        'tensorboard_flag': False,
-        'weight_decay': 1e-4
+        'scheduler_step_size': gradio_params['scheduler_step_size'],
+        'scheduler_gamma': gradio_params['scheduler_gamma'],
+        'tensorboard_flag': gradio_params['tensorboard_flag'],
+        'weight_decay': gradio_params['weight_decay']
     }
 
-    start_training(training_params['data_dir'], training_params['val_dir'], training_params, model_params)
+    start_training(training_params['data_dir'], training_params['val_dir'], training_params, model_params, stop_flag)
 
     return 0.0
 
-def train_ray_tune(config):
+def train_ray_tune(config, gradio_params):
     batch_size = config['batch_size']
     num_epochs = config['num_epochs']
     learning_rate_g = config['learning_rate_g']
@@ -301,10 +307,56 @@ def train_ray_tune(config):
     clip_value = config['clip_value']
 
     training_params = {
-        'data_dir': "K:/KAN-Stem DataSet/ProcessedDataset",
-        'val_dir': "K:/KAN-Stem DataSet/Chunk_0_Sample",
+        'data_dir': gradio_params['data_dir'],
+        'val_dir': gradio_params['val_dir'],
         'batch_size': batch_size,
         'num_epochs': num_epochs,
+        'use_cuda': gradio_params['use_cuda'],
+        'checkpoint_dir': gradio_params['checkpoint_dir'],
+        'save_interval': gradio_params['save_interval'],
+        'accumulation_steps': gradio_params['accumulation_steps'],
+        'num_stems': gradio_params['num_stems'],
+        'num_workers': gradio_params['num_workers'],
+        'cache_dir': gradio_params['cache_dir'],
+        'apply_data_augmentation': gradio_params['apply_data_augmentation'],
+        'add_noise': gradio_params['add_noise'],
+        'noise_amount': gradio_params['noise_amount'],
+        'early_stopping_patience': gradio_params['early_stopping_patience'],
+        'disable_early_stopping': gradio_params['disable_early_stopping'],
+        'suppress_warnings': gradio_params['suppress_warnings'],
+        'suppress_reading_messages': gradio_params['suppress_reading_messages'],
+        'use_cpu_for_prep': gradio_params['use_cpu_for_prep'],
+        'discriminator_update_interval': gradio_params['discriminator_update_interval'],
+        'label_smoothing_real': gradio_params['label_smoothing_real'],
+        'label_smoothing_fake': gradio_params['label_smoothing_fake']
+    }
+
+    model_params = {
+        'initial_lr_g': learning_rate_g,
+        'initial_lr_d': learning_rate_d,
+        'loss_function_g': nn.L1Loss(),
+        'loss_function_d': wasserstein_loss,
+        'optimizer_name_g': gradio_params['optimizer_name_g'],
+        'optimizer_name_d': gradio_params['optimizer_name_d'],
+        'perceptual_loss_flag': True,
+        'perceptual_loss_weight': perceptual_loss_weight,
+        'clip_value': clip_value,
+        'scheduler_step_size': gradio_params['scheduler_step_size'],
+        'scheduler_gamma': gradio_params['scheduler_gamma'],
+        'tensorboard_flag': gradio_params['tensorboard_flag'],
+        'weight_decay': gradio_params['weight_decay']
+    }
+
+    start_training(training_params['data_dir'], training_params['val_dir'], training_params, model_params, stop_flag)
+
+    tune.report({"metric": 0.0})
+
+if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+    gradio_params = {
+        'data_dir': "K:/KAN-Stem DataSet/ProcessedDataset",
+        'val_dir': "K:/KAN-Stem DataSet/Chunk_0_Sample",
         'use_cuda': True,
         'checkpoint_dir': "./checkpoints",
         'save_interval': 50,
@@ -322,34 +374,17 @@ def train_ray_tune(config):
         'use_cpu_for_prep': True,
         'discriminator_update_interval': 5,
         'label_smoothing_real': 0.8,
-        'label_smoothing_fake': 0.2
-    }
-
-    model_params = {
-        'initial_lr_g': learning_rate_g,
-        'initial_lr_d': learning_rate_d,
-        'loss_function_g': nn.L1Loss(),
-        'loss_function_d': wasserstein_loss,
+        'label_smoothing_fake': 0.2,
         'optimizer_name_g': "Adam",
         'optimizer_name_d': "Adam",
-        'perceptual_loss_flag': True,
-        'perceptual_loss_weight': perceptual_loss_weight,
-        'clip_value': clip_value,
         'scheduler_step_size': 10,
         'scheduler_gamma': 0.9,
         'tensorboard_flag': False,
         'weight_decay': 1e-4
     }
 
-    start_training(training_params['data_dir'], training_params['val_dir'], training_params, model_params)
-
-    tune.report({"metric": 0.0})
-
-if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-
     study = optuna.create_study(direction='minimize')
-    study.optimize(objective_optuna, n_trials=10)
+    study.optimize(lambda trial: objective_optuna(trial, gradio_params), n_trials=10)
 
     ray.init()
     config = {
@@ -367,4 +402,4 @@ if __name__ == '__main__':
         grace_period=10,
         reduction_factor=2
     )
-    tune.run(train_ray_tune, config=config, scheduler=scheduler, num_samples=10)
+    tune.run(lambda config: train_ray_tune(config, gradio_params), config=config, scheduler=scheduler, num_samples=10)
