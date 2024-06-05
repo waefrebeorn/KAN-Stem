@@ -254,10 +254,10 @@ def compute_sar(true, pred):
     return sar
 
 def objective_optuna(trial, gradio_params):
-    batch_size = trial.suggest_int('batch_size', 16, 64)
-    num_epochs = trial.suggest_int('num_epochs', 5, 5)  # Fixed to 5 epochs for testing
-    learning_rate_g = trial.suggest_float('learning_rate_g', 1e-5, 1e-1, log=True)
-    learning_rate_d = trial.suggest_float('learning_rate_d', 1e-5, 1e-1, log=True)
+    batch_size = gradio_params['batch_size']  # Respecting the gradio batch size
+    num_epochs = 5  # Fixed to 5 epochs for testing
+    learning_rate_g = trial.suggest_float('learning_rate_g', 1e-6, 1e-4, log=True)
+    learning_rate_d = trial.suggest_float('learning_rate_d', 1e-6, 1e-4, log=True)
     perceptual_loss_weight = trial.suggest_float('perceptual_loss_weight', 0.0, 1.0)
     clip_value = trial.suggest_float('clip_value', 0.5, 1.5)
 
@@ -289,7 +289,7 @@ def objective_optuna(trial, gradio_params):
     model_params = {
         'initial_lr_g': learning_rate_g,
         'initial_lr_d': learning_rate_d,
-        'loss_function_g': nn.L1Loss(),
+        'loss_function_g': nn.SmoothL1Loss(),
         'loss_function_d': wasserstein_loss,
         'optimizer_name_g': gradio_params['optimizer_name_g'],
         'optimizer_name_d': gradio_params['optimizer_name_d'],
@@ -302,12 +302,14 @@ def objective_optuna(trial, gradio_params):
         'weight_decay': gradio_params['weight_decay']
     }
 
+    logger.info(f"Starting Optuna trial with configuration: {trial.params}")
+
     start_training(training_params['data_dir'], training_params['val_dir'], training_params, model_params, stop_flag)
 
     return 0.0
 
 def train_ray_tune(config, gradio_params):
-    batch_size = config['batch_size']
+    batch_size = gradio_params['batch_size']  # Respecting the gradio batch size
     num_epochs = 5  # Fixed to 5 epochs for testing
     learning_rate_g = config['learning_rate_g']
     learning_rate_d = config['learning_rate_d']
@@ -342,7 +344,7 @@ def train_ray_tune(config, gradio_params):
     model_params = {
         'initial_lr_g': learning_rate_g,
         'initial_lr_d': learning_rate_d,
-        'loss_function_g': nn.L1Loss(),
+        'loss_function_g': nn.SmoothL1Loss(),
         'loss_function_d': wasserstein_loss,
         'optimizer_name_g': gradio_params['optimizer_name_g'],
         'optimizer_name_d': gradio_params['optimizer_name_d'],
@@ -355,9 +357,11 @@ def train_ray_tune(config, gradio_params):
         'weight_decay': gradio_params['weight_decay']
     }
 
+    logger.info(f"Starting Ray Tune trial with configuration: {config}")
+
     start_training(training_params['data_dir'], training_params['val_dir'], training_params, model_params, stop_flag)
 
-    tune.report({"metric": 0.0})
+    tune.report(metric=0.0)
 
 def start_optuna_optimization(n_trials, gradio_params):
     study = optuna.create_study(direction='minimize')
@@ -367,10 +371,10 @@ def start_optuna_optimization(n_trials, gradio_params):
 def start_ray_tune_optimization(num_samples, gradio_params):
     ray.init()
     config = {
-        'batch_size': tune.choice([16, 32, 64]),
+        'batch_size': gradio_params['batch_size'],  # Respecting the gradio batch size
         'num_epochs': tune.choice([10, 20, 50, 100]),  # This will be overridden to 5 epochs in the training function
-        'learning_rate_g': tune.loguniform(1e-5, 1e-1),
-        'learning_rate_d': tune.loguniform(1e-5, 1e-1),
+        'learning_rate_g': tune.loguniform(1e-6, 1e-4),
+        'learning_rate_d': tune.loguniform(1e-6, 1e-4),
         'perceptual_loss_weight': tune.uniform(0.0, 1.0),
         'clip_value': tune.uniform(0.5, 1.5)
     }

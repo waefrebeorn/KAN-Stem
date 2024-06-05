@@ -68,13 +68,13 @@ class ContextAggregationNetwork(nn.Module):
 
     def forward(self, x, suppress_reading_messages=False):
         if not suppress_reading_messages:
-            logger.info("Shape before conv1: %s", x.shape)
+            logger.debug(f"Shape before conv1: {x.shape}")
         x = F.relu_(self.bn1(self.conv1(x)))
         if not suppress_reading_messages:
-            logger.info("Shape after conv1: %s", x.shape)
+            logger.debug(f"Shape after conv1: {x.shape}")
         x = F.relu_(self.bn2(self.conv2(x)))
         if not suppress_reading_messages:
-            logger.info("Shape after conv2: %s", x.shape)
+            logger.debug(f"Shape after conv2: {x.shape}")
         return x
 
 class KANWithDepthwiseConv(nn.Module):
@@ -124,10 +124,10 @@ class KANWithDepthwiseConv(nn.Module):
         elif x.dim() == 3:  # Add channel dimension if not present
             x = x.unsqueeze(1)
         if not suppress_reading_messages:
-            logger.info("Shape before conv1: %s", x.shape)
+            logger.debug(f"Shape before conv1: {x.shape}")
         x = F.relu_(self.conv1(x))
         if not suppress_reading_messages:
-            logger.info("Shape after conv1: %s", x.shape)
+            logger.debug(f"Shape after conv1: {x.shape}")
         x = self.pool1(x)
         x = self.res_block1(x)  # Add residual block
         x = self.attention1(x)  # Apply attention
@@ -144,21 +144,21 @@ class KANWithDepthwiseConv(nn.Module):
         x = self.pool5(x)
 
         if not suppress_reading_messages:
-            logger.info("Shape before context_aggregation: %s", x.shape)
+            logger.debug(f"Shape before context_aggregation: {x.shape}")
         x = self.context_aggregation(x, suppress_reading_messages=suppress_reading_messages)
         if not suppress_reading_messages:
-            logger.info("Shape after context_aggregation: %s", x.shape)
+            logger.debug(f"Shape after context_aggregation: {x.shape}")
 
         x = self.flatten(x)
         if not suppress_reading_messages:
-            logger.info("Shape after flatten: %s", x.shape)
+            logger.debug(f"Shape after flatten: {x.shape}")
 
         x = F.relu_(self.fc1(x))
         x = self.fc2(x)
         x = torch.tanh(x)  # Use tanh activation to restrict output to [-1, 1]
         x = x.view(-1, self.num_stems, self.n_mels, self.target_length)
         if not suppress_reading_messages:
-            logger.info("Final output shape: %s", x.shape)
+            logger.debug(f"Final output shape: {x.shape}")
 
         return x
 
