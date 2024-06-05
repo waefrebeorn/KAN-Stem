@@ -243,3 +243,6 @@ def get_optimizer(optimizer_name, model_parameters, learning_rate, weight_decay)
         return optim.Adam(model_parameters, lr=learning_rate, weight_decay=weight_decay)
     else:
         raise ValueError(f"Unknown optimizer: {optimizer_name}")
+
+def wasserstein_loss(real_output, fake_output):
+    return torch.mean(fake_output) - torch.mean(real_output)

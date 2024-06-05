@@ -1,3 +1,12 @@
+import os
+import warnings
+
+# Set environment variable to suppress TensorFlow INFO and WARNING messages
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+
+warnings.filterwarnings("ignore", message="Lazy modules are a new feature under heavy development")
+warnings.filterwarnings("ignore", message="oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders.")
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -62,14 +71,14 @@ class ContextAggregationNetwork(nn.Module):
         self.ins2 = nn.InstanceNorm2d(channels)
 
     def forward(self, x, suppress_reading_messages=False):
-        if not suppress_reading_messages:
-            logger.info(f"Shape before conv1: {x.shape}")
+        # if not suppress_reading_messages:
+        #     logger.info(f"Shape before conv1: {x.shape}")
         x = F.relu_(self.ins1(self.conv1(x)))
-        if not suppress_reading_messages:
-            logger.info(f"Shape after conv1: {x.shape}")
+        # if not suppress_reading_messages:
+        #     logger.info(f"Shape after conv1: {x.shape}")
         x = F.relu_(self.ins2(self.conv2(x)))
-        if not suppress_reading_messages:
-            logger.info(f"Shape after conv2: {x.shape}")
+        # if not suppress_reading_messages:
+        #     logger.info(f"Shape after conv2: {x.shape}")
         return x
 
 class KANWithDepthwiseConv(nn.Module):
@@ -118,11 +127,11 @@ class KANWithDepthwiseConv(nn.Module):
             x = x.unsqueeze(0).unsqueeze(0)
         elif x.dim() == 3:  # Add channel dimension if not present
             x = x.unsqueeze(1)
-        if not suppress_reading_messages:
-            logger.debug(f"Shape before conv1: {x.shape}")
+        # if not suppress_reading_messages:
+        #     logger.debug(f"Shape before conv1: {x.shape}")
         x = F.relu_(self.conv1(x))
-        if not suppress_reading_messages:
-            logger.debug(f"Shape after conv1: {x.shape}")
+        # if not suppress_reading_messages:
+        #     logger.debug(f"Shape after conv1: {x.shape}")
         x = self.pool1(x)
         x = self.res_block1(x)  # Add residual block
         x = self.attention1(x)  # Apply attention
@@ -138,22 +147,22 @@ class KANWithDepthwiseConv(nn.Module):
         x = self.pool4(x)
         x = self.pool5(x)
 
-        if not suppress_reading_messages:
-            logger.debug(f"Shape before context_aggregation: {x.shape}")
+        # if not suppress_reading_messages:
+        #     logger.debug(f"Shape before context_aggregation: {x.shape}")
         x = self.context_aggregation(x, suppress_reading_messages=suppress_reading_messages)
-        if not suppress_reading_messages:
-            logger.debug(f"Shape after context_aggregation: {x.shape}")
+        # if not suppress_reading_messages:
+        #     logger.debug(f"Shape after context_aggregation: {x.shape}")
 
         x = self.flatten(x)
-        if not suppress_reading_messages:
-            logger.debug(f"Shape after flatten: {x.shape}")
+        # if not suppress_reading_messages:
+        #     logger.debug(f"Shape after flatten: {x.shape}")
 
         x = F.relu_(self.fc1(x))
         x = self.fc2(x)
         x = torch.tanh(x)  # Use tanh activation to restrict output to [-1, 1]
         x = x.view(-1, self.num_stems, self.n_mels, self.target_length)
-        if not suppress_reading_messages:
-            logger.debug(f"Final output shape: {x.shape}")
+        # if not suppress_reading_messages:
+        #     logger.debug(f"Final output shape: {x.shape}")
 
         return x
 

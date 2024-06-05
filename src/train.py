@@ -1,72 +1,17 @@
 import os
 import torch
-import torch.multiprocessing as mp
-import torch.nn as nn
+import torch.optim as optim
+from multiprocessing import Value
+from model_setup import create_model_and_optimizer
+from training_loop import train_single_stem, start_training
 import logging
 from data_preprocessing import preprocess_and_cache_dataset
-from training_loop import train_single_stem
-from loss_functions import wasserstein_loss
 from dataset import StemSeparationDataset
 from utils import log_training_parameters, detect_parameters
-import warnings
-
-warnings.filterwarnings("ignore", message="Lazy modules are a new feature under heavy development")
-warnings.filterwarnings("ignore", message="oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders.")
 
 logger = logging.getLogger(__name__)
 
-mp.set_start_method('spawn', force=True)
-
-# Define the global variable `training_process` and `stop_flag`
-training_process = None
-stop_flag = mp.Value('i', 0)  # Shared flag for stopping processes
-
-def start_training(data_dir, val_dir, training_params, model_params, stop_flag):
-    if training_params['suppress_warnings']:
-        logger.setLevel(logging.ERROR)
-    elif training_params['suppress_reading_messages']:
-        logger.setLevel(logging.WARNING)
-
-    logger.info(f"Starting training with dataset at {data_dir}")
-    device_str = 'cuda' if training_params['use_cuda'] and torch.cuda.is_available() else 'cpu'
-    training_params['device_str'] = device_str
-    device_prep = 'cpu' if training_params['use_cpu_for_prep'] else device_str
-    logger.info(f"Using device: {device_str} for training and {device_prep} for preprocessing")
-
-    try:
-        sample_rate, n_mels, n_fft = detect_parameters(data_dir)
-    except ValueError as e:
-        logger.error(f"Error in detecting parameters: {e}")
-        return
-
-    target_length = 256
-
-    preprocess_and_cache_dataset(data_dir, n_mels, target_length, n_fft, training_params['cache_dir'], training_params['apply_data_augmentation'], training_params['suppress_warnings'], training_params['suppress_reading_messages'], training_params['num_workers'], device_prep, stop_flag)
-    
-    if stop_flag.value == 1:
-        logger.info("Training stopped during data preprocessing.")
-        return
-
-    dataset = StemSeparationDataset(data_dir, n_mels, target_length, n_fft, training_params['cache_dir'], training_params['apply_data_augmentation'], training_params['suppress_warnings'], training_params['suppress_reading_messages'], training_params['num_workers'], device_prep, stop_flag)
-    
-    params = {**training_params, **model_params}
-    log_training_parameters(params)
-
-    if model_params['scheduler_gamma'] >= 1.0:
-        model_params['scheduler_gamma'] = 0.9
-        logger.warning("scheduler_gamma should be < 1.0. Setting scheduler_gamma to 0.9")
-
-    for stem in range(training_params['num_stems']):
-        if stop_flag.value == 1:
-            logger.info("Training stopped.")
-            return
-        try:
-            train_single_stem(stem, dataset, val_dir, training_params, model_params, sample_rate, n_mels, n_fft, target_length, stop_flag)
-        except Exception as e:
-            logger.error(f"Error in train_single_stem: {e}", exc_info=True)
-            raise
-
-def start_training_wrapper(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_str_g, loss_function_str_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep, discriminator_update_interval, label_smoothing_real, label_smoothing_fake):
+def start_training_wrapper(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_str_g, loss_function_str_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep, discriminator_update_interval, label_smoothing_real, label_smoothing_fake, suppress_detailed_logs):
     global training_process, stop_flag
     stop_flag.value = 0  # Reset stop flag
     loss_function_map = {
@@ -101,7 +46,8 @@ def start_training_wrapper(data_dir, val_dir, batch_size, num_epochs, learning_r
         'use_cpu_for_prep': use_cpu_for_prep,
         'discriminator_update_interval': discriminator_update_interval,
         'label_smoothing_real': label_smoothing_real,
-        'label_smoothing_fake': label_smoothing_fake
+        'label_smoothing_fake': label_smoothing_fake,
+        'suppress_detailed_logs': suppress_detailed_logs
     }
 
     model_params = {
@@ -120,7 +66,7 @@ def start_training_wrapper(data_dir, val_dir, batch_size, num_epochs, learning_r
         'weight_decay': weight_decay
     }
 
-    training_process = mp.Process(target=start_training, args=(data_dir, val_dir, training_params, model_params, stop_flag))
+    training_process = mp.Process(target=start_training, args=(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep, discriminator_update_interval, label_smoothing_real, label_smoothing_fake, suppress_detailed_logs))
     training_process.start()
     return f"Training Started with {loss_function_str_g} for Generator and {loss_function_str_d} for Discriminator, using {optimizer_name_g} for Generator Optimizer and {optimizer_name_d} for Discriminator Optimizer"
 

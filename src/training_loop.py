@@ -10,16 +10,9 @@ import logging
 from torchvision import models
 from torchvision.models import VGG16_Weights
 from torch.optim.lr_scheduler import CyclicLR
-import optuna
-from data_preprocessing import preprocess_and_cache_dataset
-from model_setup import create_model_and_optimizer
 from dataset import StemSeparationDataset, collate_fn
-from utils import compute_sdr, compute_sir, compute_sar, log_training_parameters, detect_parameters, convert_to_3_channels, gradient_penalty, PerceptualLoss
-
-import warnings
-
-warnings.filterwarnings("ignore", message="Lazy modules are a new feature under heavy development")
-warnings.filterwarnings("ignore", message="oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders.")
+from utils import compute_sdr, compute_sir, compute_sar, convert_to_3_channels, gradient_penalty, PerceptualLoss, detect_parameters
+from multiprocessing import Value
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +57,6 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
         collate_fn=collate_fn
     )
 
-    # Implement CyclicLR scheduler
     scheduler_g = CyclicLR(optimizer_g, base_lr=1e-5, max_lr=1e-3, step_size_up=2000, mode='triangular2')
     scheduler_d = CyclicLR(optimizer_d, base_lr=1e-5, max_lr=1e-3, step_size_up=2000, mode='triangular2')
 
@@ -181,7 +173,6 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
                         writer.add_scalar('Loss/Generator', running_loss_g / (i + 1), epoch * len(train_loader) + i)
                         writer.add_scalar('Loss/Discriminator', running_loss_d / (i + 1), epoch * len(train_loader) + i)
 
-                # Step the learning rate scheduler after each batch
                 scheduler_g.step()
                 scheduler_d.step()
 
@@ -277,9 +268,6 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
             except Exception as e:
                 logger.error(f"Error during validation step: {e}", exc_info=True)
 
-        scheduler_g.step(val_loss)
-        scheduler_d.step(val_loss)
-
         if (epoch + 1) % training_params['save_interval'] == 0:
             checkpoint_path = os.path.join(training_params['checkpoint_dir'], f'checkpoint_stem_{stem}_epoch_{epoch+1}.pt')
             torch.save(model.state_dict(), checkpoint_path)
@@ -291,3 +279,48 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
 
     if model_params['tensorboard_flag']:
         writer.close()
+
+def start_training(data_dir, val_dir, training_params, model_params, stop_flag):
+    if training_params['suppress_warnings']:
+        logger.setLevel(logging.ERROR)
+    elif training_params['suppress_reading_messages']:
+        logger.setLevel(logging.WARNING)
+
+    logger.info(f"Starting training with dataset at {data_dir}")
+    device_str = 'cuda' if training_params['use_cuda'] and torch.cuda.is_available() else 'cpu'
+    training_params['device_str'] = device_str
+    device_prep = 'cpu' if training_params['use_cpu_for_prep'] else device_str
+    logger.info(f"Using device: {device_str} for training and {device_prep} for preprocessing")
+
+    try:
+        sample_rate, n_mels, n_fft = detect_parameters(data_dir)
+    except ValueError as e:
+        logger.error(f"Error in detecting parameters: {e}")
+        return
+
+    target_length = 256
+
+    preprocess_and_cache_dataset(data_dir, n_mels, target_length, n_fft, training_params['cache_dir'], training_params['apply_data_augmentation'], training_params['suppress_warnings'], training_params['suppress_reading_messages'], training_params['num_workers'], device_prep, stop_flag)
+    
+    if stop_flag.value == 1:
+        logger.info("Training stopped during data preprocessing.")
+        return
+
+    dataset = StemSeparationDataset(data_dir, n_mels, target_length, n_fft, training_params['cache_dir'], training_params['apply_data_augmentation'], training_params['suppress_warnings'], training_params['suppress_reading_messages'], training_params['num_workers'], device_prep, stop_flag)
+    
+    params = {**training_params, **model_params}
+    log_training_parameters(params)
+
+    if model_params['scheduler_gamma'] >= 1.0:
+        model_params['scheduler_gamma'] = 0.9
+        logger.warning("scheduler_gamma should be < 1.0. Setting scheduler_gamma to 0.9")
+
+    for stem in range(training_params['num_stems']):
+        if stop_flag.value == 1:
+            logger.info("Training stopped.")
+            return
+        try:
+            train_single_stem(stem, dataset, val_dir, training_params, model_params, sample_rate, n_mels, n_fft, target_length, stop_flag)
+        except Exception as e:
+            logger.error(f"Error in train_single_stem: {e}", exc_info=True)
+            raise

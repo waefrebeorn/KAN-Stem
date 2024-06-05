@@ -13,3 +13,10 @@ def create_model_and_optimizer(device, n_mels, target_length, cache_dir, learnin
     optimizer_g = get_optimizer(optimizer_name_g, model.parameters(), learning_rate_g, weight_decay)
     optimizer_d = get_optimizer(optimizer_name_d, discriminator.parameters(), learning_rate_d, weight_decay)
     return model, discriminator, optimizer_g, optimizer_d
+
+def initialize_model(device, n_mels, target_length):
+    model = KANWithDepthwiseConv(in_channels=1, out_channels=64, n_mels=n_mels, target_length=target_length, num_stems=1, cache_dir=None, device=device).to(device)
+    return model
+
+def initialize_optimizer(optimizer_name, model_parameters, learning_rate, weight_decay):
+    return get_optimizer(optimizer_name, model_parameters, learning_rate, weight_decay)
