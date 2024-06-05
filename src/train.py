@@ -12,6 +12,10 @@ import ray
 from ray import tune
 from ray.tune.schedulers import ASHAScheduler
 import librosa
+import warnings
+
+warnings.filterwarnings("ignore", message="Lazy modules are a new feature under heavy development")
+warnings.filterwarnings("ignore", message="oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders.")
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +51,11 @@ def log_training_parameters(params):
         logger.info(f"{key}: {value}")
 
 def start_training(data_dir, val_dir, training_params, model_params, stop_flag):
+    if training_params['suppress_warnings']:
+        logger.setLevel(logging.ERROR)
+    elif training_params['suppress_reading_messages']:
+        logger.setLevel(logging.WARNING)
+
     logger.info(f"Starting training with dataset at {data_dir}")
     device_str = 'cuda' if training_params['use_cuda'] and torch.cuda.is_available() else 'cpu'
     training_params['device_str'] = device_str
@@ -61,13 +70,13 @@ def start_training(data_dir, val_dir, training_params, model_params, stop_flag):
 
     target_length = 256
 
-    preprocess_and_cache_dataset(data_dir, n_mels, target_length, n_fft, training_params['cache_dir'], training_params['apply_data_augmentation'], training_params['suppress_warnings'], training_params['num_workers'], device_prep, stop_flag)
+    preprocess_and_cache_dataset(data_dir, n_mels, target_length, n_fft, training_params['cache_dir'], training_params['apply_data_augmentation'], training_params['suppress_warnings'], training_params['suppress_reading_messages'], training_params['num_workers'], device_prep, stop_flag)
     
     if stop_flag.value == 1:
         logger.info("Training stopped during data preprocessing.")
         return
 
-    dataset = StemSeparationDataset(data_dir, n_mels, target_length, n_fft, training_params['cache_dir'], training_params['apply_data_augmentation'], training_params['suppress_warnings'], training_params['num_workers'], device_prep, stop_flag)
+    dataset = StemSeparationDataset(data_dir, n_mels, target_length, n_fft, training_params['cache_dir'], training_params['apply_data_augmentation'], training_params['suppress_warnings'], training_params['suppress_reading_messages'], training_params['num_workers'], device_prep, stop_flag)
     
     params = {**training_params, **model_params}
     log_training_parameters(params)
@@ -246,7 +255,7 @@ def compute_sar(true, pred):
 
 def objective_optuna(trial, gradio_params):
     batch_size = trial.suggest_int('batch_size', 16, 64)
-    num_epochs = trial.suggest_int('num_epochs', 10, 100)
+    num_epochs = trial.suggest_int('num_epochs', 5, 5)  # Fixed to 5 epochs for testing
     learning_rate_g = trial.suggest_float('learning_rate_g', 1e-5, 1e-1, log=True)
     learning_rate_d = trial.suggest_float('learning_rate_d', 1e-5, 1e-1, log=True)
     perceptual_loss_weight = trial.suggest_float('perceptual_loss_weight', 0.0, 1.0)
@@ -299,7 +308,7 @@ def objective_optuna(trial, gradio_params):
 
 def train_ray_tune(config, gradio_params):
     batch_size = config['batch_size']
-    num_epochs = config['num_epochs']
+    num_epochs = 5  # Fixed to 5 epochs for testing
     learning_rate_g = config['learning_rate_g']
     learning_rate_d = config['learning_rate_d']
     perceptual_loss_weight = config['perceptual_loss_weight']
@@ -359,7 +368,7 @@ def start_ray_tune_optimization(num_samples, gradio_params):
     ray.init()
     config = {
         'batch_size': tune.choice([16, 32, 64]),
-        'num_epochs': tune.choice([10, 20, 50, 100]),
+        'num_epochs': tune.choice([10, 20, 50, 100]),  # This will be overridden to 5 epochs in the training function
         'learning_rate_g': tune.loguniform(1e-5, 1e-1),
         'learning_rate_d': tune.loguniform(1e-5, 1e-1),
         'perceptual_loss_weight': tune.uniform(0.0, 1.0),
@@ -368,8 +377,8 @@ def start_ray_tune_optimization(num_samples, gradio_params):
     scheduler = ASHAScheduler(
         metric='metric',
         mode='min',
-        max_t=100,
-        grace_period=10,
+        max_t=5,  # Fixed to 5 epochs for testing
+        grace_period=5,
         reduction_factor=2
     )
     tune.run(

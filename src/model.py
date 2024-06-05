@@ -3,6 +3,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 import logging
 import os
+import warnings
+
+warnings.filterwarnings("ignore", message="Lazy modules are a new feature under heavy development")
+warnings.filterwarnings("ignore", message="oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders.")
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -62,12 +66,15 @@ class ContextAggregationNetwork(nn.Module):
         self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
         self.bn2 = nn.BatchNorm2d(channels)
 
-    def forward(self, x):
-        print("Shape before conv1:", x.shape)  # Add this line
+    def forward(self, x, suppress_reading_messages=False):
+        if not suppress_reading_messages:
+            logger.info("Shape before conv1: %s", x.shape)
         x = F.relu_(self.bn1(self.conv1(x)))
-        print("Shape after conv1:", x.shape)  # Add this line
+        if not suppress_reading_messages:
+            logger.info("Shape after conv1: %s", x.shape)
         x = F.relu_(self.bn2(self.conv2(x)))
-        print("Shape after conv2:", x.shape)  # Add this line
+        if not suppress_reading_messages:
+            logger.info("Shape after conv2: %s", x.shape)
         return x
 
 class KANWithDepthwiseConv(nn.Module):
@@ -102,7 +109,7 @@ class KANWithDepthwiseConv(nn.Module):
             dummy_input = torch.zeros(1, in_channels, n_mels, target_length, device=device)
             dummy_output = self.pool4(self.conv4(self.pool3(self.conv3(self.pool2(self.conv2(self.pool1(self.conv1(dummy_input))))))))
             dummy_output = self.pool5(dummy_output)
-            dummy_output = self.context_aggregation(dummy_output)  # Added context_aggregation
+            dummy_output = self.context_aggregation(dummy_output, suppress_reading_messages=True)  # Added context_aggregation
             dummy_output = self.flatten(dummy_output)
             fc_input_size = dummy_output.shape[1]
         self.fc1 = nn.Linear(fc_input_size, 1024).to(device)
@@ -110,15 +117,17 @@ class KANWithDepthwiseConv(nn.Module):
         self.fc2 = nn.Linear(1024, self.n_mels * self.target_length * self.num_stems).to(device)
         nn.init.xavier_normal_(self.fc2.weight)  # Initialize fc2 weights
 
-    def forward(self, x):
+    def forward(self, x, suppress_reading_messages=False):
         x = x.to(self.device)  # Ensure x is on the correct device
         if x.dim() == 2:  # Add channel and batch dimensions if not present
             x = x.unsqueeze(0).unsqueeze(0)
         elif x.dim() == 3:  # Add channel dimension if not present
             x = x.unsqueeze(1)
-        print("Shape before conv1:", x.shape)  # Add this line
+        if not suppress_reading_messages:
+            logger.info("Shape before conv1: %s", x.shape)
         x = F.relu_(self.conv1(x))
-        print("Shape after conv1:", x.shape)  # Add this line
+        if not suppress_reading_messages:
+            logger.info("Shape after conv1: %s", x.shape)
         x = self.pool1(x)
         x = self.res_block1(x)  # Add residual block
         x = self.attention1(x)  # Apply attention
@@ -134,18 +143,22 @@ class KANWithDepthwiseConv(nn.Module):
         x = self.pool4(x)
         x = self.pool5(x)
 
-        print("Shape before context_aggregation:", x.shape)  # Add this line
-        x = self.context_aggregation(x)
-        print("Shape after context_aggregation:", x.shape)  # Add this line
+        if not suppress_reading_messages:
+            logger.info("Shape before context_aggregation: %s", x.shape)
+        x = self.context_aggregation(x, suppress_reading_messages=suppress_reading_messages)
+        if not suppress_reading_messages:
+            logger.info("Shape after context_aggregation: %s", x.shape)
 
         x = self.flatten(x)
-        print("Shape after flatten:", x.shape)  # Add this line
+        if not suppress_reading_messages:
+            logger.info("Shape after flatten: %s", x.shape)
 
         x = F.relu_(self.fc1(x))
         x = self.fc2(x)
         x = torch.tanh(x)  # Use tanh activation to restrict output to [-1, 1]
         x = x.view(-1, self.num_stems, self.n_mels, self.target_length)
-        print("Final output shape:", x.shape)  # Add this line
+        if not suppress_reading_messages:
+            logger.info("Final output shape: %s", x.shape)
 
         return x
 

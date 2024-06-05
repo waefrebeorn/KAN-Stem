@@ -25,7 +25,11 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
     logger.info("Starting training for single stem: %s", stem)
     writer = SummaryWriter(log_dir=os.path.join(training_params['checkpoint_dir'], 'runs', f'stem_{stem}_{datetime.now().strftime("%Y%m%d-%H%M%S")}')) if model_params['tensorboard_flag'] else None
 
-    model, discriminator, optimizer_g, optimizer_d = create_model_and_optimizer(training_params['device_str'], n_mels, target_length, training_params['cache_dir'], model_params['initial_lr_g'], model_params['initial_lr_d'], model_params['optimizer_name_g'], model_params['optimizer_name_d'], model_params['weight_decay'])
+    model, discriminator, optimizer_g, optimizer_d = create_model_and_optimizer(
+        training_params['device_str'], n_mels, target_length, training_params['cache_dir'],
+        model_params['initial_lr_g'], model_params['initial_lr_d'], model_params['optimizer_name_g'],
+        model_params['optimizer_name_d'], model_params['weight_decay']
+    )
 
     feature_extractor = models.vgg16(weights=VGG16_Weights.IMAGENET1K_V1).features.to(training_params['device_str']).eval()
     for param in feature_extractor.parameters():
@@ -43,7 +47,11 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
     )
 
     val_loader = DataLoader(
-        StemSeparationDataset(val_dir, n_mels, target_length, n_fft, training_params['cache_dir'], apply_data_augmentation=False, suppress_warnings=training_params['suppress_warnings'], num_workers=training_params['num_workers'], device_prep=prep_device, stop_flag=stop_flag),
+        StemSeparationDataset(
+            val_dir, n_mels, target_length, n_fft, training_params['cache_dir'], apply_data_augmentation=False,
+            suppress_warnings=training_params['suppress_warnings'], suppress_reading_messages=training_params['suppress_reading_messages'],
+            num_workers=training_params['num_workers'], device_prep=prep_device, stop_flag=stop_flag
+        ),
         batch_size=training_params['batch_size'],
         shuffle=False,
         pin_memory=True,

@@ -1,4 +1,8 @@
 import torch
+import warnings
+
+warnings.filterwarnings("ignore", message="Lazy modules are a new feature under heavy development")
+warnings.filterwarnings("ignore", message="oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders.")
 
 def wasserstein_loss(y_pred, y_true):
     return torch.mean(y_true * y_pred)

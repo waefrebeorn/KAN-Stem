@@ -5,11 +5,15 @@ import logging
 from torch.utils.data import Dataset
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from utils import load_and_preprocess
+import warnings
+
+warnings.filterwarnings("ignore", message="Lazy modules are a new feature under heavy development")
+warnings.filterwarnings("ignore", message="oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders.")
 
 logger = logging.getLogger(__name__)
 
 class StemSeparationDataset(Dataset):
-    def __init__(self, data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation, suppress_warnings, num_workers, device_prep, stop_flag):
+    def __init__(self, data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation, suppress_warnings, suppress_reading_messages, num_workers, device_prep, stop_flag):
         self.data_dir = data_dir
         self.n_mels = n_mels
         self.target_length = target_length
@@ -17,6 +21,7 @@ class StemSeparationDataset(Dataset):
         self.cache_dir = cache_dir
         self.apply_data_augmentation = apply_data_augmentation
         self.suppress_warnings = suppress_warnings
+        self.suppress_reading_messages = suppress_reading_messages
         self.num_workers = num_workers
         self.device_prep = device_prep
         self.stop_flag = stop_flag
@@ -33,10 +38,12 @@ class StemSeparationDataset(Dataset):
         if os.path.exists(cache_path):
             try:
                 cache = torch.load(cache_path)
-                logger.info(f"Loaded cache metadata from {cache_path}")
+                if not self.suppress_reading_messages:
+                    logger.info(f"Loaded cache metadata from {cache_path}")
                 return cache
             except Exception as e:
-                logger.error(f"Error loading cache metadata file: {e}")
+                if not self.suppress_reading_messages:
+                    logger.error(f"Error loading cache metadata file: {e}")
                 return {}
         return {}
 
@@ -44,11 +51,14 @@ class StemSeparationDataset(Dataset):
         cache_path = os.path.join(self.cache_dir, "cache_metadata.pt")
         if self.cache != self._load_cache_metadata():
             try:
-                logger.info(f"Saving cache metadata to {cache_path}")
+                if not self.suppress_reading_messages:
+                    logger.info(f"Saving cache metadata to {cache_path}")
                 torch.save(self.cache, cache_path)
-                logger.info(f"Successfully saved cache metadata to {cache_path}")
+                if not self.suppress_reading_messages:
+                    logger.info(f"Successfully saved cache metadata to {cache_path}")
             except Exception as e:
-                logger.error(f"Error saving cache metadata file: {e}")
+                if not self.suppress_reading_messages:
+                    logger.error(f"Error saving cache metadata file: {e}")
 
     def __len__(self):
         return len(self.valid_stems)
@@ -66,16 +76,20 @@ class StemSeparationDataset(Dataset):
                 try:
                     data = torch.load(stem_cache_path)
                     if self._validate_data(data):
-                        logger.info(f"Loaded cached data for {stem_name}")
+                        if not self.suppress_reading_messages:
+                            logger.info(f"Loaded cached data for {stem_name}")
                         return data
                     else:
-                        logger.warning(f"Invalid cached data for {stem_name}. Reprocessing.")
+                        if not self.suppress_reading_messages:
+                            logger.warning(f"Invalid cached data for {stem_name}. Reprocessing.")
                         os.remove(stem_cache_path)
                 except Exception as e:
-                    logger.warning(f"Error loading cached data for {stem_name}. Reprocessing. Error: {e}")
+                    if not self.suppress_reading_messages:
+                        logger.warning(f"Error loading cached data for {stem_name}. Reprocessing. Error: {e}")
                     os.remove(stem_cache_path)
 
-        logger.info(f"Processing stem: {stem_name}")
+        if not self.suppress_reading_messages:
+            logger.info(f"Processing stem: {stem_name}")
         data = self._process_single_stem(stem_name)
         if data is not None:
             data['input'] = data['input'].cpu()
@@ -91,12 +105,15 @@ class StemSeparationDataset(Dataset):
         stem_cache_path = os.path.join(self.cache_dir, f"{stem_name}.pt")
         if not os.path.exists(stem_cache_path):
             try:
-                logger.info(f"Saving stem cache: {stem_cache_path}")
+                if not self.suppress_reading_messages:
+                    logger.info(f"Saving stem cache: {stem_cache_path}")
                 torch.save(data, stem_cache_path)
-                logger.info(f"Successfully saved stem cache: {stem_cache_path}")
+                if not self.suppress_reading_messages:
+                    logger.info(f"Successfully saved stem cache: {stem_cache_path}")
                 return stem_cache_path
             except Exception as e:
-                logger.error(f"Error saving stem cache: {stem_cache_path}. Error: {e}")
+                if not self.suppress_reading_messages:
+                    logger.error(f"Error saving stem cache: {stem_cache_path}. Error: {e}")
                 return None
         else:
             return stem_cache_path
@@ -133,12 +150,14 @@ class StemSeparationDataset(Dataset):
 
             return {"input": input_mel, "target": target_mel}
         except Exception as e:
-            logger.error(f"Error processing stem {stem_name}: {e}")
+            if not self.suppress_reading_messages:
+                logger.error(f"Error processing stem {stem_name}: {e}")
             return None
 
     def _validate_data(self, data):
         if 'input' not in data or 'target' not in data:
-            logger.warning(f"Data validation failed: 'input' or 'target' key missing")
+            if not self.suppress_reading_messages:
+                logger.warning(f"Data validation failed: 'input' or 'target' key missing")
             return False
 
         input_shape = data['input'].shape
@@ -146,11 +165,13 @@ class StemSeparationDataset(Dataset):
         expected_shape = (1, self.n_mels, self.target_length)
 
         if input_shape != expected_shape or target_shape != expected_shape:
-            logger.warning(f"Data validation failed: shape mismatch. Input shape: {input_shape}, Target shape: {target_shape}, Expected shape: {expected_shape}")
+            if not self.suppress_reading_messages:
+                logger.warning(f"Data validation failed: shape mismatch. Input shape: {input_shape}, Target shape: {target_shape}, Expected shape: {expected_shape}")
             return False
 
         if not isinstance(data['input'], torch.Tensor) or not isinstance(data['target'], torch.Tensor):
-            logger.warning(f"Data validation failed: 'input' or 'target' is not a torch.Tensor. Input type: {type(data['input'])}, Target type: {type(data['target'])}")
+            if not self.suppress_reading_messages:
+                logger.warning(f"Data validation failed: 'input' or 'target' is not a torch.Tensor. Input type: {type(data['input'])}, Target type: {type(data['target'])}")
             return False
 
         return True
@@ -177,10 +198,12 @@ class StemSeparationDataset(Dataset):
                     if self._validate_data(data):
                         return data
                     else:
-                        logger.warning(f"Invalid cached data for {stem_name}. Reprocessing.")
+                        if not self.suppress_reading_messages:
+                            logger.warning(f"Invalid cached data for {stem_name}. Reprocessing.")
                         os.remove(stem_cache_path)
                 except Exception as e:
-                    logger.warning(f"Error loading cached data for {stem_name}. Reprocessing. Error: {e}")
+                    if not self.suppress_reading_messages:
+                        logger.warning(f"Error loading cached data for {stem_name}. Reprocessing. Error: {e}")
                     os.remove(stem_cache_path)
 
         data = self._process_single_stem(stem_name)
@@ -190,6 +213,10 @@ class StemSeparationDataset(Dataset):
             self.cache[cache_key] = self._save_individual_cache(stem_name, data)
             self._save_cache_metadata()
         return data
+
+def preprocess_and_cache_dataset(data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation, suppress_warnings, suppress_reading_messages, num_workers, device_prep, stop_flag):
+    dataset = StemSeparationDataset(data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation, suppress_warnings, suppress_reading_messages, num_workers, device_prep, stop_flag)
+    dataset.load_all_stems()
 
 def pad_tensor(tensor, target_length, target_width):
     current_length = tensor.size(2)

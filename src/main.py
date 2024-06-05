@@ -3,6 +3,11 @@ import torch
 from torch.utils.data import DataLoader
 from train import start_training_wrapper
 from dataset import StemSeparationDataset, collate_fn
+import warnings
+
+warnings.filterwarnings("ignore", message="Lazy modules are a new feature under heavy development")
+warnings.filterwarnings("ignore", message="oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders.")
+
 
 if __name__ == "__main__":
     data_dir = r"K:\KAN-Stem DataSet\ProcessedDataset"

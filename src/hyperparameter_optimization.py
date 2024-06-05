@@ -6,6 +6,10 @@ from train import start_training
 import torch.nn as nn
 from loss_functions import wasserstein_loss
 import hashlib
+import warnings
+
+warnings.filterwarnings("ignore", message="Lazy modules are a new feature under heavy development")
+warnings.filterwarnings("ignore", message="oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders.")
 
 def objective_optuna(trial, gradio_params):
     batch_size = trial.suggest_int('batch_size', 16, 64)
