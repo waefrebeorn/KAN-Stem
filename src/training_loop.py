@@ -12,6 +12,7 @@ from torchvision.models import VGG16_Weights
 from torch.optim.lr_scheduler import CyclicLR
 from dataset import StemSeparationDataset, collate_fn
 from utils import compute_sdr, compute_sir, compute_sar, convert_to_3_channels, gradient_penalty, PerceptualLoss, detect_parameters
+from data_preprocessing import preprocess_and_cache_dataset
 from multiprocessing import Value
 
 logger = logging.getLogger(__name__)
