@@ -4,11 +4,7 @@ import torchaudio.transforms as T
 import logging
 from torch.utils.data import Dataset
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from utils import load_and_preprocess
-import warnings
-
-warnings.filterwarnings("ignore", message="Lazy modules are a new feature under heavy development")
-warnings.filterwarnings("ignore", message="oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders.")
+from preprocessing_utils import load_and_preprocess  # Import from the new location
 
 logger = logging.getLogger(__name__)
 
@@ -213,10 +209,6 @@ class StemSeparationDataset(Dataset):
             self.cache[cache_key] = self._save_individual_cache(stem_name, data)
             self._save_cache_metadata()
         return data
-
-def preprocess_and_cache_dataset(data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation, suppress_warnings, suppress_reading_messages, num_workers, device_prep, stop_flag):
-    dataset = StemSeparationDataset(data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation, suppress_warnings, suppress_reading_messages, num_workers, device_prep, stop_flag)
-    dataset.load_all_stems()
 
 def pad_tensor(tensor, target_length, target_width):
     current_length = tensor.size(2)

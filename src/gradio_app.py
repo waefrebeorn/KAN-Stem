@@ -2,7 +2,7 @@ import os
 import gradio as gr
 import torch
 import torch.nn as nn
-from train import start_training_wrapper, stop_training_wrapper, objective_optuna, train_ray_tune, resume_training_wrapper
+from train import start_training_wrapper, stop_training_wrapper, resume_training_wrapper
 from separate_stems import perform_separation
 from model import load_model
 import torchaudio.transforms as T
@@ -11,10 +11,7 @@ import soundfile as sf
 import mir_eval
 from prepare_dataset import organize_and_prepare_dataset_gradio
 from generate_other_noise import generate_shuffled_noise_gradio
-import optuna
-import ray
-from ray import tune
-from ray.tune.schedulers import ASHAScheduler
+from hyperparameter_optimization import objective_optuna, train_ray_tune, start_optuna_optimization, start_ray_tune_optimization
 import warnings
 
 warnings.filterwarnings("ignore", message="Lazy modules are a new feature under heavy development")
@@ -94,85 +91,6 @@ def log_training_parameters(params):
     logger.info("Training Parameters Selected:")
     for key, value in params.items():
         logger.info(f"{key}: {value}")
-
-def start_optuna_optimization(n_trials, gradio_params):
-    study = optuna.create_study(direction='minimize')
-    study.optimize(lambda trial: objective_optuna(trial, gradio_params), n_trials=n_trials)
-    return "Optuna optimization completed"
-
-def train_ray_tune(config, gradio_params):
-    batch_size = config['batch_size']
-    num_epochs = config['num_epochs']
-    learning_rate_g = config['learning_rate_g']
-    learning_rate_d = config['learning_rate_d']
-    perceptual_loss_weight = config['perceptual_loss_weight']
-    clip_value = config['clip_value']
-
-    start_training_wrapper(
-        gradio_params['data_dir'],
-        gradio_params['val_dir'],
-        batch_size,
-        num_epochs,
-        learning_rate_g,
-        learning_rate_d,
-        gradio_params['use_cuda'],
-        gradio_params['checkpoint_dir'],
-        gradio_params['save_interval'],
-        gradio_params['accumulation_steps'],
-        gradio_params['num_stems'],
-        gradio_params['num_workers'],
-        gradio_params['cache_dir'],
-        gradio_params['loss_function_g'],
-        gradio_params['loss_function_d'],
-        gradio_params['optimizer_name_g'],
-        gradio_params['optimizer_name_d'],
-        gradio_params['perceptual_loss_flag'],
-        perceptual_loss_weight,
-        clip_value,
-        gradio_params['scheduler_step_size'],
-        gradio_params['scheduler_gamma'],
-        gradio_params['tensorboard_flag'],
-        gradio_params['apply_data_augmentation'],
-        gradio_params['add_noise'],
-        gradio_params['noise_amount'],
-        gradio_params['early_stopping_patience'],
-        gradio_params['disable_early_stopping'],
-        gradio_params['weight_decay'],
-        gradio_params['suppress_warnings'],
-        gradio_params['suppress_reading_messages'],
-        gradio_params['use_cpu_for_prep'],
-        gradio_params['discriminator_update_interval'],
-        gradio_params['label_smoothing_real'],
-        gradio_params['label_smoothing_fake']
-    )
-
-    tune.report(metric=0.0)
-
-def start_ray_tune_optimization(num_samples, gradio_params):
-    ray.init()
-    config = {
-        'batch_size': tune.choice([16, 32, 64]),
-        'num_epochs': tune.choice([10, 20, 50, 100]),
-        'learning_rate_g': tune.loguniform(1e-5, 1e-1),
-        'learning_rate_d': tune.loguniform(1e-5, 1e-1),
-        'perceptual_loss_weight': tune.uniform(0.0, 1.0),
-        'clip_value': tune.uniform(0.5, 1.5)
-    }
-    scheduler = ASHAScheduler(
-        metric='metric',
-        mode='min',
-        max_t=100,
-        grace_period=10,
-        reduction_factor=2
-    )
-    tune.run(
-        lambda config: train_ray_tune(config, gradio_params),
-        config=config,
-        scheduler=scheduler,
-        num_samples=num_samples,
-        trial_dirname_creator=lambda trial: f"trial_{trial.trial_id}"  # Custom trial directory name creator
-    )
-    return "Ray Tune optimization completed"
 
 with gr.Blocks() as demo:
     with gr.Tab("Training"):

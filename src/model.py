@@ -2,11 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import logging
-import os
-import warnings
-
-warnings.filterwarnings("ignore", message="Lazy modules are a new feature under heavy development")
-warnings.filterwarnings("ignore", message="oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders.")
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -47,14 +42,14 @@ class ResidualBlock(nn.Module):
             DepthwiseSeparableConv(in_channels, out_channels, kernel_size=3, padding=rate, dilation=rate)
             for rate in dilation_rates
         ])
-        self.bns = nn.ModuleList([nn.BatchNorm2d(out_channels) for _ in dilation_rates])
-        self.dropout = nn.Dropout(p=0.3)  # Dropout regularization
+        self.ins = nn.ModuleList([nn.InstanceNorm2d(out_channels) for _ in dilation_rates])
+        self.dropout = nn.Dropout(p=0.3)
 
     def forward(self, x):
         residual = x
-        for conv, bn in zip(self.convs, self.bns):
-            x = F.relu_(bn(conv(x)))
-        x = self.dropout(x)  # Apply dropout
+        for conv, ins in zip(self.convs, self.ins):
+            x = F.relu_(ins(conv(x)))
+        x = self.dropout(x)
         x += residual
         return F.relu_(x)
 
@@ -62,19 +57,19 @@ class ContextAggregationNetwork(nn.Module):
     def __init__(self, channels):
         super(ContextAggregationNetwork, self).__init__()
         self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
-        self.bn1 = nn.BatchNorm2d(channels)
+        self.ins1 = nn.InstanceNorm2d(channels)
         self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm2d(channels)
+        self.ins2 = nn.InstanceNorm2d(channels)
 
     def forward(self, x, suppress_reading_messages=False):
         if not suppress_reading_messages:
-            logger.debug(f"Shape before conv1: {x.shape}")
-        x = F.relu_(self.bn1(self.conv1(x)))
+            logger.info(f"Shape before conv1: {x.shape}")
+        x = F.relu_(self.ins1(self.conv1(x)))
         if not suppress_reading_messages:
-            logger.debug(f"Shape after conv1: {x.shape}")
-        x = F.relu_(self.bn2(self.conv2(x)))
+            logger.info(f"Shape after conv1: {x.shape}")
+        x = F.relu_(self.ins2(self.conv2(x)))
         if not suppress_reading_messages:
-            logger.debug(f"Shape after conv2: {x.shape}")
+            logger.info(f"Shape after conv2: {x.shape}")
         return x
 
 class KANWithDepthwiseConv(nn.Module):

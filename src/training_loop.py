@@ -9,6 +9,8 @@ from datetime import datetime
 import logging
 from torchvision import models
 from torchvision.models import VGG16_Weights
+from torch.optim.lr_scheduler import CyclicLR
+import optuna
 from data_preprocessing import preprocess_and_cache_dataset
 from model_setup import create_model_and_optimizer
 from dataset import StemSeparationDataset, collate_fn
@@ -46,12 +48,15 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
         collate_fn=collate_fn
     )
 
+    val_dataset = StemSeparationDataset(
+        val_dir, n_mels, target_length, n_fft, training_params['cache_dir'], apply_data_augmentation=False,
+        suppress_warnings=training_params['suppress_warnings'], suppress_reading_messages=training_params['suppress_reading_messages'],
+        num_workers=training_params['num_workers'], device_prep=prep_device, stop_flag=stop_flag
+    )
+    val_dataset.load_all_stems()  # Ensure the validation set is cached
+
     val_loader = DataLoader(
-        StemSeparationDataset(
-            val_dir, n_mels, target_length, n_fft, training_params['cache_dir'], apply_data_augmentation=False,
-            suppress_warnings=training_params['suppress_warnings'], suppress_reading_messages=training_params['suppress_reading_messages'],
-            num_workers=training_params['num_workers'], device_prep=prep_device, stop_flag=stop_flag
-        ),
+        val_dataset,
         batch_size=training_params['batch_size'],
         shuffle=False,
         pin_memory=True,
@@ -59,8 +64,9 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
         collate_fn=collate_fn
     )
 
-    scheduler_g = optim.lr_scheduler.ReduceLROnPlateau(optimizer_g, mode='min', factor=model_params['scheduler_gamma'], patience=model_params['scheduler_step_size'])
-    scheduler_d = optim.lr_scheduler.ReduceLROnPlateau(optimizer_d, mode='min', factor=model_params['scheduler_gamma'], patience=model_params['scheduler_step_size'])
+    # Implement CyclicLR scheduler
+    scheduler_g = CyclicLR(optimizer_g, base_lr=1e-5, max_lr=1e-3, step_size_up=2000, mode='triangular2')
+    scheduler_d = CyclicLR(optimizer_d, base_lr=1e-5, max_lr=1e-3, step_size_up=2000, mode='triangular2')
 
     scaler = GradScaler()
     early_stopping_counter = 0
@@ -174,6 +180,10 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
                     if model_params['tensorboard_flag']:
                         writer.add_scalar('Loss/Generator', running_loss_g / (i + 1), epoch * len(train_loader) + i)
                         writer.add_scalar('Loss/Discriminator', running_loss_d / (i + 1), epoch * len(train_loader) + i)
+
+                # Step the learning rate scheduler after each batch
+                scheduler_g.step()
+                scheduler_d.step()
 
         optimizer_g.step()
         optimizer_d.step()

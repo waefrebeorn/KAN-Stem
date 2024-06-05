@@ -1,8 +1,6 @@
 import os
 import torch
 import torch.optim as optim
-import torchaudio
-import torchaudio.transforms as T
 import torch.nn.functional as F
 import logging
 import soundfile as sf
@@ -10,7 +8,10 @@ import psutil
 import GPUtil
 import time
 import torch.nn as nn
+from torch.autograd import grad
 from multiprocessing import Value, Lock
+import torchaudio.transforms as T
+from preprocessing_utils import load_and_preprocess
 
 import warnings
 
@@ -27,16 +28,6 @@ def setup_logger(name):
     logger = logging.getLogger(name)
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     return logger
-
-def analyze_audio(file_path):
-    try:
-        waveform, sample_rate = torchaudio.load(file_path)
-        duration = waveform.shape[1] / sample_rate
-        is_silent = waveform.abs().max() == 0
-        return sample_rate, duration, is_silent
-    except Exception as e:
-        logger.error(f"Error analyzing audio file {file_path}: {e}")
-        return None, None, True
 
 def detect_parameters(data_dir, default_n_mels=64, default_n_fft=1024):
     sample_rates = []
@@ -66,6 +57,16 @@ def detect_parameters(data_dir, default_n_mels=64, default_n_fft=1024):
     n_fft = min(default_n_fft, int(avg_sample_rate * 0.025))
 
     return int(avg_sample_rate), n_mels, n_fft
+
+def analyze_audio(file_path):
+    try:
+        data, sample_rate = sf.read(file_path)
+        duration = len(data) / sample_rate
+        is_silent = (abs(data).max() < 1e-5)
+        return sample_rate, duration, is_silent
+    except Exception as e:
+        logger.error(f"Error analyzing audio file {file_path}: {e}")
+        return None, None, True
 
 def convert_to_3_channels(tensor):
     """Convert a single-channel tensor to a 3-channel tensor by repeating the single channel."""
@@ -130,110 +131,6 @@ def gradient_penalty(discriminator, real_data, fake_data, device, lambda_gp=10):
     gradient_penalty = lambda_gp * ((gradient_norm - 1) ** 2).mean()
     
     return gradient_penalty
-
-def read_audio(file_path, device='cuda' if torch.cuda.is_available() else 'cpu', suppress_messages=False):
-    try:
-        if not suppress_messages:
-            logger.info(f"Attempting to read: {file_path}")
-        data, samplerate = torchaudio.load(file_path)
-        data = data.to(device)
-        return data, samplerate
-    except FileNotFoundError:
-        logger.error(f"Error: Audio file not found: {file_path}")
-    except RuntimeError as e:
-        logger.error(f"Error reading audio file {file_path}: {e}")
-    return None, None
-
-def data_augmentation(inputs, device='cuda' if torch.cuda.is_available() else 'cpu'):
-    try:
-        pitch_shift = T.PitchShift(sample_rate=16000, n_steps=2).to(device)
-        freq_mask = T.FrequencyMasking(freq_mask_param=15).to(device)
-        time_mask = T.TimeMasking(time_mask_param=35).to(device)
-        
-        augmented_inputs = pitch_shift(inputs.clone().detach().to(device))
-        augmented_inputs = freq_mask(augmented_inputs.clone().detach())
-        augmented_inputs = time_mask(augmented_inputs.clone().detach())
-        
-        return augmented_inputs
-    except Exception as e:
-        logger.error(f"Error during data augmentation: {e}")
-        return inputs
-
-def get_optimizer(optimizer_name, model_parameters, learning_rate, weight_decay):
-    if optimizer_name == "SGD":
-        return torch.optim.SGD(model_parameters, lr=learning_rate, weight_decay=weight_decay)
-    elif optimizer_name == "Momentum":
-        return torch.optim.SGD(model_parameters, lr=learning_rate, momentum=0.9, weight_decay=weight_decay)
-    elif optimizer_name == "Adagrad":
-        return torch.optim.Adagrad(model_parameters, lr=learning_rate, weight_decay=weight_decay)
-    elif optimizer_name == "RMSProp":
-        return torch.optim.RMSprop(model_parameters, lr=learning_rate, alpha=0.99, weight_decay=weight_decay)
-    elif optimizer_name == "Adadelta":
-        return torch.optim.Adadelta(model_parameters, lr=learning_rate, weight_decay=weight_decay)
-    elif optimizer_name == "Adam":
-        return torch.optim.Adam(model_parameters, lr=learning_rate, weight_decay=weight_decay)
-    else:
-        raise ValueError(f"Unknown optimizer: {optimizer_name}")
-
-def custom_loss(output, target, loss_fn=nn.SmoothL1Loss()):
-    try:
-        if output.shape != target.shape:
-            min_length = min(output.size(-1), target.size(-1))
-            output = output[..., :min_length]
-            target = target[..., :min_length]
-        loss = loss_fn(output, target)
-        return loss
-    except Exception as e:
-        logger.error(f"Error in custom loss calculation: {e}")
-        return None
-
-def write_audio(file_path, data, samplerate):
-    try:
-        data_cpu = data.squeeze(0).cpu().numpy()
-        sf.write(file_path, data_cpu, samplerate)
-    except Exception as e:
-        logger.error(f"Error writing audio file {file_path}: {e}")
-
-def check_device(model, *args):
-    try:
-        device = next(model.parameters()).device
-        for idx, arg in enumerate(args):
-            if arg.device != device:
-                raise RuntimeError(
-                    f"Argument {idx} is on {arg.device}, but expected it to be on {device}"
-                )
-    except Exception as e:
-        logger.error(f"Error in device check: {e}")
-
-def load_and_preprocess(file_path, mel_spectrogram, target_length, apply_data_augmentation, device):
-    try:
-        logger.debug("Starting load and preprocess")
-        input_audio, _ = read_audio(file_path, device='cpu')
-        if input_audio is None:
-            return None
-
-        logger.debug(f"Device for processing: {device}")
-
-        if apply_data_augmentation:
-            input_audio = input_audio.float().to(device)
-            logger.debug(f"input_audio device: {input_audio.device}")
-            input_audio = data_augmentation(input_audio, device=device)
-            logger.debug(f"After data augmentation, input_audio device: {input_audio.device}")
-        else:
-            input_audio = input_audio.float().to(device)
-
-        input_mel = mel_spectrogram(input_audio).squeeze(0)[:, :target_length]
-
-        # Move input_mel back to CPU after processing on GPU
-        input_mel = input_mel.to('cpu')
-        logger.debug(f"input_mel device: {input_mel.device}")
-
-        logger.debug("Completed load and preprocess")
-        return input_mel
-
-    except Exception as e:
-        logger.error(f"Error in load and preprocess: {e}")
-        return None
 
 def log_system_resources():
     try:
@@ -330,3 +227,19 @@ def log_training_parameters(params):
     logger.info("Training Parameters Selected:")
     for key, value in params.items():
         logger.info(f"{key}: {value}")
+
+def get_optimizer(optimizer_name, model_parameters, learning_rate, weight_decay):
+    if optimizer_name == "SGD":
+        return optim.SGD(model_parameters, lr=learning_rate, weight_decay=weight_decay)
+    elif optimizer_name == "Momentum":
+        return optim.SGD(model_parameters, lr=learning_rate, momentum=0.9, weight_decay=weight_decay)
+    elif optimizer_name == "Adagrad":
+        return optim.Adagrad(model_parameters, lr=learning_rate, weight_decay=weight_decay)
+    elif optimizer_name == "RMSProp":
+        return optim.RMSprop(model_parameters, lr=learning_rate, alpha=0.99, weight_decay=weight_decay)
+    elif optimizer_name == "Adadelta":
+        return optim.Adadelta(model_parameters, lr=learning_rate, weight_decay=weight_decay)
+    elif optimizer_name == "Adam":
+        return optim.Adam(model_parameters, lr=learning_rate, weight_decay=weight_decay)
+    else:
+        raise ValueError(f"Unknown optimizer: {optimizer_name}")
