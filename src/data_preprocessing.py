@@ -1,5 +1,5 @@
 import os
-import joblib
+import h5py
 import torch
 import torchaudio
 import logging
@@ -17,7 +17,7 @@ def preprocess_and_cache_dataset(data_dir, n_mels, target_length, n_fft, cache_d
 
         if file_name.endswith('.wav'):
             file_path = os.path.join(data_dir, file_name)
-            cache_path = os.path.join(cache_dir, f"{file_name}.pkl")
+            cache_path = os.path.join(cache_dir, f"{file_name}.h5")
 
             if os.path.exists(cache_path):
                 continue
@@ -31,9 +31,17 @@ def preprocess_and_cache_dataset(data_dir, n_mels, target_length, n_fft, cache_d
                     # Apply data augmentation if needed
                     pass
 
-                joblib.dump(mel_spectrogram, cache_path)
+                # Save to HDF5 file
+                with h5py.File(cache_path, 'w') as f:
+                    f.create_dataset('mel_spectrogram', data=mel_spectrogram.numpy())
+
                 logger.info(f"Cached: {cache_path}")
 
             except Exception as e:
                 if not suppress_warnings:
                     logger.warning(f"Skipping {file_name} due to error: {e}")
+
+def load_from_cache(cache_path):
+    with h5py.File(cache_path, 'r') as f:
+        mel_spectrogram = torch.tensor(f['mel_spectrogram'][:])
+    return mel_spectrogram

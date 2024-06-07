@@ -32,3 +32,5 @@ pydub
 mir_eval
 optuna
 ray[tune]
+cachetools
+h5py

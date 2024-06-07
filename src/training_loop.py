@@ -18,6 +18,7 @@ from functools import lru_cache
 import gc
 from cachetools import LRUCache, cached
 import numpy as np
+import h5py
 
 logger = logging.getLogger(__name__)
 
@@ -66,15 +67,30 @@ def warm_up_cache(loader, preprocess_data, n_mels, target_length, n_fft, device_
         if i >= num_batches:
             break
 
-def save_tensor_to_cache(tensor, file_path):
-    tensor = tensor.detach().cpu().numpy()
-    np.save(file_path, tensor)
+def save_batch_to_hdf5(data, batch_idx, dataset_type, cache_dir='./cache'):
+    file_path = os.path.join(cache_dir, f"{dataset_type}_batch_{batch_idx}.h5")
+    with h5py.File(file_path, 'w') as f:
+        f.create_dataset(dataset_type, data=data.cpu().numpy())
 
-def load_tensor_from_cache(file_path, device):
-    tensor = np.load(file_path)
-    return torch.tensor(tensor, device=device)
+def load_batch_from_hdf5(batch_idx, dataset_type, cache_dir='./cache'):
+    file_path = os.path.join(cache_dir, f"{dataset_type}_batch_{batch_idx}.h5")
+    try:
+        with h5py.File(file_path, 'r') as f:
+            return torch.tensor(f[dataset_type][:])
+    except FileNotFoundError:
+        return None
+
+def dynamic_max_split_size():
+    if torch.cuda.is_available():
+        free_memory = torch.cuda.memory_reserved() - torch.cuda.memory_allocated()
+        free_memory_mb = free_memory / 1024 / 1024
+        max_split_size_mb = max(32, int(free_memory_mb * 0.1))  # Use 10% of free memory, with a minimum of 32 MB
+        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = f'expandable_segments:True,max_split_size_mb:{max_split_size_mb}'
+        logger.info(f'Set PYTORCH_CUDA_ALLOC_CONF to expandable_segments:True,max_split_size_mb:{max_split_size_mb}')
 
 def train_single_stem(stem, dataset, val_dir, training_params, model_params, sample_rate, n_mels, n_fft, target_length, stop_flag, suppress_reading_messages=False):
+    dynamic_max_split_size()  # Set the environment variable dynamically
+    
     logger.info("Starting training for single stem: %s", stem)
     writer = SummaryWriter(log_dir=os.path.join(training_params['checkpoint_dir'], 'runs', f'stem_{stem}_{datetime.now().strftime("%Y%m%d-%H%M%S")}')) if model_params['tensorboard_flag'] else None
 
@@ -274,14 +290,14 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
                         optimizer_d.step()
                         scheduler_d.step()
 
-            # Combine all segments into one tensor and save to SSD cache
+            # Combine all segments into one tensor and save to HDF5 cache
             combined_inputs = torch.cat(combined_inputs, dim=-1)
             combined_targets = torch.cat(combined_targets, dim=-1)
             combined_outputs = torch.cat(combined_outputs, dim=-1)
 
-            save_tensor_to_cache(combined_inputs, os.path.join(training_params['cache_dir'], f'inputs_epoch{epoch}_batch{i}.npy'))
-            save_tensor_to_cache(combined_targets, os.path.join(training_params['cache_dir'], f'targets_epoch{epoch}_batch{i}.npy'))
-            save_tensor_to_cache(combined_outputs, os.path.join(training_params['cache_dir'], f'outputs_epoch{epoch}_batch{i}.npy'))
+            save_batch_to_hdf5(combined_inputs, f'inputs_epoch{epoch}_batch{i}', 'inputs', training_params['cache_dir'])
+            save_batch_to_hdf5(combined_targets, f'targets_epoch{epoch}_batch{i}', 'targets', training_params['cache_dir'])
+            save_batch_to_hdf5(combined_outputs, f'outputs_epoch{epoch}_batch{i}', 'outputs', training_params['cache_dir'])
 
             # Clear cache frequently
             preprocess_data.cache_clear()

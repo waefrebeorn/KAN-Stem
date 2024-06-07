@@ -4,9 +4,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 import logging
 import torch.utils.checkpoint as checkpoint
-from functools import lru_cache
-import gc
+import h5py
 from cachetools import LRUCache, cached
+import warnings
+
+# Suppress specific warning
+warnings.filterwarnings("ignore", message="expandable_segments not supported on this platform")
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -94,7 +97,7 @@ class KANWithDepthwiseConv(nn.Module):
         super(KANWithDepthwiseConv, self).__init__()
 
         self.device = device
-        self.cache_file_path = os.path.join(cache_dir, 'intermediate_cache.pt')
+        self.cache_file_path = os.path.join(cache_dir, 'intermediate_cache.h5')
 
         self.conv1 = DepthwiseSeparableConv(in_channels, out_channels, kernel_size=(3, 3), padding=1).to(device)
         self.pool1 = nn.MaxPool2d(kernel_size=(2, 2), stride=2).to(device)
@@ -133,27 +136,29 @@ class KANWithDepthwiseConv(nn.Module):
         self.fc2 = nn.Linear(1024, self.n_mels * self.target_length * self.num_stems).to(device)
         nn.init.xavier_normal_(self.fc2.weight)  # Initialize fc2 weights
 
-    def save_intermediate(self, x, stage):
-        if os.path.exists(self.cache_file_path):
-            intermediate_cache = torch.load(self.cache_file_path)
-        else:
-            intermediate_cache = {}
-        intermediate_cache[stage] = x.cpu()
-        torch.save(intermediate_cache, self.cache_file_path)
+    def save_intermediate(self, x, segment_idx, stage):
+        with h5py.File(self.cache_file_path, 'a') as f:
+            dset_name = f"segment_{segment_idx}_{stage}"
+            if dset_name in f:
+                del f[dset_name]
+            f.create_dataset(dset_name, data=x.cpu().numpy())
 
-    def load_intermediate(self, stage):
-        if os.path.exists(self.cache_file_path):
-            intermediate_cache = torch.load(self.cache_file_path)
-            if stage in intermediate_cache:
-                return intermediate_cache[stage]
+    def load_intermediate(self, segment_idx, stage):
+        try:
+            with h5py.File(self.cache_file_path, 'r') as f:
+                dset_name = f"segment_{segment_idx}_{stage}"
+                if dset_name in f:
+                    return torch.tensor(f[dset_name][:])
+        except FileNotFoundError:
+            return None
         return None
 
     def clear_intermediate(self):
         if os.path.exists(self.cache_file_path):
             os.remove(self.cache_file_path)
 
-    def preprocess_and_cache(self, x, stage):
-        cached_data = self.load_intermediate(stage)
+    def preprocess_and_cache(self, x, segment_idx, stage):
+        cached_data = self.load_intermediate(segment_idx, stage)
         if cached_data is not None:
             return cached_data.to(self.device)
         
@@ -189,9 +194,9 @@ class KANWithDepthwiseConv(nn.Module):
                 elif stage == 'context_aggregation':
                     x = self.context_aggregation(x)
             except Exception as e:
-                logger.error(f"Error in preprocess_and_cache (stage {stage}): {type(e).__name__} - {e}")
+                logger.error(f"Error in preprocess_and_cache (segment {segment_idx}, stage {stage}): {type(e).__name__} - {e}")
                 raise
-            self.save_intermediate(x, stage)
+            self.save_intermediate(x, segment_idx, stage)
         return x
 
     def pad_if_needed(self, x, kernel_size, dilation=1):
@@ -207,8 +212,9 @@ class KANWithDepthwiseConv(nn.Module):
             x = F.pad(x, padding, mode='constant')
         return x
 
-    def forward(self, x, suppress_reading_messages=False, initialize=False):
-        print(f"Input shape: {x.shape}")  # Debugging print statement
+    def forward(self, x, suppress_reading_messages=True, initialize=False):
+        if not suppress_reading_messages:
+            logger.info(f"Input shape: {x.shape}")  # Debugging print statement
 
         x = x.to(self.device)  # Ensure the input is on the correct device
 
@@ -217,7 +223,8 @@ class KANWithDepthwiseConv(nn.Module):
         elif x.dim() == 3:  # Add channel dimension if not present
             x = x.unsqueeze(1)
 
-        print(f"Shape after adding dimensions: {x.shape}")  # Debugging print statement
+        if not suppress_reading_messages:
+            logger.info(f"Shape after adding dimensions: {x.shape}")  # Debugging print statement
 
         if initialize:
             x = self.conv1(x)
@@ -255,39 +262,42 @@ class KANWithDepthwiseConv(nn.Module):
 
         outputs = []
         for i, segment in enumerate(segments):
-            print(f"Shape of segment {i+1} before processing: {segment.shape}")  # Debugging print statement
+            if not suppress_reading_messages:
+                logger.info(f"Shape of segment {i+1} before processing: {segment.shape}")  # Debugging print statement
 
             # Process each segment, caching intermediate activations
             try:
                 segment = segment.to(self.device)  # Move the segment to the GPU
-                segment = self.preprocess_and_cache(segment, 'conv1')
-                segment = self.preprocess_and_cache(segment, 'pool1')
-                segment = self.preprocess_and_cache(segment, 'res_block1')
-                segment = self.preprocess_and_cache(segment, 'attention1')
-                segment = self.preprocess_and_cache(segment, 'conv2')
-                segment = self.preprocess_and_cache(segment, 'pool2')
-                segment = self.preprocess_and_cache(segment, 'res_block2')
-                segment = self.preprocess_and_cache(segment, 'attention2')
+                segment = self.preprocess_and_cache(segment, i, 'conv1')
+                segment = self.preprocess_and_cache(segment, i, 'pool1')
+                segment = self.preprocess_and_cache(segment, i, 'res_block1')
+                segment = self.preprocess_and_cache(segment, i, 'attention1')
+                segment = self.preprocess_and_cache(segment, i, 'conv2')
+                segment = self.preprocess_and_cache(segment, i, 'pool2')
+                segment = self.preprocess_and_cache(segment, i, 'res_block2')
+                segment = self.preprocess_and_cache(segment, i, 'attention2')
                 segment = self.pad_if_needed(segment, self.conv3[0].kernel_size, self.conv3[0].dilation[0])
-                segment = self.preprocess_and_cache(segment, 'conv3')
+                segment = self.preprocess_and_cache(segment, i, 'conv3')
                 segment = self.pad_if_needed(segment, self.conv4[0].kernel_size, self.conv4[0].dilation[0])
-                segment = self.preprocess_and_cache(segment, 'conv4')
-                segment = self.preprocess_and_cache(segment, 'pool4')
-                segment = self.preprocess_and_cache(segment, 'context_aggregation')
+                segment = self.preprocess_and_cache(segment, i, 'conv4')
+                segment = self.preprocess_and_cache(segment, i, 'pool4')
+                segment = self.preprocess_and_cache(segment, i, 'context_aggregation')
             except Exception as e:
                 logger.error(f"Error processing segment {i+1}: {type(e).__name__} - {e}")
                 raise  # Re-raise the exception after logging
 
-            print(f"Shape of segment {i+1} after processing: {segment.shape}")  # Debugging print statement
+            if not suppress_reading_messages:
+                logger.info(f"Shape of segment {i+1} after processing: {segment.shape}")  # Debugging print statement
 
             segment = self.flatten(segment).cpu()
             outputs.append(segment)
-            print(f"Shape of segment {i+1} after flatten: {segment.shape}")  # Debugging print statement
+            if not suppress_reading_messages:
+                logger.info(f"Shape of segment {i+1} after flatten: {segment.shape}")  # Debugging print statement
 
         # Combine processed segments
         x = torch.cat(outputs, dim=1).to(self.device)  # Concatenate and move back to GPU
 
-        print(f"Shape of x after concatenation: {x.shape}")  # Debugging print statement
+        logger.info(f"Shape of x after concatenation: {x.shape}")  # Key debugging print statement
 
         fc_input_size = x.shape[1]  # Calculate the actual flattened size
 
@@ -344,6 +354,11 @@ class KANDiscriminator(nn.Module):
         x = x.to(self.device)  # Ensure x is on the correct device
         x = self._forward_conv_layers(x)
         x = x.view(x.size(0), -1)  # Flatten the tensor
+
+        # Transpose the flattened tensor if needed before the fully connected layer
+        if x.shape[1] != self.fc1.in_features:
+            x = x.t()
+
         x = torch.sigmoid(self.fc1(x))
         return x
 
@@ -425,3 +440,26 @@ def dynamic_cache_management(preprocess_and_cache):
             preprocess_and_cache.cache_clear()
         preprocess_and_cache = cached(cache=LRUCache(maxsize=new_cache_size))(preprocess_and_cache.cache_info().func)
         logger.info(f'Cache size adjusted to: {preprocess_and_cache.cache_info().maxsize}')
+
+    dynamic_max_split_size_mb()
+
+def dynamic_max_split_size_mb():
+    # Adjust max_split_size_mb dynamically based on available resources
+    total_memory = torch.cuda.get_device_properties(0).total_memory / (1024 * 1024)  # Convert to MB
+    max_split_size_mb = int(total_memory * 0.5)  # Use 50% of the total memory
+    os.environ['PYTORCH_CUDA_ALLOC_CONF'] = f'max_split_size_mb:{max_split_size_mb},expandable_segments:True'
+    logger.info(f'Set PYTORCH_CUDA_ALLOC_CONF to max_split_size_mb={max_split_size_mb}, expandable_segments=True')
+
+# Additional functions for batch caching
+def save_batch_to_hdf5(data, batch_idx, dataset_type, cache_dir='./cache'):
+    file_path = os.path.join(cache_dir, f"{dataset_type}_batch_{batch_idx}.h5")
+    with h5py.File(file_path, 'w') as f:
+        f.create_dataset(dataset_type, data=data.cpu().numpy())
+
+def load_batch_from_hdf5(batch_idx, dataset_type, cache_dir='./cache'):
+    file_path = os.path.join(cache_dir, f"{dataset_type}_batch_{batch_idx}.h5")
+    try:
+        with h5py.File(file_path, 'r') as f:
+            return torch.tensor(f[dataset_type][:])
+    except FileNotFoundError:
+        return None

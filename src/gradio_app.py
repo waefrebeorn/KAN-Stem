@@ -97,16 +97,16 @@ with gr.Blocks() as demo:
         gr.Markdown("### Train the Model")
         data_dir = gr.Textbox(label="Data Directory", value="K:/KAN-Stem DataSet/ProcessedDataset")
         val_dir = gr.Textbox(label="Validation Directory", value="K:/KAN-Stem DataSet/Chunk_0_Sample")
-        batch_size = gr.Number(label="Batch Size", value=16)
+        batch_size = gr.Number(label="Batch Size", value=1)
         num_epochs = gr.Number(label="Number of Epochs", value=1000)
         learning_rate_g = gr.Number(label="Generator Learning Rate", value=0.03)
         learning_rate_d = gr.Number(label="Discriminator Learning Rate", value=3e-5)
         use_cuda = gr.Checkbox(label="Use CUDA", value=True)
         checkpoint_dir = gr.Textbox(label="Checkpoint Directory", value="./checkpoints")
         save_interval = gr.Number(label="Save Interval", value=50)
-        accumulation_steps = gr.Number(label="Accumulation Steps", value=4)
+        accumulation_steps = gr.Number(label="Accumulation Steps", value=16)
         num_stems = gr.Number(label="Number of Stems", value=7)
-        num_workers = gr.Number(label="Number of Workers", value=1)
+        num_workers = gr.Number(label="Number of Workers", value=6)
         cache_dir = gr.Textbox(label="Cache Directory", value="./cache")
         loss_function_g = gr.Dropdown(label="Generator Loss Function", choices=["MSELoss", "L1Loss", "SmoothL1Loss", "BCEWithLogitsLoss", "WassersteinLoss"], value="L1Loss")
         loss_function_d = gr.Dropdown(label="Discriminator Loss Function", choices=["MSELoss", "L1Loss", "SmoothL1Loss", "BCEWithLogitsLoss", "WassersteinLoss"], value="WassersteinLoss")
@@ -130,8 +130,8 @@ with gr.Blocks() as demo:
         label_smoothing_real = gr.Slider(label="Label Smoothing Real", minimum=0.7, maximum=0.9, value=0.7, step=0.1)
         label_smoothing_fake = gr.Slider(label="Label Smoothing Fake", minimum=0.1, maximum=0.3, value=0.1, step=0.1)
         perceptual_loss_weight = gr.Number(label="Perceptual Loss Weight", value=0.1)
-        suppress_detailed_logs = gr.Checkbox(label="Suppress Detailed Logs", value=True)  # Ensure this is set to True
-        use_cache = gr.Checkbox(label="Use Cache", value=True)  # Added use_cache checkbox
+        suppress_detailed_logs = gr.Checkbox(label="Suppress Detailed Logs", value=True)
+        use_cache = gr.Checkbox(label="Use Cache", value=True)
         optimization_method = gr.Dropdown(label="Optimization Method", choices=["None", "Optuna", "Ray Tune"], value="Optuna")
         optuna_trials = gr.Number(label="Optuna Trials", value=1)
         ray_samples = gr.Number(label="Ray Tune Samples", value=1)
@@ -181,8 +181,8 @@ with gr.Blocks() as demo:
                 "label_smoothing_real": label_smoothing_real,
                 "label_smoothing_fake": label_smoothing_fake,
                 "perceptual_loss_weight": perceptual_loss_weight,
-                "suppress_detailed_logs": suppress_detailed_logs,  # Ensure this key exists
-                "use_cache": use_cache  # Ensure this key exists
+                "suppress_detailed_logs": suppress_detailed_logs,
+                "use_cache": use_cache
             }
             log_training_parameters(gradio_params)
             if optimization_method == "Optuna":
@@ -194,7 +194,7 @@ with gr.Blocks() as demo:
                                           accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
                                           perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation,
                                           add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep,
-                                          discriminator_update_interval, label_smoothing_real, label_smoothing_fake, suppress_detailed_logs, use_cache)  # Added use_cache
+                                          discriminator_update_interval, label_smoothing_real, label_smoothing_fake, suppress_detailed_logs, use_cache)
 
         start_training_button.click(
             start_training_and_log_params,
@@ -203,7 +203,7 @@ with gr.Blocks() as demo:
                 accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
                 perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation,
                 add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep,
-                discriminator_update_interval, label_smoothing_real, label_smoothing_fake, perceptual_loss_weight, suppress_detailed_logs, optimization_method, optuna_trials, ray_samples, use_cache  # Added use_cache
+                discriminator_update_interval, label_smoothing_real, label_smoothing_fake, perceptual_loss_weight, suppress_detailed_logs, optimization_method, optuna_trials, ray_samples, use_cache
             ],
             outputs=output
         )

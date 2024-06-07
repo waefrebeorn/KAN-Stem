@@ -91,11 +91,19 @@ class StemSeparationDataset(Dataset):
         if not self.suppress_reading_messages:
             logger.info(f"Processing stem: {stem_name}")
         data = self._process_single_stem(stem_name)
+
+        # Ensure consistent device placement before caching
         if data is not None and self.use_cache:
             data['input'] = data['input'].cpu()
             data['target'] = data['target'].cpu()
             self.cache[cache_key] = self._save_individual_cache(stem_name, data)
             self._save_cache_metadata()
+
+        # Move data to the correct device before returning (if not already there)
+        if data is not None:
+            data['input'] = data['input'].to(self.device_prep)
+            data['target'] = data['target'].to(self.device_prep)
+        
         return data
 
     def _get_cache_key(self, stem_name):
@@ -137,6 +145,8 @@ class StemSeparationDataset(Dataset):
 
             if input_mel is None:
                 return None
+
+            input_mel = input_mel.to(torch.float32)  # Ensure consistent dtype
 
             if input_mel.shape[-1] < self.target_length:
                 input_mel = torch.nn.functional.pad(input_mel, (0, self.target_length - input_mel.shape[-1]), mode='constant')
@@ -265,6 +275,8 @@ class OnTheFlyPreprocessingDataset(Dataset):
         if input_mel is None:
             return None
 
+        input_mel = input_mel.to(torch.float32)  # Ensure consistent dtype
+
         if input_mel.shape[-1] < self.target_length:
             input_mel = torch.nn.functional.pad(input_mel, (0, self.target_length - input_mel.shape[-1]), mode='constant')
 
@@ -275,4 +287,8 @@ class OnTheFlyPreprocessingDataset(Dataset):
         logger.debug(f"Processed input mel shape: {input_mel.shape}")
         logger.debug(f"Processed target mel shape: {target_mel.shape}")
 
+        # Ensure consistent device placement
+        input_mel = input_mel.to(self.device_prep)
+        target_mel = target_mel.to(self.device_prep)
+        
         return {"input": input_mel, "target": target_mel}
