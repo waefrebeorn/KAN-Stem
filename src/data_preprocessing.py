@@ -45,3 +45,64 @@ def load_from_cache(cache_path):
     with h5py.File(cache_path, 'r') as f:
         mel_spectrogram = torch.tensor(f['mel_spectrogram'][:])
     return mel_spectrogram
+
+def load_and_preprocess(file_path, mel_spectrogram, target_length, apply_data_augmentation, device, cache_dir, use_cache=True):
+    try:
+        logger.debug("Starting load and preprocess")
+        
+        if use_cache:
+            cache_path = os.path.join(cache_dir, f"{os.path.basename(file_path)}.h5")
+            if os.path.exists(cache_path):
+                logger.info(f"Loading from cache: {cache_path}")
+                return load_from_cache(cache_path)
+            else:
+                logger.info(f"Cache not found for {file_path}, processing on the fly")
+
+        input_audio, _ = torchaudio.load(file_path)
+        if input_audio is None:
+            return None
+
+        logger.debug(f"Device for processing: {device}")
+
+        if apply_data_augmentation:
+            input_audio = input_audio.float().to(device)
+            logger.debug(f"input_audio device: {input_audio.device}")
+            input_audio = data_augmentation(input_audio, device=device)
+            logger.debug(f"After data augmentation, input_audio device: {input_audio.device}")
+        else:
+            input_audio = input_audio.float().to(device)
+
+        input_mel = mel_spectrogram(input_audio).squeeze(0)[:, :target_length]
+
+        # Move input_mel back to CPU after processing on GPU
+        input_mel = input_mel.to('cpu')
+        logger.debug(f"input_mel device: {input_mel.device}")
+
+        logger.debug("Completed load and preprocess")
+
+        # Save to cache if caching is enabled
+        if use_cache:
+            with h5py.File(cache_path, 'w') as f:
+                f.create_dataset('mel_spectrogram', data=input_mel.numpy())
+            logger.info(f"Cached: {cache_path}")
+
+        return input_mel
+
+    except Exception as e:
+        logger.error(f"Error in load and preprocess: {e}")
+        return None
+
+def data_augmentation(inputs, device='cuda' if torch.cuda.is_available() else 'cpu'):
+    try:
+        pitch_shift = torchaudio.transforms.PitchShift(sample_rate=16000, n_steps=2).to(device)
+        freq_mask = torchaudio.transforms.FrequencyMasking(freq_mask_param=15).to(device)
+        time_mask = torchaudio.transforms.TimeMasking(time_mask_param=35).to(device)
+
+        augmented_inputs = pitch_shift(inputs.clone().detach().to(device))
+        augmented_inputs = freq_mask(augmented_inputs.clone().detach())
+        augmented_inputs = time_mask(augmented_inputs.clone().detach())
+
+        return augmented_inputs
+    except Exception as e:
+        logger.error(f"Error during data augmentation: {e}")
+        return inputs

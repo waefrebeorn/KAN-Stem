@@ -4,7 +4,8 @@ import torchaudio.transforms as T
 import logging
 from torch.utils.data import Dataset
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from preprocessing_utils import load_and_preprocess  # Import from the new location
+import h5py
+from preprocessing_utils import load_and_preprocess, load_from_cache
 
 logger = logging.getLogger(__name__)
 
@@ -49,16 +50,15 @@ class StemSeparationDataset(Dataset):
 
     def _save_cache_metadata(self):
         cache_path = os.path.join(self.cache_dir, "cache_metadata.pt")
-        if self.cache != self._load_cache_metadata():
-            try:
-                if not self.suppress_reading_messages:
-                    logger.info(f"Saving cache metadata to {cache_path}")
-                torch.save(self.cache, cache_path)
-                if not self.suppress_reading_messages:
-                    logger.info(f"Successfully saved cache metadata to {cache_path}")
-            except Exception as e:
-                if not self.suppress_reading_messages:
-                    logger.error(f"Error saving cache metadata file: {e}")
+        try:
+            if not self.suppress_reading_messages:
+                logger.info(f"Saving cache metadata to {cache_path}")
+            torch.save(self.cache, cache_path)
+            if not self.suppress_reading_messages:
+                logger.info(f"Successfully saved cache metadata to {cache_path}")
+        except Exception as e:
+            if not self.suppress_reading_messages:
+                logger.error(f"Error saving cache metadata file: {e}")
 
     def __len__(self):
         return len(self.valid_stems)
@@ -74,10 +74,13 @@ class StemSeparationDataset(Dataset):
             stem_cache_path = self.cache[cache_key]
             if os.path.exists(stem_cache_path):
                 try:
-                    data = torch.load(stem_cache_path)
+                    data = load_from_cache(stem_cache_path)
+                    data = {'input': data, 'target': data.clone()}  # Assuming input and target are the same in this example
                     if self._validate_data(data):
                         if not self.suppress_reading_messages:
                             logger.info(f"Loaded cached data for {stem_name}")
+                        data['input'] = data['input'].to(self.device_prep)
+                        data['target'] = data['target'].to(self.device_prep)
                         return data
                     else:
                         if not self.suppress_reading_messages:
@@ -87,22 +90,17 @@ class StemSeparationDataset(Dataset):
                     if not self.suppress_reading_messages:
                         logger.warning(f"Error loading cached data for {stem_name}. Reprocessing. Error: {e}")
                     os.remove(stem_cache_path)
-            else:
-                if not self.suppress_reading_messages:
-                    logger.warning(f"Cache file {stem_cache_path} does not exist. Reprocessing.")
 
         if not self.suppress_reading_messages:
             logger.info(f"Processing stem: {stem_name}")
         data = self._process_single_stem(stem_name)
 
-        # Ensure consistent device placement before caching
         if data is not None and self.use_cache:
             data['input'] = data['input'].cpu()
             data['target'] = data['target'].cpu()
             self.cache[cache_key] = self._save_individual_cache(stem_name, data)
             self._save_cache_metadata()
 
-        # Move data to the correct device before returning (if not already there)
         if data is not None:
             data['input'] = data['input'].to(self.device_prep)
             data['target'] = data['target'].to(self.device_prep)
@@ -113,21 +111,20 @@ class StemSeparationDataset(Dataset):
         return f"{stem_name}_{self.apply_data_augmentation}_{self.n_mels}_{self.target_length}_{self.n_fft}"
 
     def _save_individual_cache(self, stem_name, data):
-        stem_cache_path = os.path.join(self.cache_dir, f"{stem_name}.pt")
-        if not os.path.exists(stem_cache_path):
-            try:
-                if not self.suppress_reading_messages:
-                    logger.info(f"Saving stem cache: {stem_cache_path}")
-                torch.save(data, stem_cache_path)
-                if not self.suppress_reading_messages:
-                    logger.info(f"Successfully saved stem cache: {stem_cache_path}")
-                return stem_cache_path
-            except Exception as e:
-                if not self.suppress_reading_messages:
-                    logger.error(f"Error saving stem cache: {stem_cache_path}. Error: {e}")
-                return None
-        else:
+        stem_cache_path = os.path.join(self.cache_dir, f"{stem_name}.h5")
+        try:
+            if not self.suppress_reading_messages:
+                logger.info(f"Saving stem cache: {stem_cache_path}")
+            with h5py.File(stem_cache_path, 'w') as f:
+                f.create_dataset('input', data=data['input'].cpu().numpy())
+                f.create_dataset('target', data=data['target'].cpu().numpy())
+            if not self.suppress_reading_messages:
+                logger.info(f"Successfully saved stem cache: {stem_cache_path}")
             return stem_cache_path
+        except Exception as e:
+            if not self.suppress_reading_messages:
+                logger.error(f"Error saving stem cache: {stem_cache_path}. Error: {e}")
+            return None
 
     def _process_single_stem(self, stem_name):
         if self.stop_flag.value == 1:
@@ -144,12 +141,12 @@ class StemSeparationDataset(Dataset):
                 power=2.0
             ).to(torch.float32).to(self.device_prep)
 
-            input_mel = load_and_preprocess(file_path, mel_spectrogram, self.target_length, self.apply_data_augmentation, self.device_prep)
+            input_mel = load_and_preprocess(file_path, mel_spectrogram, self.target_length, self.apply_data_augmentation, self.device_prep, cache_dir=self.cache_dir, use_cache=self.use_cache)
 
             if input_mel is None:
                 return None
 
-            input_mel = input_mel.to(torch.float32)  # Ensure consistent dtype
+            input_mel = input_mel.to(torch.float32)
 
             if input_mel.shape[-1] < self.target_length:
                 input_mel = torch.nn.functional.pad(input_mel, (0, self.target_length - input_mel.shape[-1]), mode='constant')
@@ -207,7 +204,8 @@ class StemSeparationDataset(Dataset):
             stem_cache_path = self.cache[cache_key]
             if os.path.exists(stem_cache_path):
                 try:
-                    data = torch.load(stem_cache_path)
+                    data = load_from_cache(stem_cache_path)
+                    data = {'input': data, 'target': data.clone()}  # Assuming input and target are the same in this example
                     if self._validate_data(data):
                         return data
                     else:
@@ -270,7 +268,8 @@ class OnTheFlyPreprocessingDataset(Dataset):
             stem_cache_path = self.cache[cache_key]
             if os.path.exists(stem_cache_path):
                 try:
-                    data = torch.load(stem_cache_path)
+                    data = load_from_cache(stem_cache_path)
+                    data = {'input': data, 'target': data.clone()}  # Assuming input and target are the same in this example
                     if self._validate_data(data):
                         return data
                     else:
@@ -299,18 +298,17 @@ class OnTheFlyPreprocessingDataset(Dataset):
         return f"{stem_name}_{self.apply_data_augmentation}_{self.n_mels}_{self.target_length}_{self.n_fft}"
 
     def _save_individual_cache(self, stem_name, data):
-        stem_cache_path = os.path.join(self.cache_dir, f"{stem_name}.pt")
-        if not os.path.exists(stem_cache_path):
-            try:
-                logger.info(f"Saving stem cache: {stem_cache_path}")
-                torch.save(data, stem_cache_path)
-                logger.info(f"Successfully saved stem cache: {stem_cache_path}")
-                return stem_cache_path
-            except Exception as e:
-                logger.error(f"Error saving stem cache: {stem_cache_path}. Error: {e}")
-                return None
-        else:
+        stem_cache_path = os.path.join(self.cache_dir, f"{stem_name}.h5")
+        try:
+            logger.info(f"Saving stem cache: {stem_cache_path}")
+            with h5py.File(stem_cache_path, 'w') as f:
+                f.create_dataset('input', data=data['input'].cpu().numpy())
+                f.create_dataset('target', data=data['target'].cpu().numpy())
+            logger.info(f"Successfully saved stem cache: {stem_cache_path}")
             return stem_cache_path
+        except Exception as e:
+            logger.error(f"Error saving stem cache: {stem_cache_path}. Error: {e}")
+            return None
 
     def _process_single_stem(self, stem_name):
         if self.stop_flag.value == 1:

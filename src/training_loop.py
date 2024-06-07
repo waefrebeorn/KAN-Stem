@@ -10,7 +10,7 @@ import logging
 from torchvision import models
 from torchvision.models import VGG16_Weights
 from torch.optim.lr_scheduler import CyclicLR, ReduceLROnPlateau
-from dataset import StemSeparationDataset, OnTheFlyPreprocessingDataset, collate_fn
+from dataset import StemSeparationDataset, collate_fn
 from utils import compute_sdr, compute_sir, compute_sar, convert_to_3_channels, gradient_penalty, PerceptualLoss, detect_parameters
 from data_preprocessing import preprocess_and_cache_dataset
 from model_setup import create_model_and_optimizer
@@ -467,8 +467,10 @@ def start_training(data_dir, val_dir, batch_size, num_epochs, initial_lr_g, init
             num_workers=training_params['num_workers'], device_prep=device, stop_flag=stop_flag, use_cache=use_cache
         )
     else:
-        dataset = OnTheFlyPreprocessingDataset(
-            data_dir, n_mels, target_length, n_fft, apply_data_augmentation=training_params['apply_data_augmentation'], device_prep=device
+        dataset = StemSeparationDataset(
+            data_dir, n_mels, target_length, n_fft, training_params['cache_dir'], apply_data_augmentation=training_params['apply_data_augmentation'],
+            suppress_warnings=training_params['suppress_warnings'], suppress_reading_messages=training_params['suppress_reading_messages'],
+            num_workers=training_params['num_workers'], device_prep=device, stop_flag=stop_flag, use_cache=False
         )
 
     for stem in range(num_stems):

@@ -73,7 +73,7 @@ def _save_to_hdf5_cache(cache_file_path, data):
     with h5py.File(cache_file_path, 'w') as f:
         f.create_dataset('mel_spectrogram', data=data.numpy())
 
-def _load_from_hdf5_cache(cache_file_path):
+def load_from_cache(cache_file_path):
     with h5py.File(cache_file_path, 'r') as f:
         data = torch.tensor(f['mel_spectrogram'][:])
     return data
