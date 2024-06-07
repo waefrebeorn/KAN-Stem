@@ -67,12 +67,12 @@ def warm_up_cache(loader, preprocess_data, n_mels, target_length, n_fft, device_
             break
 
 def save_tensor_to_cache(tensor, file_path):
-    """Save a tensor to a numpy file for SSD caching."""
-    np.save(file_path, tensor.cpu().numpy())
+    tensor = tensor.detach().cpu().numpy()
+    np.save(file_path, tensor)
 
 def load_tensor_from_cache(file_path, device):
-    """Load a tensor from a numpy file."""
-    return torch.from_numpy(np.load(file_path)).to(device)
+    tensor = np.load(file_path)
+    return torch.tensor(tensor, device=device)
 
 def train_single_stem(stem, dataset, val_dir, training_params, model_params, sample_rate, n_mels, n_fft, target_length, stop_flag, suppress_reading_messages=False):
     logger.info("Starting training for single stem: %s", stem)
@@ -169,6 +169,10 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
                 padding_needed = target_length // 10 - target_segments[-1].shape[-1]
                 target_segments[-1] = F.pad(target_segments[-1], (0, padding_needed))
 
+            combined_inputs = []
+            combined_targets = []
+            combined_outputs = []
+
             for j, (inputs, targets) in enumerate(zip(inputs_segments, target_segments)):
                 inputs, targets = preprocess_data(inputs, targets, n_mels, target_length // 10, n_fft, training_params['device_str'])
 
@@ -207,6 +211,10 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
                     logger.debug(f"Output shape after squeezing: {outputs.shape}")
                     logger.debug(f"Target shape after squeezing: {targets.shape}")
 
+                    combined_inputs.append(inputs.detach().cpu())
+                    combined_targets.append(targets.detach().cpu())
+                    combined_outputs.append(outputs.detach().cpu())
+
                     loss_g = model_params['loss_function_g'](outputs.to(training_params['device_str']), targets.to(training_params['device_str']))
 
                     if model_params['perceptual_loss_flag'] and (i % perceptual_loss_frequency == 0):
@@ -222,23 +230,6 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
                         torch.cuda.empty_cache()
 
                     running_loss_g += loss_g.item() / accumulation_steps
-
-                    # Offload tensors to SSD before backward pass
-                    inputs_cache_path = f"{training_params['cache_dir']}/inputs_epoch{epoch}_batch{i}_segment{j}.npy"
-                    targets_cache_path = f"{training_params['cache_dir']}/targets_epoch{epoch}_batch{i}_segment{j}.npy"
-                    outputs_cache_path = f"{training_params['cache_dir']}/outputs_epoch{epoch}_batch{i}_segment{j}.npy"
-
-                    save_tensor_to_cache(inputs, inputs_cache_path)
-                    save_tensor_to_cache(targets, targets_cache_path)
-                    save_tensor_to_cache(outputs, outputs_cache_path)
-
-                    del inputs, targets, outputs
-                    gc.collect()
-                    torch.cuda.empty_cache()
-
-                    inputs = load_tensor_from_cache(inputs_cache_path, training_params['device_str'])
-                    targets = load_tensor_from_cache(targets_cache_path, training_params['device_str'])
-                    outputs = load_tensor_from_cache(outputs_cache_path, training_params['device_str'])
 
                     scaler.scale(loss_g).backward(retain_graph=True)
 
@@ -282,6 +273,15 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
                         scheduler_g.step()
                         optimizer_d.step()
                         scheduler_d.step()
+
+            # Combine all segments into one tensor and save to SSD cache
+            combined_inputs = torch.cat(combined_inputs, dim=-1)
+            combined_targets = torch.cat(combined_targets, dim=-1)
+            combined_outputs = torch.cat(combined_outputs, dim=-1)
+
+            save_tensor_to_cache(combined_inputs, os.path.join(training_params['cache_dir'], f'inputs_epoch{epoch}_batch{i}.npy'))
+            save_tensor_to_cache(combined_targets, os.path.join(training_params['cache_dir'], f'targets_epoch{epoch}_batch{i}.npy'))
+            save_tensor_to_cache(combined_outputs, os.path.join(training_params['cache_dir'], f'outputs_epoch{epoch}_batch{i}.npy'))
 
             # Clear cache frequently
             preprocess_data.cache_clear()
