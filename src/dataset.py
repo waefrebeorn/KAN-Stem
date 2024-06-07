@@ -5,6 +5,7 @@ import logging
 from torch.utils.data import Dataset
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from preprocessing_utils import load_and_preprocess  # Import from the new location
+import h5py
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +75,7 @@ class StemSeparationDataset(Dataset):
             stem_cache_path = self.cache[cache_key]
             if os.path.exists(stem_cache_path):
                 try:
-                    data = torch.load(stem_cache_path)
+                    data = self._load_hdf5_cache(stem_cache_path)
                     if self._validate_data(data):
                         if not self.suppress_reading_messages:
                             logger.info(f"Loaded cached data for {stem_name}")
@@ -110,12 +111,12 @@ class StemSeparationDataset(Dataset):
         return f"{stem_name}_{self.apply_data_augmentation}_{self.n_mels}_{self.target_length}_{self.n_fft}"
 
     def _save_individual_cache(self, stem_name, data):
-        stem_cache_path = os.path.join(self.cache_dir, f"{stem_name}.pt")
+        stem_cache_path = os.path.join(self.cache_dir, f"{stem_name}.h5")
         if not os.path.exists(stem_cache_path):
             try:
                 if not self.suppress_reading_messages:
                     logger.info(f"Saving stem cache: {stem_cache_path}")
-                torch.save(data, stem_cache_path)
+                self._save_hdf5_cache(stem_cache_path, data)
                 if not self.suppress_reading_messages:
                     logger.info(f"Successfully saved stem cache: {stem_cache_path}")
                 return stem_cache_path
@@ -125,6 +126,17 @@ class StemSeparationDataset(Dataset):
                 return None
         else:
             return stem_cache_path
+
+    def _save_hdf5_cache(self, file_path, data):
+        with h5py.File(file_path, 'w') as f:
+            f.create_dataset('input', data=data['input'].cpu().numpy())
+            f.create_dataset('target', data=data['target'].cpu().numpy())
+
+    def _load_hdf5_cache(self, file_path):
+        with h5py.File(file_path, 'r') as f:
+            input_data = torch.tensor(f['input'][:])
+            target_data = torch.tensor(f['target'][:])
+        return {'input': input_data, 'target': target_data}
 
     def _process_single_stem(self, stem_name):
         if self.stop_flag.value == 1:
@@ -204,7 +216,7 @@ class StemSeparationDataset(Dataset):
             stem_cache_path = self.cache[cache_key]
             if os.path.exists(stem_cache_path):
                 try:
-                    data = torch.load(stem_cache_path)
+                    data = self._load_hdf5_cache(stem_cache_path)
                     if self._validate_data(data):
                         return data
                     else:
