@@ -261,6 +261,10 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
                         real_out = discriminator(targets.to(training_params['device_str']).clone().detach())
                         fake_out = discriminator(outputs.clone().detach())
 
+                        if real_out is None or real_labels is None or fake_out is None or fake_labels is None:
+                            logger.error(f"Discriminator outputs or labels are None. Skipping batch {i+1}.")
+                            continue
+
                         loss_d_real = model_params['loss_function_d'](real_out, real_labels)
                         loss_d_fake = model_params['loss_function_d'](fake_out, fake_labels)
                         gp = gradient_penalty(discriminator, targets.to(training_params['device_str']), outputs.to(training_params['device_str']), training_params['device_str'])

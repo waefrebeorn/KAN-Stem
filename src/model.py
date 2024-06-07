@@ -350,14 +350,19 @@ class KANDiscriminator(nn.Module):
 
     def forward(self, x):
         if x.dim() == 3:
-            x = x.unsqueeze(1)
+            x = x.unsqueeze(1)  # Add channel dimension if missing
         x = x.to(self.device)  # Ensure x is on the correct device
         x = self._forward_conv_layers(x)
         x = x.view(x.size(0), -1)  # Flatten the tensor
 
-        # Transpose the flattened tensor if needed before the fully connected layer
+        # Reshape or transpose to match fc1 if needed
         if x.shape[1] != self.fc1.in_features:
-            x = x.t()
+            desired_shape = (x.shape[0], self.fc1.in_features)
+            if x.numel() == desired_shape[0] * desired_shape[1]:  # Check if elements match
+                x = x.view(desired_shape)  # Reshape if possible
+            else:
+                logger.warning("Flattened input size doesn't match fc1. Skipping this batch.")  # Handle mismatched batches
+                return None  # or a dummy output
 
         x = torch.sigmoid(self.fc1(x))
         return x
