@@ -17,6 +17,7 @@ from model_setup import create_model_and_optimizer
 from functools import lru_cache
 import gc
 from cachetools import LRUCache, cached
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,14 @@ def warm_up_cache(loader, preprocess_data, n_mels, target_length, n_fft, device_
         _ = preprocess_data(data['input'], data['target'], n_mels, target_length, n_fft, device_str)
         if i >= num_batches:
             break
+
+def save_tensor_to_cache(tensor, file_path):
+    """Save a tensor to a numpy file for SSD caching."""
+    np.save(file_path, tensor.cpu().numpy())
+
+def load_tensor_from_cache(file_path, device):
+    """Load a tensor from a numpy file."""
+    return torch.from_numpy(np.load(file_path)).to(device)
 
 def train_single_stem(stem, dataset, val_dir, training_params, model_params, sample_rate, n_mels, n_fft, target_length, stop_flag, suppress_reading_messages=False):
     logger.info("Starting training for single stem: %s", stem)
@@ -214,36 +223,44 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
 
                     running_loss_g += loss_g.item() / accumulation_steps
 
-                    scaler.scale(loss_g).backward(retain_graph=True)
+                    # Offload tensors to SSD before backward pass
+                    inputs_cache_path = f"{training_params['cache_dir']}/inputs_epoch{epoch}_batch{i}_segment{j}.npy"
+                    targets_cache_path = f"{training_params['cache_dir']}/targets_epoch{epoch}_batch{i}_segment{j}.npy"
+                    outputs_cache_path = f"{training_params['cache_dir']}/outputs_epoch{epoch}_batch{i}_segment{j}.npy"
 
-                    # Offload tensors to CPU before backward pass
-                    inputs_cpu = inputs.cpu()
-                    targets_cpu = targets.cpu()
+                    save_tensor_to_cache(inputs, inputs_cache_path)
+                    save_tensor_to_cache(targets, targets_cache_path)
+                    save_tensor_to_cache(outputs, outputs_cache_path)
+
                     del inputs, targets, outputs
+                    gc.collect()
+                    torch.cuda.empty_cache()
+
+                    inputs = load_tensor_from_cache(inputs_cache_path, training_params['device_str'])
+                    targets = load_tensor_from_cache(targets_cache_path, training_params['device_str'])
+                    outputs = load_tensor_from_cache(outputs_cache_path, training_params['device_str'])
+
+                    scaler.scale(loss_g).backward(retain_graph=True)
 
                     if (i + 1) % training_params['discriminator_update_interval'] == 0:
                         if training_params['add_noise']:
-                            noise = torch.randn_like(targets_cpu) * training_params['noise_amount']
-                            targets_cpu = targets_cpu + noise
+                            noise = torch.randn_like(targets) * training_params['noise_amount']
+                            targets = targets + noise
 
-                        real_labels = torch.full((inputs_cpu.size(0), 1), training_params['label_smoothing_real'], device=training_params['device_str'], dtype=torch.float)
-                        fake_labels = torch.full((inputs_cpu.size(0), 1), training_params['label_smoothing_fake'], device=training_params['device_str'], dtype=torch.float)
-                        real_out = discriminator(targets_cpu.to(training_params['device_str']).clone().detach())
-                        fake_out = discriminator(outputs_cpu.clone().detach())
+                        real_labels = torch.full((inputs.size(0), 1), training_params['label_smoothing_real'], device=training_params['device_str'], dtype=torch.float)
+                        fake_labels = torch.full((inputs.size(0), 1), training_params['label_smoothing_fake'], device=training_params['device_str'], dtype=torch.float)
+                        real_out = discriminator(targets.to(training_params['device_str']).clone().detach())
+                        fake_out = discriminator(outputs.clone().detach())
 
                         loss_d_real = model_params['loss_function_d'](real_out, real_labels)
                         loss_d_fake = model_params['loss_function_d'](fake_out, fake_labels)
-                        gp = gradient_penalty(discriminator, targets_cpu.to(training_params['device_str']), outputs_cpu.to(training_params['device_str']), training_params['device_str'])
+                        gp = gradient_penalty(discriminator, targets.to(training_params['device_str']), outputs.to(training_params['device_str']), training_params['device_str'])
                         loss_d = (loss_d_real + loss_d_fake) / 2 + gp
 
                         running_loss_d += loss_d.item() / accumulation_steps
 
                         scaler.scale(loss_d).backward()
                         torch.nn.utils.clip_grad_norm_(discriminator.parameters(), model_params['clip_value'])
-
-                        del inputs_cpu, targets_cpu, outputs_cpu, real_out, fake_out, noise
-                        gc.collect()
-                        torch.cuda.empty_cache()
 
                     if (i + 1) % accumulation_steps == 0 or (i + 1) == len(train_loader):
                         torch.nn.utils.clip_grad_norm_(model.parameters(), model_params['clip_value'])
