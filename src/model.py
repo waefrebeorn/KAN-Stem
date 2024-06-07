@@ -164,10 +164,18 @@ class KANWithDepthwiseConv(nn.Module):
                     x = self.conv1(x)
                 elif stage == 'pool1':
                     x = self.pool1(x)
+                elif stage == 'res_block1':
+                    x = self.res_block1(x)
+                elif stage == 'attention1':
+                    x = self.attention1(x)
                 elif stage == 'conv2':
                     x = self.conv2(x)
                 elif stage == 'pool2':
                     x = self.pool2(x)
+                elif stage == 'res_block2':
+                    x = self.res_block2(x)
+                elif stage == 'attention2':
+                    x = self.attention2(x)
                 elif stage == 'conv3':
                     x = self.pad_if_needed(x, self.conv3[0].kernel_size, self.conv3[0].dilation[0])
                     x = self.conv3(x)
@@ -254,12 +262,18 @@ class KANWithDepthwiseConv(nn.Module):
                 segment = segment.to(self.device)  # Move the segment to the GPU
                 segment = self.preprocess_and_cache(segment, 'conv1')
                 segment = self.preprocess_and_cache(segment, 'pool1')
+                segment = self.preprocess_and_cache(segment, 'res_block1')
+                segment = self.preprocess_and_cache(segment, 'attention1')
                 segment = self.preprocess_and_cache(segment, 'conv2')
                 segment = self.preprocess_and_cache(segment, 'pool2')
+                segment = self.preprocess_and_cache(segment, 'res_block2')
+                segment = self.preprocess_and_cache(segment, 'attention2')
                 segment = self.pad_if_needed(segment, self.conv3[0].kernel_size, self.conv3[0].dilation[0])
                 segment = self.preprocess_and_cache(segment, 'conv3')
                 segment = self.pad_if_needed(segment, self.conv4[0].kernel_size, self.conv4[0].dilation[0])
                 segment = self.preprocess_and_cache(segment, 'conv4')
+                segment = self.preprocess_and_cache(segment, 'pool4')
+                segment = self.preprocess_and_cache(segment, 'context_aggregation')
             except Exception as e:
                 logger.error(f"Error processing segment {i+1}: {type(e).__name__} - {e}")
                 raise  # Re-raise the exception after logging
