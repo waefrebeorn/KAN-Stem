@@ -115,8 +115,10 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
         collate_fn=collate_fn
     )
 
-    val_dataset = OnTheFlyPreprocessingDataset(
-        val_dir, n_mels, target_length, n_fft, apply_data_augmentation=False, device_prep=prep_device
+    val_dataset = StemSeparationDataset(
+        val_dir, n_mels, target_length, n_fft, training_params['cache_dir'], apply_data_augmentation=False, 
+        suppress_warnings=training_params['suppress_warnings'], suppress_reading_messages=training_params['suppress_reading_messages'], 
+        num_workers=training_params['num_workers'], device_prep=prep_device, stop_flag=stop_flag, use_cache=True
     )
 
     val_loader = DataLoader(
