@@ -216,7 +216,7 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
                     if outputs.dim() == 2:
                         outputs = outputs.view(outputs.size(0), 1, n_mels, target_length // 10)
                     if outputs.dim() == 3:
-                        outputs = outputs.unsqueeze(1)
+                        outputs = outputs.view(outputs.size(0), 1, n_mels, target_length // 10)
 
                     logger.debug(f"Output shape before squeezing: {outputs.shape}")
                     logger.debug(f"Target shape before squeezing: {targets.shape}")
@@ -467,11 +467,7 @@ def start_training(data_dir, val_dir, batch_size, num_epochs, initial_lr_g, init
             num_workers=training_params['num_workers'], device_prep=device, stop_flag=stop_flag, use_cache=use_cache
         )
     else:
-        dataset = StemSeparationDataset(
-            data_dir, n_mels, target_length, n_fft, training_params['cache_dir'], apply_data_augmentation=training_params['apply_data_augmentation'],
-            suppress_warnings=training_params['suppress_warnings'], suppress_reading_messages=training_params['suppress_reading_messages'],
-            num_workers=training_params['num_workers'], device_prep=device, stop_flag=stop_flag, use_cache=False
-        )
+        raise ValueError("use_cache must be True for this code.")
 
     for stem in range(num_stems):
         if stop_flag.value == 1:
