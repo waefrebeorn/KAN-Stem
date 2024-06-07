@@ -460,7 +460,10 @@ def start_training(data_dir, val_dir, batch_size, num_epochs, initial_lr_g, init
     target_length = sample_rate // 2  # Assuming a 0.5-second target length
 
     if use_cache:
-        preprocess_and_cache_dataset(data_dir, n_mels, target_length, n_fft, training_params['cache_dir'], training_params['apply_data_augmentation'], training_params['suppress_warnings'], training_params['suppress_reading_messages'], training_params['num_workers'], device, stop_flag)
+        preprocess_and_cache_dataset(data_dir, n_mels, target_length, n_fft, training_params['cache_dir'], False, training_params['suppress_warnings'], training_params['suppress_reading_messages'], training_params['num_workers'], device, stop_flag)
+        if apply_data_augmentation:
+            preprocess_and_cache_dataset(data_dir, n_mels, target_length, n_fft, training_params['cache_dir'], True, training_params['suppress_warnings'], training_params['suppress_reading_messages'], training_params['num_workers'], device, stop_flag)
+        
         dataset = StemSeparationDataset(
             data_dir, n_mels, target_length, n_fft, training_params['cache_dir'], apply_data_augmentation=training_params['apply_data_augmentation'],
             suppress_warnings=training_params['suppress_warnings'], suppress_reading_messages=training_params['suppress_reading_messages'],

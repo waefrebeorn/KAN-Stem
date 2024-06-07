@@ -17,7 +17,11 @@ def load_and_preprocess(file_path, mel_spectrogram, target_length, apply_data_au
             cache_file_path = os.path.join(cache_dir, f"{cache_key}.h5")
 
             if os.path.exists(cache_file_path):
-                return _load_from_hdf5_cache(cache_file_path)
+                try:
+                    return load_from_cache(cache_file_path)
+                except KeyError as e:
+                    logger.error(f"Error loading from cache, missing object: {e}. Recreating cache.")
+                    os.remove(cache_file_path)
 
         input_audio, _ = torchaudio.load(file_path)
         if input_audio is None:
@@ -75,5 +79,7 @@ def _save_to_hdf5_cache(cache_file_path, data):
 
 def load_from_cache(cache_file_path):
     with h5py.File(cache_file_path, 'r') as f:
+        if 'mel_spectrogram' not in f:
+            raise KeyError("mel_spectrogram")
         data = torch.tensor(f['mel_spectrogram'][:])
     return data
