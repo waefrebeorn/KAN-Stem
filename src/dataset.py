@@ -9,7 +9,7 @@ from preprocessing_utils import load_and_preprocess  # Import from the new locat
 logger = logging.getLogger(__name__)
 
 class StemSeparationDataset(Dataset):
-    def __init__(self, data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation, suppress_warnings, suppress_reading_messages, num_workers, device_prep, stop_flag):
+    def __init__(self, data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation, suppress_warnings, suppress_reading_messages, num_workers, device_prep, stop_flag, use_cache=True):
         self.data_dir = data_dir
         self.n_mels = n_mels
         self.target_length = target_length
@@ -21,13 +21,17 @@ class StemSeparationDataset(Dataset):
         self.num_workers = num_workers
         self.device_prep = device_prep
         self.stop_flag = stop_flag
+        self.use_cache = use_cache
 
         self.valid_stems = [f for f in os.listdir(data_dir) if f.endswith('.wav')]
         if not self.valid_stems:
             raise ValueError(f"No valid audio files found in {data_dir}")
 
-        os.makedirs(cache_dir, exist_ok=True)
-        self.cache = self._load_cache_metadata()
+        if use_cache:
+            os.makedirs(cache_dir, exist_ok=True)
+            self.cache = self._load_cache_metadata()
+        else:
+            self.cache = {}
 
     def _load_cache_metadata(self):
         cache_path = os.path.join(self.cache_dir, "cache_metadata.pt")
@@ -66,7 +70,7 @@ class StemSeparationDataset(Dataset):
         stem_name = self.valid_stems[idx]
         cache_key = self._get_cache_key(stem_name)
 
-        if cache_key in self.cache:
+        if self.use_cache and cache_key in self.cache:
             stem_cache_path = self.cache[cache_key]
             if os.path.exists(stem_cache_path):
                 try:
@@ -87,7 +91,7 @@ class StemSeparationDataset(Dataset):
         if not self.suppress_reading_messages:
             logger.info(f"Processing stem: {stem_name}")
         data = self._process_single_stem(stem_name)
-        if data is not None:
+        if data is not None and self.use_cache:
             data['input'] = data['input'].cpu()
             data['target'] = data['target'].cpu()
             self.cache[cache_key] = self._save_individual_cache(stem_name, data)
@@ -203,7 +207,7 @@ class StemSeparationDataset(Dataset):
                     os.remove(stem_cache_path)
 
         data = self._process_single_stem(stem_name)
-        if data is not None:
+        if data is not None and self.use_cache:
             data['input'] = data['input'].cpu()
             data['target'] = data['target'].cpu()
             self.cache[cache_key] = self._save_individual_cache(stem_name, data)
@@ -226,3 +230,49 @@ def collate_fn(batch):
     targets = torch.stack([pad_tensor(item['target'], max_length, max_width) for item in batch])
     
     return {'input': inputs, 'target': targets}
+
+class OnTheFlyPreprocessingDataset(Dataset):
+    def __init__(self, data_dir, n_mels, target_length, n_fft, apply_data_augmentation, device_prep):
+        self.data_dir = data_dir
+        self.n_mels = n_mels
+        self.target_length = target_length
+        self.n_fft = n_fft
+        self.apply_data_augmentation = apply_data_augmentation
+        self.device_prep = device_prep
+
+        self.valid_stems = [f for f in os.listdir(data_dir) if f.endswith('.wav')]
+        if not self.valid_stems:
+            raise ValueError(f"No valid audio files found in {data_dir}")
+
+    def __len__(self):
+        return len(self.valid_stems)
+
+    def __getitem__(self, idx):
+        stem_name = self.valid_stems[idx]
+
+        file_path = os.path.join(self.data_dir, stem_name)
+        mel_spectrogram = T.MelSpectrogram(
+            sample_rate=22050,
+            n_fft=self.n_fft,
+            win_length=None,
+            hop_length=self.n_fft // 4,
+            n_mels=self.n_mels,
+            power=2.0
+        ).to(torch.float32).to(self.device_prep)
+
+        input_mel = load_and_preprocess(file_path, mel_spectrogram, self.target_length, self.apply_data_augmentation, self.device_prep)
+
+        if input_mel is None:
+            return None
+
+        if input_mel.shape[-1] < self.target_length:
+            input_mel = torch.nn.functional.pad(input_mel, (0, self.target_length - input_mel.shape[-1]), mode='constant')
+
+        target_mel = input_mel.clone()
+        input_mel = input_mel.unsqueeze(0)
+        target_mel = target_mel.unsqueeze(0)
+
+        logger.debug(f"Processed input mel shape: {input_mel.shape}")
+        logger.debug(f"Processed target mel shape: {target_mel.shape}")
+
+        return {"input": input_mel, "target": target_mel}

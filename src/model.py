@@ -1,16 +1,12 @@
 import os
-import warnings
-
-# Set environment variable to suppress TensorFlow INFO and WARNING messages
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
-
-warnings.filterwarnings("ignore", message="Lazy modules are a new feature under heavy development")
-warnings.filterwarnings("ignore", message="oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders.")
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import logging
+import torch.utils.checkpoint as checkpoint
+from functools import lru_cache
+import gc
+from cachetools import LRUCache, cached
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -30,19 +26,36 @@ class AttentionLayer(nn.Module):
     def forward(self, x):
         b, c, _, _ = x.size()
         y = self.avg_pool(x).view(b, c)
-        y = self.fc(y).view(b, c, 1, 1)
+        y = self.fc(y.to(x.device)).view(b, c, 1, 1)  # Ensure y is on the same device as x
         return x * y
 
 class DepthwiseSeparableConv(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1, dilation=1):
         super(DepthwiseSeparableConv, self).__init__()
-        self.depthwise = nn.Conv2d(in_channels, in_channels, kernel_size, stride, padding, dilation, groups=in_channels)
-        self.pointwise = nn.Conv2d(in_channels, out_channels, 1)
+        self.depthwise = nn.Conv2d(
+            in_channels,
+            in_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+            groups=in_channels,  # Using groups=in_channels for depthwise convolution
+            bias=False  # No bias for depthwise part
+        )
+        self.pointwise = nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False)
 
     def forward(self, x):
         x = self.depthwise(x)
         x = self.pointwise(x)
         return x
+
+    @property
+    def kernel_size(self):
+        return self.depthwise.kernel_size
+
+    @property
+    def dilation(self):
+        return self.depthwise.dilation
 
 class ResidualBlock(nn.Module):
     def __init__(self, in_channels, out_channels, dilation_rates=[1, 2, 4]):
@@ -57,10 +70,11 @@ class ResidualBlock(nn.Module):
     def forward(self, x):
         residual = x
         for conv, ins in zip(self.convs, self.ins):
-            x = F.relu_(ins(conv(x)))
+            x = checkpoint.checkpoint(conv, x, use_reentrant=False)
+            x = F.relu(checkpoint.checkpoint(ins, x, use_reentrant=False))
         x = self.dropout(x)
         x += residual
-        return F.relu_(x)
+        return F.relu(x)
 
 class ContextAggregationNetwork(nn.Module):
     def __init__(self, channels):
@@ -71,31 +85,40 @@ class ContextAggregationNetwork(nn.Module):
         self.ins2 = nn.InstanceNorm2d(channels)
 
     def forward(self, x, suppress_reading_messages=False):
-        # if not suppress_reading_messages:
-        #     logger.info(f"Shape before conv1: {x.shape}")
-        x = F.relu_(self.ins1(self.conv1(x)))
-        # if not suppress_reading_messages:
-        #     logger.info(f"Shape after conv1: {x.shape}")
-        x = F.relu_(self.ins2(self.conv2(x)))
-        # if not suppress_reading_messages:
-        #     logger.info(f"Shape after conv2: {x.shape}")
+        x = F.relu(checkpoint.checkpoint(self.ins1, self.conv1(x), use_reentrant=False))
+        x = F.relu(checkpoint.checkpoint(self.ins2, self.conv2(x), use_reentrant=False))
         return x
 
 class KANWithDepthwiseConv(nn.Module):
     def __init__(self, in_channels, out_channels, n_mels, target_length, num_stems, cache_dir, device):
         super(KANWithDepthwiseConv, self).__init__()
 
+        self.device = device
+        self.cache_file_path = os.path.join(cache_dir, 'intermediate_cache.pt')
+
         self.conv1 = DepthwiseSeparableConv(in_channels, out_channels, kernel_size=(3, 3), padding=1).to(device)
         self.pool1 = nn.MaxPool2d(kernel_size=(2, 2), stride=2).to(device)
         self.res_block1 = ResidualBlock(out_channels, out_channels).to(device)
-        self.attention1 = AttentionLayer(out_channels)  # Add attention layer
-        self.conv2 = DepthwiseSeparableConv(out_channels, out_channels * 2, kernel_size=(3, 3), padding=1).to(device)
+        self.attention1 = AttentionLayer(out_channels).to(device)
+
+        self.conv2 = nn.Sequential(
+            DepthwiseSeparableConv(out_channels, out_channels, kernel_size=(3, 3), padding=1),
+            nn.Conv2d(out_channels, out_channels * 2, kernel_size=1)
+        ).to(device)
         self.pool2 = nn.MaxPool2d(kernel_size=(2, 2), stride=2).to(device)
         self.res_block2 = ResidualBlock(out_channels * 2, out_channels * 2).to(device)
-        self.attention2 = AttentionLayer(out_channels * 2)  # Add attention layer
-        self.conv3 = DepthwiseSeparableConv(out_channels * 2, out_channels * 4, kernel_size=(3, 3), padding=1, dilation=2).to(device)
+        self.attention2 = AttentionLayer(out_channels * 2).to(device)
+
+        self.conv3 = nn.Sequential(
+            DepthwiseSeparableConv(out_channels * 2, out_channels * 2, kernel_size=(3, 3), padding=1, dilation=2),
+            nn.Conv2d(out_channels * 2, out_channels * 4, kernel_size=1)
+        ).to(device)
         self.pool3 = nn.MaxPool2d(kernel_size=(2, 2), stride=2).to(device)
-        self.conv4 = DepthwiseSeparableConv(out_channels * 4, out_channels * 8, kernel_size=(3, 3), padding=1, dilation=2).to(device)
+
+        self.conv4 = nn.Sequential(
+            DepthwiseSeparableConv(out_channels * 4, out_channels * 4, kernel_size=(3, 3), padding=1, dilation=2),
+            nn.Conv2d(out_channels * 4, out_channels * 8, kernel_size=1)
+        ).to(device)
         self.pool4 = nn.MaxPool2d(kernel_size=(2, 2), stride=2).to(device)
         self.pool5 = nn.MaxPool2d(kernel_size=(2, 2), stride=2).to(device)
 
@@ -105,99 +128,174 @@ class KANWithDepthwiseConv(nn.Module):
         self.n_mels = n_mels
         self.target_length = target_length
         self.num_stems = num_stems
-        self.cache_dir = cache_dir
-        self.device = device
 
-        # Initialize fully connected layers
-        with torch.no_grad():
-            dummy_input = torch.zeros(1, in_channels, n_mels, target_length, device=device)
-            dummy_output = self.pool4(self.conv4(self.pool3(self.conv3(self.pool2(self.conv2(self.pool1(self.conv1(dummy_input))))))))
-            dummy_output = self.pool5(dummy_output)
-            dummy_output = self.context_aggregation(dummy_output, suppress_reading_messages=True)  # Added context_aggregation
-            dummy_output = self.flatten(dummy_output)
-            fc_input_size = dummy_output.shape[1]
-        self.fc1 = nn.Linear(fc_input_size, 1024).to(device)
-        nn.init.xavier_normal_(self.fc1.weight)  # Initialize fc1 weights
+        self.fc1 = None
         self.fc2 = nn.Linear(1024, self.n_mels * self.target_length * self.num_stems).to(device)
         nn.init.xavier_normal_(self.fc2.weight)  # Initialize fc2 weights
 
-    def forward(self, x, suppress_reading_messages=False):
-        x = x.to(self.device)  # Ensure x is on the correct device
+    def save_intermediate(self, x, stage):
+        if os.path.exists(self.cache_file_path):
+            intermediate_cache = torch.load(self.cache_file_path)
+        else:
+            intermediate_cache = {}
+        intermediate_cache[stage] = x.cpu()
+        torch.save(intermediate_cache, self.cache_file_path)
+
+    def load_intermediate(self, stage):
+        if os.path.exists(self.cache_file_path):
+            intermediate_cache = torch.load(self.cache_file_path)
+            if stage in intermediate_cache:
+                return intermediate_cache[stage]
+        return None
+
+    def clear_intermediate(self):
+        if os.path.exists(self.cache_file_path):
+            os.remove(self.cache_file_path)
+
+    def preprocess_and_cache(self, x, stage):
+        cached_data = self.load_intermediate(stage)
+        if cached_data is not None:
+            return cached_data.to(self.device)
+        
+        with torch.no_grad():
+            x = x.to(self.device)
+            try:
+                if stage == 'conv1':
+                    x = self.conv1(x)
+                elif stage == 'pool1':
+                    x = self.pool1(x)
+                elif stage == 'conv2':
+                    x = self.conv2(x)
+                elif stage == 'pool2':
+                    x = self.pool2(x)
+                elif stage == 'conv3':
+                    x = self.pad_if_needed(x, self.conv3[0].kernel_size, self.conv3[0].dilation[0])
+                    x = self.conv3(x)
+                elif stage == 'pool3':
+                    x = self.pool3(x)
+                elif stage == 'conv4':
+                    x = self.pad_if_needed(x, self.conv4[0].kernel_size, self.conv4[0].dilation[0])
+                    x = self.conv4(x)
+                elif stage == 'pool4':
+                    x = self.pool4(x)
+                elif stage == 'context_aggregation':
+                    x = self.context_aggregation(x)
+            except Exception as e:
+                logger.error(f"Error in preprocess_and_cache (stage {stage}): {type(e).__name__} - {e}")
+                raise
+            self.save_intermediate(x, stage)
+        return x
+
+    def pad_if_needed(self, x, kernel_size, dilation=1):
+        min_size = (
+            (kernel_size[0] - 1) * dilation + 1,
+            (kernel_size[1] - 1) * dilation + 1,
+        )
+        if x.size(2) < min_size[0] or x.size(3) < min_size[1]:
+            padding = [
+                0, max(0, min_size[1] - x.size(3)),  # Pad width
+                0, max(0, min_size[0] - x.size(2))   # Pad height
+            ]
+            x = F.pad(x, padding, mode='constant')
+        return x
+
+    def forward(self, x, suppress_reading_messages=False, initialize=False):
+        print(f"Input shape: {x.shape}")  # Debugging print statement
+
+        x = x.to(self.device)  # Ensure the input is on the correct device
+
         if x.dim() == 2:  # Add channel and batch dimensions if not present
             x = x.unsqueeze(0).unsqueeze(0)
         elif x.dim() == 3:  # Add channel dimension if not present
             x = x.unsqueeze(1)
-        # if not suppress_reading_messages:
-        #     logger.debug(f"Shape before conv1: {x.shape}")
-        x = F.relu_(self.conv1(x))
-        # if not suppress_reading_messages:
-        #     logger.debug(f"Shape after conv1: {x.shape}")
-        x = self.pool1(x)
-        x = self.res_block1(x)  # Add residual block
-        x = self.attention1(x)  # Apply attention
 
-        x = F.relu_(self.conv2(x))
-        x = self.pool2(x)
-        x = self.res_block2(x)  # Add residual block
-        x = self.attention2(x)  # Apply attention
+        print(f"Shape after adding dimensions: {x.shape}")  # Debugging print statement
 
-        x = F.relu_(self.conv3(x))
-        x = self.pool3(x)
-        x = F.relu_(self.conv4(x))
-        x = self.pool4(x)
-        x = self.pool5(x)
+        if initialize:
+            x = self.conv1(x)
+            x = self.pool1(x)
+            x = self.res_block1(x)
+            x = self.attention1(x)
+            x = self.conv2(x)
+            x = self.pool2(x)
+            x = self.res_block2(x)
+            x = self.attention2(x)
+            x = self.pad_if_needed(x, self.conv3[0].kernel_size, self.conv3[0].dilation[0])  # Pad if needed before conv3
+            x = self.conv3(x)
+            x = self.pool3(x)
+            x = self.pad_if_needed(x, self.conv4[0].kernel_size, self.conv4[0].dilation[0])  # Pad if needed before conv4
+            x = self.conv4(x)
+            x = self.pool4(x)
+            x = self.pool5(x)
+            x = self.context_aggregation(x)
+            x = self.flatten(x)
+            return x
 
-        # if not suppress_reading_messages:
-        #     logger.debug(f"Shape before context_aggregation: {x.shape}")
-        x = self.context_aggregation(x, suppress_reading_messages=suppress_reading_messages)
-        # if not suppress_reading_messages:
-        #     logger.debug(f"Shape after context_aggregation: {x.shape}")
+        # Split input into segments
+        segment_length = x.shape[-1] // 10  # Adjust this value as needed
 
-        x = self.flatten(x)
-        # if not suppress_reading_messages:
-        #     logger.debug(f"Shape after flatten: {x.shape}")
+        # Exclude the last segment if it's too small after padding
+        num_full_segments = (x.shape[-1] - 2) // segment_length  # Subtract 2 to account for potential padding
+        segments = x.split(segment_length, dim=-1)[:num_full_segments]
 
-        x = F.relu_(self.fc1(x))
+        if x.shape[-1] % segment_length != 0:
+            # Append remaining part as a separate segment without splitting
+            last_segment = x[..., num_full_segments * segment_length:]
+            if last_segment.shape[-1] >= self.conv1.kernel_size[0]:  # Ensure enough size for convolutions
+                segments = list(segments)  # Convert to list to append the last segment
+                segments.append(last_segment)
+
+        outputs = []
+        for i, segment in enumerate(segments):
+            print(f"Shape of segment {i+1} before processing: {segment.shape}")  # Debugging print statement
+
+            # Process each segment, caching intermediate activations
+            try:
+                segment = segment.to(self.device)  # Move the segment to the GPU
+                segment = self.preprocess_and_cache(segment, 'conv1')
+                segment = self.preprocess_and_cache(segment, 'pool1')
+                segment = self.preprocess_and_cache(segment, 'conv2')
+                segment = self.preprocess_and_cache(segment, 'pool2')
+                segment = self.pad_if_needed(segment, self.conv3[0].kernel_size, self.conv3[0].dilation[0])
+                segment = self.preprocess_and_cache(segment, 'conv3')
+                segment = self.pad_if_needed(segment, self.conv4[0].kernel_size, self.conv4[0].dilation[0])
+                segment = self.preprocess_and_cache(segment, 'conv4')
+            except Exception as e:
+                logger.error(f"Error processing segment {i+1}: {type(e).__name__} - {e}")
+                raise  # Re-raise the exception after logging
+
+            print(f"Shape of segment {i+1} after processing: {segment.shape}")  # Debugging print statement
+
+            segment = self.flatten(segment).cpu()
+            outputs.append(segment)
+            print(f"Shape of segment {i+1} after flatten: {segment.shape}")  # Debugging print statement
+
+        # Combine processed segments
+        x = torch.cat(outputs, dim=1).to(self.device)  # Concatenate and move back to GPU
+
+        print(f"Shape of x after concatenation: {x.shape}")  # Debugging print statement
+
+        fc_input_size = x.shape[1]  # Calculate the actual flattened size
+
+        # Resize the fc1 layer if necessary
+        if self.fc1 is None or self.fc1.in_features != fc_input_size or initialize:
+            self.fc1 = nn.Linear(fc_input_size, 1024).to(self.device)
+            nn.init.xavier_normal_(self.fc1.weight)  # Re-initialize weights
+
+        # Fully connected layers
+        x = F.relu(self.fc1(x))
         x = self.fc2(x)
-        x = torch.tanh(x)  # Use tanh activation to restrict output to [-1, 1]
+        x = torch.tanh(x)
         x = x.view(-1, self.num_stems, self.n_mels, self.target_length)
-        # if not suppress_reading_messages:
-        #     logger.debug(f"Final output shape: {x.shape}")
 
         return x
 
-    def cache_activation(self, x, name):
-        if not os.path.exists(self.cache_dir):
-            os.makedirs(self.cache_dir)
-        cache_metadata_path = os.path.join(self.cache_dir, "cache_metadata.pt")
-
-        # Load existing cache metadata
-        cache_metadata = {}
-        if os.path.exists(cache_metadata_path):
-            try:
-                cache_metadata = torch.load(cache_metadata_path)
-            except (FileNotFoundError, EOFError, RuntimeError) as e:
-                logger.error(f"Error loading cache metadata file: {e}")
-                cache_metadata = {}
-
-        # Store the activation tensor in the cache metadata dictionary
-        cache_metadata[name] = x.detach().cpu()
-
-        # Save the updated cache metadata
-        try:
-            temp_cache_path = f"{cache_metadata_path}.tmp"
-            torch.save(cache_metadata, temp_cache_path)
-            os.replace(temp_cache_path, cache_metadata_path)
-        except Exception as e:
-            logger.error(f"Error saving cache metadata file: {e}")
-
-        return cache_metadata_path
-
 class KANDiscriminator(nn.Module):
-    def __init__(self, in_channels=1, out_channels=64, n_mels=128, target_length=256, device="cpu"):
+    def __init__(self, in_channels=512, out_channels=64, n_mels=128, target_length=256, device="cpu"):
         super(KANDiscriminator, self).__init__()
         self.device = device
 
+        # Adjust the first conv layer to accept 512 channels
         self.conv1 = nn.Conv2d(in_channels, 64, kernel_size=3, padding=1).to(device)
         self.bn1 = nn.InstanceNorm2d(64).to(device)
         self.conv2 = nn.Conv2d(64, 128, kernel_size=3, padding=1).to(device)
@@ -221,9 +319,9 @@ class KANDiscriminator(nn.Module):
         nn.init.xavier_normal_(self.fc1.weight)  # Initialize fc1 weights
 
     def _forward_conv_layers(self, x):
-        x = F.relu_(self.bn1(self.conv1(x)))
-        x = F.relu_(self.bn2(self.conv2(x)))
-        x = F.relu_(self.bn3(self.conv3(x)))
+        x = F.relu(self.bn1(self.conv1(x)))
+        x = F.relu(self.bn2(self.conv2(x)))
+        x = F.relu(self.bn3(self.conv3(x)))
         return x
 
     def forward(self, x):
@@ -240,6 +338,8 @@ def convert_to_3_channels(x):
         x = x.repeat(1, 3, 1, 1)
     elif x.shape[1] == 2:
         x = torch.cat((x, torch.zeros_like(x[:, :1])), dim=1)
+    elif x.shape[1] > 3:
+        x = x[:, :3, :, :]  # Select the first 3 channels if more than 3 channels are present
     return x
 
 class PerceptualLoss(nn.Module):
@@ -274,6 +374,10 @@ def gradient_penalty(discriminator, real_data, fake_data, device):
     penalty = ((gradient_norm - 1) ** 2).mean()
     return penalty
 
+@cached(cache=LRUCache(maxsize=100))  # Cache up to 100 feature tensors
+def extract_and_cache_features(input_tensor, feature_extractor):
+    return feature_extractor(input_tensor)
+
 def load_model(checkpoint_path, in_channels, out_channels, n_mels, target_length, num_stems, device=None, freeze_fc_layers=False):
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')  # Automatic device selection
@@ -291,3 +395,19 @@ def load_model(checkpoint_path, in_channels, out_channels, n_mels, target_length
 
     model.to(device)
     return model
+
+def dynamic_cache_management(preprocess_and_cache):
+    # Monitor GPU memory usage and adjust cache size dynamically
+    if torch.cuda.is_available():
+        reserved_memory = torch.cuda.memory_reserved() / 1024 ** 3
+        max_memory = torch.cuda.max_memory_reserved() / 1024 ** 3
+        if reserved_memory < max_memory * 0.7:
+            current_cache_size = preprocess_and_cache.cache_info().currsize
+            new_cache_size = min(current_cache_size + 10, 100)
+            preprocess_and_cache.cache_clear()
+        elif reserved_memory > max_memory * 0.9:
+            current_cache_size = preprocess_and_cache.cache_info().currsize
+            new_cache_size = max(current_cache_size - 10, 10)
+            preprocess_and_cache.cache_clear()
+        preprocess_and_cache = cached(cache=LRUCache(maxsize=new_cache_size))(preprocess_and_cache.cache_info().func)
+        logger.info(f'Cache size adjusted to: {preprocess_and_cache.cache_info().maxsize}')

@@ -1,28 +1,39 @@
 import os
+import joblib
 import torch
 import torchaudio
 import logging
-from dataset import StemSeparationDataset  # Ensure this import matches your project structure
-from preprocessing_utils import load_and_preprocess  # Import from the new location
-import warnings
-
-warnings.filterwarnings("ignore", message="Lazy modules are a new feature under heavy development")
-warnings.filterwarnings("ignore", message="oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders.")
+from multiprocessing import Lock
 
 logger = logging.getLogger(__name__)
 
-def preprocess_and_cache_dataset(data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation, suppress_warnings, suppress_reading_messages, num_workers, device_prep, stop_flag):
-    dataset = StemSeparationDataset(
-        data_dir=data_dir,
-        n_mels=n_mels,
-        target_length=target_length,
-        n_fft=n_fft,
-        cache_dir=cache_dir,
-        apply_data_augmentation=apply_data_augmentation,
-        suppress_warnings=suppress_warnings,
-        suppress_reading_messages=suppress_reading_messages,
-        num_workers=num_workers,
-        device_prep=device_prep,
-        stop_flag=stop_flag
-    )
-    dataset.load_all_stems()
+def preprocess_and_cache_dataset(data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation, suppress_warnings, suppress_reading_messages, num_workers, device, stop_flag):
+    os.makedirs(cache_dir, exist_ok=True)
+    
+    # Preprocess and cache data
+    for file_name in os.listdir(data_dir):
+        if stop_flag.value == 1:
+            return
+
+        if file_name.endswith('.wav'):
+            file_path = os.path.join(data_dir, file_name)
+            cache_path = os.path.join(cache_dir, f"{file_name}.pkl")
+
+            if os.path.exists(cache_path):
+                continue
+
+            try:
+                data, sample_rate = torchaudio.load(file_path)
+                data = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=n_fft)(data)
+                mel_spectrogram = torchaudio.transforms.MelSpectrogram(n_mels=n_mels, n_fft=n_fft)(data)
+
+                if apply_data_augmentation:
+                    # Apply data augmentation if needed
+                    pass
+
+                joblib.dump(mel_spectrogram, cache_path)
+                logger.info(f"Cached: {cache_path}")
+
+            except Exception as e:
+                if not suppress_warnings:
+                    logger.warning(f"Skipping {file_name} due to error: {e}")

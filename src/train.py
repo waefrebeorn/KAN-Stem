@@ -1,17 +1,23 @@
 import os
 import torch
 import torch.optim as optim
-from multiprocessing import Value
+from multiprocessing import Value, Process
 from model_setup import create_model_and_optimizer
 from training_loop import train_single_stem, start_training
 import logging
 from data_preprocessing import preprocess_and_cache_dataset
 from dataset import StemSeparationDataset
 from utils import log_training_parameters, detect_parameters
+from loss_functions import wasserstein_loss
+import torch.nn as nn
 
 logger = logging.getLogger(__name__)
 
-def start_training_wrapper(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_str_g, loss_function_str_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep, discriminator_update_interval, label_smoothing_real, label_smoothing_fake, suppress_detailed_logs):
+# Define global variables
+stop_flag = Value('i', 0)
+training_process = None
+
+def start_training_wrapper(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_str_g, loss_function_str_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep, discriminator_update_interval, label_smoothing_real, label_smoothing_fake, suppress_detailed_logs, use_cache):
     global training_process, stop_flag
     stop_flag.value = 0  # Reset stop flag
     loss_function_map = {
@@ -47,7 +53,8 @@ def start_training_wrapper(data_dir, val_dir, batch_size, num_epochs, learning_r
         'discriminator_update_interval': discriminator_update_interval,
         'label_smoothing_real': label_smoothing_real,
         'label_smoothing_fake': label_smoothing_fake,
-        'suppress_detailed_logs': suppress_detailed_logs
+        'suppress_detailed_logs': suppress_detailed_logs,
+        'use_cache': use_cache  # Added use_cache parameter
     }
 
     model_params = {
@@ -66,7 +73,7 @@ def start_training_wrapper(data_dir, val_dir, batch_size, num_epochs, learning_r
         'weight_decay': weight_decay
     }
 
-    training_process = mp.Process(target=start_training, args=(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep, discriminator_update_interval, label_smoothing_real, label_smoothing_fake, suppress_detailed_logs))
+    training_process = Process(target=start_training, args=(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep, discriminator_update_interval, label_smoothing_real, label_smoothing_fake, suppress_detailed_logs, stop_flag, use_cache))
     training_process.start()
     return f"Training Started with {loss_function_str_g} for Generator and {loss_function_str_d} for Discriminator, using {optimizer_name_g} for Generator Optimizer and {optimizer_name_d} for Discriminator Optimizer"
 
@@ -137,7 +144,9 @@ def resume_training(checkpoint_dir, device_str):
         use_cpu_for_prep=checkpoint['use_cpu_for_prep'],
         discriminator_update_interval=checkpoint['discriminator_update_interval'],
         label_smoothing_real=checkpoint['label_smoothing_real'],
-        label_smoothing_fake=checkpoint['label_smoothing_fake']
+        label_smoothing_fake=checkpoint['label_smoothing_fake'],
+        stop_flag=stop_flag,  # Add stop_flag for consistency
+        use_cache=checkpoint['use_cache']  # Add use_cache parameter
     )
 
     return f"Resumed training from checkpoint: {latest_checkpoint}"
@@ -145,6 +154,6 @@ def resume_training(checkpoint_dir, device_str):
 def resume_training_wrapper(checkpoint_dir):
     global training_process
     device_str = 'cuda' if torch.cuda.is_available() else 'cpu'
-    training_process = mp.Process(target=resume_training, args=(checkpoint_dir, device_str))
+    training_process = Process(target=resume_training, args=(checkpoint_dir, device_str))
     training_process.start()
     return f"Resuming training from checkpoint in {checkpoint_dir}"

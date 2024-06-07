@@ -33,7 +33,8 @@ def detect_parameters(data_dir, default_n_mels=64, default_n_fft=1024):
     sample_rates = []
     durations = []
 
-    logger.info(f"Contents of the data directory ({data_dir}): {os.listdir(data_dir)}")
+    # Commented out to reduce console output
+    # logger.info(f"Contents of the data directory ({data_dir}): {os.listdir(data_dir)}")
 
     for file_name in os.listdir(data_dir):
         if file_name.endswith('.wav'):
@@ -188,8 +189,8 @@ def calculate_metrics(y_true, y_pred):
         snr = 10 * torch.log10(torch.mean(y_true ** 2) / torch.mean((y_true - y_pred) ** 2)).item()
         return {'mse': mse, 'snr': snr}
     except Exception as e:
-        logger.error(f"Error in calculating metrics: {e}")
-        return {'mse': None, 'snr': None}
+        logger.error(f"Error calculating metrics: {e}", exc_info=True)
+        raise e
 
 def get_checkpoints(checkpoints_dir):
     """Retrieve all checkpoint files in the specified directory."""
