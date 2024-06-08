@@ -261,7 +261,7 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
                         real_out = discriminator(targets.to(training_params['device_str']).clone().detach())
                         fake_out = discriminator(outputs.clone().detach())
 
-                        if real_out is None or real_labels is None or fake_out is None or fake_labels is None:
+                        if real_out is None or fake_out is None:
                             logger.error(f"Discriminator outputs or labels are None. Skipping batch {i+1}.")
                             continue
 
