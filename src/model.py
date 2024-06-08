@@ -6,10 +6,6 @@ import logging
 import torch.utils.checkpoint as checkpoint
 import h5py
 from cachetools import LRUCache, cached
-import warnings
-
-# Suppress specific warning
-warnings.filterwarnings("ignore", message="expandable_segments not supported on this platform")
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -29,7 +25,7 @@ class AttentionLayer(nn.Module):
     def forward(self, x):
         b, c, _, _ = x.size()
         y = self.avg_pool(x).view(b, c)
-        y = self.fc(y.to(x.device)).view(b, c, 1, 1)  # Ensure y is on the same device as x
+        y = self.fc(y.to(x.device)).view(b, c, 1, 1)
         return x * y
 
 class DepthwiseSeparableConv(nn.Module):
@@ -42,8 +38,8 @@ class DepthwiseSeparableConv(nn.Module):
             stride=stride,
             padding=padding,
             dilation=dilation,
-            groups=in_channels,  # Using groups=in_channels for depthwise convolution
-            bias=False  # No bias for depthwise part
+            groups=in_channels,
+            bias=False
         )
         self.pointwise = nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False)
 
@@ -87,7 +83,7 @@ class ContextAggregationNetwork(nn.Module):
         self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
         self.ins2 = nn.InstanceNorm2d(channels)
 
-    def forward(self, x, suppress_reading_messages=False):
+    def forward(self, x):
         x = F.relu(checkpoint.checkpoint(self.ins1, self.conv1(x), use_reentrant=False))
         x = F.relu(checkpoint.checkpoint(self.ins2, self.conv2(x), use_reentrant=False))
         return x
@@ -134,7 +130,7 @@ class KANWithDepthwiseConv(nn.Module):
 
         self.fc1 = None
         self.fc2 = nn.Linear(1024, self.n_mels * self.target_length * self.num_stems).to(device)
-        nn.init.xavier_normal_(self.fc2.weight)  # Initialize fc2 weights
+        nn.init.xavier_normal_(self.fc2.weight)
 
     def save_intermediate(self, x, segment_idx, stage):
         with h5py.File(self.cache_file_path, 'a') as f:
@@ -206,25 +202,25 @@ class KANWithDepthwiseConv(nn.Module):
         )
         if x.size(2) < min_size[0] or x.size(3) < min_size[1]:
             padding = [
-                0, max(0, min_size[1] - x.size(3)),  # Pad width
-                0, max(0, min_size[0] - x.size(2))   # Pad height
+                0, max(0, min_size[1] - x.size(3)),
+                0, max(0, min_size[0] - x.size(2))
             ]
             x = F.pad(x, padding, mode='constant')
         return x
 
     def forward(self, x, suppress_reading_messages=True, initialize=False):
         if not suppress_reading_messages:
-            logger.info(f"Input shape: {x.shape}")  # Debugging print statement
+            logger.info(f"Input shape: {x.shape}")
 
-        x = x.to(self.device)  # Ensure the input is on the correct device
+        x = x.to(self.device)
 
-        if x.dim() == 2:  # Add channel and batch dimensions if not present
+        if x.dim() == 2:
             x = x.unsqueeze(0).unsqueeze(0)
-        elif x.dim() == 3:  # Add channel dimension if not present
+        elif x.dim() == 3:
             x = x.unsqueeze(1)
 
         if not suppress_reading_messages:
-            logger.info(f"Shape after adding dimensions: {x.shape}")  # Debugging print statement
+            logger.info(f"Shape after adding dimensions: {x.shape}")
 
         if initialize:
             x = self.conv1(x)
@@ -235,10 +231,10 @@ class KANWithDepthwiseConv(nn.Module):
             x = self.pool2(x)
             x = self.res_block2(x)
             x = self.attention2(x)
-            x = self.pad_if_needed(x, self.conv3[0].kernel_size, self.conv3[0].dilation[0])  # Pad if needed before conv3
+            x = self.pad_if_needed(x, self.conv3[0].kernel_size, self.conv3[0].dilation[0])
             x = self.conv3(x)
             x = self.pool3(x)
-            x = self.pad_if_needed(x, self.conv4[0].kernel_size, self.conv4[0].dilation[0])  # Pad if needed before conv4
+            x = self.pad_if_needed(x, self.conv4[0].kernel_size, self.conv4[0].dilation[0])
             x = self.conv4(x)
             x = self.pool4(x)
             x = self.pool5(x)
@@ -246,28 +242,23 @@ class KANWithDepthwiseConv(nn.Module):
             x = self.flatten(x)
             return x
 
-        # Split input into segments
-        segment_length = x.shape[-1] // 10  # Adjust this value as needed
-
-        # Exclude the last segment if it's too small after padding
-        num_full_segments = (x.shape[-1] - 2) // segment_length  # Subtract 2 to account for potential padding
+        segment_length = x.shape[-1] // 10
+        num_full_segments = (x.shape[-1] - 2) // segment_length
         segments = x.split(segment_length, dim=-1)[:num_full_segments]
 
         if x.shape[-1] % segment_length != 0:
-            # Append remaining part as a separate segment without splitting
             last_segment = x[..., num_full_segments * segment_length:]
-            if last_segment.shape[-1] >= self.conv1.kernel_size[0]:  # Ensure enough size for convolutions
-                segments = list(segments)  # Convert to list to append the last segment
+            if last_segment.shape[-1] >= self.conv1.kernel_size[0]:
+                segments = list(segments)
                 segments.append(last_segment)
 
         outputs = []
         for i, segment in enumerate(segments):
             if not suppress_reading_messages:
-                logger.info(f"Shape of segment {i+1} before processing: {segment.shape}")  # Debugging print statement
+                logger.info(f"Shape of segment {i+1} before processing: {segment.shape}")
 
-            # Process each segment, caching intermediate activations
             try:
-                segment = segment.to(self.device)  # Move the segment to the GPU
+                segment = segment.to(self.device)
                 segment = self.preprocess_and_cache(segment, i, 'conv1')
                 segment = self.preprocess_and_cache(segment, i, 'pool1')
                 segment = self.preprocess_and_cache(segment, i, 'res_block1')
@@ -284,29 +275,26 @@ class KANWithDepthwiseConv(nn.Module):
                 segment = self.preprocess_and_cache(segment, i, 'context_aggregation')
             except Exception as e:
                 logger.error(f"Error processing segment {i+1}: {type(e).__name__} - {e}")
-                raise  # Re-raise the exception after logging
+                raise
 
             if not suppress_reading_messages:
-                logger.info(f"Shape of segment {i+1} after processing: {segment.shape}")  # Debugging print statement
+                logger.info(f"Shape of segment {i+1} after processing: {segment.shape}")
 
             segment = self.flatten(segment).cpu()
             outputs.append(segment)
             if not suppress_reading_messages:
-                logger.info(f"Shape of segment {i+1} after flatten: {segment.shape}")  # Debugging print statement
+                logger.info(f"Shape of segment {i+1} after flatten: {segment.shape}")
 
-        # Combine processed segments
-        x = torch.cat(outputs, dim=1).to(self.device)  # Concatenate and move back to GPU
+        x = torch.cat(outputs, dim=1).to(self.device)
 
-        logger.info(f"Shape of x after concatenation: {x.shape}")  # Key debugging print statement
+        logger.info(f"Shape of x after concatenation: {x.shape}")
 
-        fc_input_size = x.shape[1]  # Calculate the actual flattened size
+        fc_input_size = x.shape[1]
 
-        # Resize the fc1 layer if necessary
         if self.fc1 is None or self.fc1.in_features != fc_input_size or initialize:
             self.fc1 = nn.Linear(fc_input_size, 1024).to(self.device)
-            nn.init.xavier_normal_(self.fc1.weight)  # Re-initialize weights
+            nn.init.xavier_normal_(self.fc1.weight)
 
-        # Fully connected layers
         x = F.relu(self.fc1(x))
         x = self.fc2(x)
         x = torch.tanh(x)
@@ -319,7 +307,6 @@ class KANDiscriminator(nn.Module):
         super(KANDiscriminator, self).__init__()
         self.device = device
 
-        # Adjust the first conv layer to accept 512 channels
         self.conv1 = nn.Conv2d(in_channels, 64, kernel_size=3, padding=1).to(device)
         self.bn1 = nn.InstanceNorm2d(64).to(device)
         self.conv2 = nn.Conv2d(64, 128, kernel_size=3, padding=1).to(device)
@@ -327,20 +314,17 @@ class KANDiscriminator(nn.Module):
         self.conv3 = nn.Conv2d(128, out_channels, kernel_size=3, padding=1).to(device)
         self.bn3 = nn.InstanceNorm2d(out_channels).to(device)
 
-        # Apply spectral normalization to conv layers
         self.conv1 = nn.utils.spectral_norm(self.conv1)
         self.conv2 = nn.utils.spectral_norm(self.conv2)
         self.conv3 = nn.utils.spectral_norm(self.conv3)
 
-        # Calculate the flattened size based on the convolutional layers' output
         with torch.no_grad():
             dummy_input = torch.randn(1, in_channels, n_mels, target_length, device=device)
             dummy_output = self._forward_conv_layers(dummy_input)
             flattened_size = dummy_output.view(-1).shape[0]
 
-        # Modify the input size of fc1 to match the calculated flattened size
         self.fc1 = nn.Linear(flattened_size, 1).to(device)
-        nn.init.xavier_normal_(self.fc1.weight)  # Initialize fc1 weights
+        nn.init.xavier_normal_(self.fc1.weight)
 
     def _forward_conv_layers(self, x):
         x = F.relu(self.bn1(self.conv1(x)))
@@ -350,19 +334,18 @@ class KANDiscriminator(nn.Module):
 
     def forward(self, x):
         if x.dim() == 3:
-            x = x.unsqueeze(1)  # Add channel dimension if missing
-        x = x.to(self.device)  # Ensure x is on the correct device
+            x = x.unsqueeze(1)
+        x = x.to(self.device)
         x = self._forward_conv_layers(x)
-        x = x.view(x.size(0), -1)  # Flatten the tensor
+        x = x.view(x.size(0), -1)
 
-        # Reshape or transpose to match fc1 if needed
         if x.shape[1] != self.fc1.in_features:
             desired_shape = (x.shape[0], self.fc1.in_features)
-            if x.numel() == desired_shape[0] * desired_shape[1]:  # Check if elements match
-                x = x.view(desired_shape)  # Reshape if possible
+            if x.numel() == desired_shape[0] * desired_shape[1]:
+                x = x.view(desired_shape)
             else:
-                logger.warning("Flattened input size doesn't match fc1. Skipping this batch.")  # Handle mismatched batches
-                return None  # or a dummy output
+                logger.warning("Flattened input size doesn't match fc1. Skipping this batch.")
+                return None
 
         x = torch.sigmoid(self.fc1(x))
         return x
@@ -373,7 +356,7 @@ def convert_to_3_channels(x):
     elif x.shape[1] == 2:
         x = torch.cat((x, torch.zeros_like(x[:, :1])), dim=1)
     elif x.shape[1] > 3:
-        x = x[:, :3, :, :]  # Select the first 3 channels if more than 3 channels are present
+        x = x[:, :3, :, :]
     return x
 
 class PerceptualLoss(nn.Module):
@@ -408,18 +391,18 @@ def gradient_penalty(discriminator, real_data, fake_data, device):
     penalty = ((gradient_norm - 1) ** 2).mean()
     return penalty
 
-@cached(cache=LRUCache(maxsize=100))  # Cache up to 100 feature tensors
+@cached(cache=LRUCache(maxsize=100))
 def extract_and_cache_features(input_tensor, feature_extractor):
     return feature_extractor(input_tensor)
 
 def load_model(checkpoint_path, in_channels, out_channels, n_mels, target_length, num_stems, device=None, freeze_fc_layers=False):
     if device is None:
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')  # Automatic device selection
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     model = KANWithDepthwiseConv(in_channels, out_channels, n_mels, target_length, num_stems, "./cache", device)
     model.load_state_dict(torch.load(checkpoint_path, map_location=device))
 
-    model.train()  # Switch to training mode
+    model.train()
 
     if freeze_fc_layers:
         for param in model.fc1.parameters():
@@ -431,7 +414,6 @@ def load_model(checkpoint_path, in_channels, out_channels, n_mels, target_length
     return model
 
 def dynamic_cache_management(preprocess_and_cache):
-    # Monitor GPU memory usage and adjust cache size dynamically
     if torch.cuda.is_available():
         reserved_memory = torch.cuda.memory_reserved() / 1024 ** 3
         max_memory = torch.cuda.max_memory_reserved() / 1024 ** 3
@@ -449,22 +431,7 @@ def dynamic_cache_management(preprocess_and_cache):
     dynamic_max_split_size_mb()
 
 def dynamic_max_split_size_mb():
-    # Adjust max_split_size_mb dynamically based on available resources
-    total_memory = torch.cuda.get_device_properties(0).total_memory / (1024 * 1024)  # Convert to MB
-    max_split_size_mb = int(total_memory * 0.5)  # Use 50% of the total memory
-    os.environ['PYTORCH_CUDA_ALLOC_CONF'] = f'max_split_size_mb:{max_split_size_mb},expandable_segments:True'
-    logger.info(f'Set PYTORCH_CUDA_ALLOC_CONF to max_split_size_mb={max_split_size_mb}, expandable_segments=True')
-
-# Additional functions for batch caching
-def save_batch_to_hdf5(data, batch_idx, dataset_type, cache_dir='./cache'):
-    file_path = os.path.join(cache_dir, f"{dataset_type}_batch_{batch_idx}.h5")
-    with h5py.File(file_path, 'w') as f:
-        f.create_dataset(dataset_type, data=data.cpu().numpy())
-
-def load_batch_from_hdf5(batch_idx, dataset_type, cache_dir='./cache'):
-    file_path = os.path.join(cache_dir, f"{dataset_type}_batch_{batch_idx}.h5")
-    try:
-        with h5py.File(file_path, 'r') as f:
-            return torch.tensor(f[dataset_type][:])
-    except FileNotFoundError:
-        return None
+    total_memory = torch.cuda.get_device_properties(0).total_memory / (1024 * 1024)
+    max_split_size_mb = int(total_memory * 0.5)
+    os.environ['PYTORCH_CUDA_ALLOC_CONF'] = f'max_split_size_mb={max_split_size_mb},expandable_segments:True'
+    logger.info(f'Set PYTORCH_CUDA_ALLOC_CONF to max_split_size_mb={max_split_size_mb}, expandable segments=True')

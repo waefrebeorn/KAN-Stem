@@ -14,9 +14,8 @@ from dataset import StemSeparationDataset, collate_fn
 from utils import compute_sdr, compute_sir, compute_sar, convert_to_3_channels, gradient_penalty, PerceptualLoss, detect_parameters
 from data_preprocessing import preprocess_and_cache_dataset
 from model_setup import create_model_and_optimizer
-from functools import lru_cache
-import gc
 from cachetools import LRUCache, cached
+import gc
 import numpy as np
 import h5py
 
@@ -46,20 +45,26 @@ def monitor_memory_usage(training_params):
         logger.info('GPU not available, skipping memory monitoring.')
 
 def dynamic_cache_management(preprocess_and_cache):
-    # Monitor GPU memory usage and adjust cache size dynamically
     if torch.cuda.is_available():
-        reserved_memory = torch.cuda.memory_reserved() / 1024 ** 3
-        max_memory = torch.cuda.max_memory_reserved() / 1024 ** 3
-        if reserved_memory < max_memory * 0.7:
-            current_cache_size = preprocess_and_cache.cache_info().currsize
-            new_cache_size = min(current_cache_size + 10, 100)
-            preprocess_and_cache.cache_clear()
-        elif reserved_memory > max_memory * 0.9:
+        physical_memory = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+        allocated_memory = torch.cuda.memory_allocated() / (1024 ** 3)
+        reserved_memory = torch.cuda.memory_reserved() / (1024 ** 3)
+        free_memory = physical_memory - allocated_memory
+
+        logger.info(f'Physical Memory: {physical_memory:.2f} GB, Allocated Memory: {allocated_memory:.2f} GB, Reserved Memory: {reserved_memory:.2f} GB, Free Memory: {free_memory:.2f} GB')
+
+        if free_memory < physical_memory * 0.2:
             current_cache_size = preprocess_and_cache.cache_info().currsize
             new_cache_size = max(current_cache_size - 10, 10)
             preprocess_and_cache.cache_clear()
+            logger.info(f'Reducing cache size to: {new_cache_size}')
+        elif free_memory > physical_memory * 0.5:
+            current_cache_size = preprocess_and_cache.cache_info().currsize
+            new_cache_size = min(current_cache_size + 10, 100)
+            preprocess_and_cache.cache_clear()
+            logger.info(f'Increasing cache size to: {new_cache_size}')
+
         preprocess_and_cache = cached(cache=LRUCache(maxsize=new_cache_size))(preprocess_and_cache.cache_info().func)
-        logger.info(f'Cache size adjusted to: {preprocess_and_cache.cache_info().maxsize}')
 
 def warm_up_cache(loader, preprocess_data, n_mels, target_length, n_fft, device_str, num_batches=5):
     for i, data in enumerate(loader):
@@ -82,9 +87,9 @@ def load_batch_from_hdf5(batch_idx, dataset_type, cache_dir='./cache'):
 
 def dynamic_max_split_size():
     if torch.cuda.is_available():
-        free_memory = torch.cuda.memory_reserved() - torch.cuda.memory_allocated()
-        free_memory_mb = free_memory / 1024 / 1024
-        max_split_size_mb = max(32, int(free_memory_mb * 0.1))  # Use 10% of free memory, with a minimum of 32 MB
+        physical_memory = torch.cuda.get_device_properties(0).total_memory
+        max_split_size_mb = int(physical_memory * 0.1 / (1024 * 1024))  # Use 10% of physical memory, with a minimum of 32 MB
+        max_split_size_mb = max(32, max_split_size_mb)
         os.environ['PYTORCH_CUDA_ALLOC_CONF'] = f'expandable_segments:True,max_split_size_mb:{max_split_size_mb}'
         logger.info(f'Set PYTORCH_CUDA_ALLOC_CONF to expandable_segments:True,max_split_size_mb:{max_split_size_mb}')
 
@@ -307,6 +312,7 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
 
             # Clear cache frequently
             preprocess_data.cache_clear()
+            dynamic_cache_management(preprocess_data)
 
         if isinstance(scheduler_g, ReduceLROnPlateau):
             optimizer_g.step()
