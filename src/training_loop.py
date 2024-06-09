@@ -46,25 +46,19 @@ def monitor_memory_usage(training_params):
 
 def dynamic_cache_management(preprocess_and_cache):
     if torch.cuda.is_available():
-        physical_memory = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
-        allocated_memory = torch.cuda.memory_allocated() / (1024 ** 3)
-        reserved_memory = torch.cuda.memory_reserved() / (1024 ** 3)
-        free_memory = physical_memory - allocated_memory
-
-        logger.info(f'Physical Memory: {physical_memory:.2f} GB, Allocated Memory: {allocated_memory:.2f} GB, Reserved Memory: {reserved_memory:.2f} GB, Free Memory: {free_memory:.2f} GB')
-
-        if free_memory < physical_memory * 0.2:
-            current_cache_size = preprocess_and_cache.cache_info().currsize
-            new_cache_size = max(current_cache_size - 10, 10)
-            preprocess_and_cache.cache_clear()
-            logger.info(f'Reducing cache size to: {new_cache_size}')
-        elif free_memory > physical_memory * 0.5:
+        reserved_memory = torch.cuda.memory_reserved() / 1024 ** 3
+        allocated_memory = torch.cuda.memory_allocated() / 1024 ** 3
+        physical_memory = torch.cuda.get_device_properties(0).total_memory / 1024 ** 3  # Get physical memory only
+        if reserved_memory < physical_memory * 0.7:
             current_cache_size = preprocess_and_cache.cache_info().currsize
             new_cache_size = min(current_cache_size + 10, 100)
             preprocess_and_cache.cache_clear()
-            logger.info(f'Increasing cache size to: {new_cache_size}')
-
+        elif reserved_memory > physical_memory * 0.9:
+            current_cache_size = preprocess_and_cache.cache_info().currsize
+            new_cache_size = max(current_cache_size - 10, 10)
+            preprocess_and_cache.cache_clear()
         preprocess_and_cache = cached(cache=LRUCache(maxsize=new_cache_size))(preprocess_and_cache.cache_info().func)
+        logger.info(f'Cache size adjusted to: {preprocess_and_cache.cache_info().maxsize}')
 
 def warm_up_cache(loader, preprocess_data, n_mels, target_length, n_fft, device_str, num_batches=5):
     for i, data in enumerate(loader):
@@ -87,11 +81,11 @@ def load_batch_from_hdf5(batch_idx, dataset_type, cache_dir='./cache'):
 
 def dynamic_max_split_size():
     if torch.cuda.is_available():
-        physical_memory = torch.cuda.get_device_properties(0).total_memory
-        max_split_size_mb = int(physical_memory * 0.1 / (1024 * 1024))  # Use 10% of physical memory, with a minimum of 32 MB
-        max_split_size_mb = max(32, max_split_size_mb)
-        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = f'expandable_segments:True,max_split_size_mb:{max_split_size_mb}'
-        logger.info(f'Set PYTORCH_CUDA_ALLOC_CONF to expandable_segments:True,max_split_size_mb:{max_split_size_mb}')
+        free_memory = torch.cuda.memory_reserved() - torch.cuda.memory_allocated()
+        free_memory_mb = free_memory / 1024 / 1024
+        max_split_size_mb = max(32, int(free_memory_mb * 0.1))  # Use 10% of free memory, with a minimum of 32 MB
+        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = f'max_split_size_mb:{max_split_size_mb}'
+        logger.info(f'Set PYTORCH_CUDA_ALLOC_CONF to max_split_size_mb:{max_split_size_mb}')
 
 def train_single_stem(stem, dataset, val_dir, training_params, model_params, sample_rate, n_mels, n_fft, target_length, stop_flag, suppress_reading_messages=False):
     dynamic_max_split_size()  # Set the environment variable dynamically
@@ -256,7 +250,7 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
 
                     scaler.scale(loss_g).backward(retain_graph=True)
 
-                    if (i + 1) % training_params['discriminator_update_interval'] == 0:
+                    if (epoch == 0) or ((i + 1) % training_params['discriminator_update_interval'] == 0):
                         if training_params['add_noise']:
                             noise = torch.randn_like(targets) * training_params['noise_amount']
                             targets = targets + noise
@@ -280,14 +274,27 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
                         scaler.scale(loss_d).backward()
                         torch.nn.utils.clip_grad_norm_(discriminator.parameters(), model_params['clip_value'])
 
+                        if scaler.is_enabled():
+                            for param in discriminator.parameters():
+                                if param.grad is not None and torch.isinf(param.grad).any():
+                                    logger.warning("Inf values detected in discriminator gradients. Skipping optimizer step.")
+                                    scaler.update()
+                                    optimizer_d.zero_grad()
+                                    break
+                            else:
+                                scaler.step(optimizer_d)
+                                scaler.update()
+                                optimizer_d.zero_grad()
+                        else:
+                            optimizer_d.step()
+                            optimizer_d.zero_grad()
+                    else:
+                        logger.info(f"Skipping discriminator update for batch {i+1}")
+
                     if (i + 1) % accumulation_steps == 0 or (i + 1) == len(train_loader):
                         torch.nn.utils.clip_grad_norm_(model.parameters(), model_params['clip_value'])
                         scaler.step(optimizer_g)
                         optimizer_g.zero_grad()
-                        scaler.update()
-
-                        scaler.step(optimizer_d)
-                        optimizer_d.zero_grad()
                         scaler.update()
 
                         logger.info(f"Epoch [{epoch+1}/{training_params['num_epochs']}], Step [{i+1}/{len(train_loader)}], Loss G: {running_loss_g:.4f}, Loss D: {running_loss_d:.4f}")
@@ -312,7 +319,6 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
 
             # Clear cache frequently
             preprocess_data.cache_clear()
-            dynamic_cache_management(preprocess_data)
 
         if isinstance(scheduler_g, ReduceLROnPlateau):
             optimizer_g.step()

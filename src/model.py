@@ -416,22 +416,29 @@ def load_model(checkpoint_path, in_channels, out_channels, n_mels, target_length
 def dynamic_cache_management(preprocess_and_cache):
     if torch.cuda.is_available():
         reserved_memory = torch.cuda.memory_reserved() / 1024 ** 3
-        max_memory = torch.cuda.max_memory_reserved() / 1024 ** 3
-        if reserved_memory < max_memory * 0.7:
-            current_cache_size = preprocess_and_cache.cache_info().currsize
-            new_cache_size = min(current_cache_size + 10, 100)
-            preprocess_and_cache.cache_clear()
-        elif reserved_memory > max_memory * 0.9:
+        allocated_memory = torch.cuda.memory_allocated() / 1024 ** 3
+        physical_memory = torch.cuda.get_device_properties(0).total_memory / 1024 ** 3
+
+        # Ensure we are aggressive with caching to stay within 8GB physical memory
+        if reserved_memory > 8.0:
             current_cache_size = preprocess_and_cache.cache_info().currsize
             new_cache_size = max(current_cache_size - 10, 10)
             preprocess_and_cache.cache_clear()
+        elif allocated_memory > 8.0:
+            current_cache_size = preprocess_and_cache.cache_info().currsize
+            new_cache_size = max(current_cache_size - 10, 10)
+            preprocess_and_cache.cache_clear()
+        else:
+            current_cache_size = preprocess_and_cache.cache_info().currsize
+            new_cache_size = min(current_cache_size + 10, 100)
+        
         preprocess_and_cache = cached(cache=LRUCache(maxsize=new_cache_size))(preprocess_and_cache.cache_info().func)
         logger.info(f'Cache size adjusted to: {preprocess_and_cache.cache_info().maxsize}')
 
-    dynamic_max_split_size_mb()
+    dynamic_max_split_size()
 
-def dynamic_max_split_size_mb():
+def dynamic_max_split_size():
     total_memory = torch.cuda.get_device_properties(0).total_memory / (1024 * 1024)
     max_split_size_mb = int(total_memory * 0.5)
-    os.environ['PYTORCH_CUDA_ALLOC_CONF'] = f'max_split_size_mb={max_split_size_mb},expandable_segments:True'
-    logger.info(f'Set PYTORCH_CUDA_ALLOC_CONF to max_split_size_mb={max_split_size_mb}, expandable segments=True')
+    os.environ['PYTORCH_CUDA_ALLOC_CONF'] = f'max_split_size_mb={max_split_size_mb}'
+    logger.info(f'Set PYTORCH_CUDA_ALLOC_CONF to max_split_size_mb={max_split_size_mb}')
