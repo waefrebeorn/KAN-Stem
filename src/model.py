@@ -6,6 +6,9 @@ import logging
 import torch.utils.checkpoint as checkpoint
 import h5py
 from cachetools import LRUCache, cached
+from collections import defaultdict
+import hashlib
+import json
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -64,7 +67,7 @@ class ResidualBlock(nn.Module):
             for rate in dilation_rates
         ])
         self.ins = nn.ModuleList([nn.InstanceNorm2d(out_channels) for _ in dilation_rates])
-        self.dropout = nn.Dropout(p=0.3)
+        self.dropout = nn.Dropout(p=0.1)
 
     def forward(self, x):
         residual = x
@@ -78,9 +81,9 @@ class ResidualBlock(nn.Module):
 class ContextAggregationNetwork(nn.Module):
     def __init__(self, channels):
         super(ContextAggregationNetwork, self).__init__()
-        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.conv1 = DepthwiseSeparableConv(channels, channels, kernel_size=3, padding=1)
         self.ins1 = nn.InstanceNorm2d(channels)
-        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.conv2 = DepthwiseSeparableConv(channels, channels, kernel_size=3, padding=1)
         self.ins2 = nn.InstanceNorm2d(channels)
 
     def forward(self, x):
@@ -93,7 +96,12 @@ class KANWithDepthwiseConv(nn.Module):
         super(KANWithDepthwiseConv, self).__init__()
 
         self.device = device
+        self.cache_dir = cache_dir
         self.cache_file_path = os.path.join(cache_dir, 'intermediate_cache.h5')
+        self.index_file_path = os.path.join(cache_dir, 'cache_index.json')
+
+        self.cache_index = defaultdict(list)
+        self.load_cache_index()
 
         self.conv1 = DepthwiseSeparableConv(in_channels, out_channels, kernel_size=(3, 3), padding=1).to(device)
         self.pool1 = nn.MaxPool2d(kernel_size=(2, 2), stride=2).to(device)
@@ -129,29 +137,78 @@ class KANWithDepthwiseConv(nn.Module):
         self.num_stems = num_stems
 
         self.fc1 = None
-        self.fc2 = nn.Linear(1024, self.n_mels * self.target_length * self.num_stems).to(device)
+        self.fc2 = nn.Linear(512, self.n_mels * self.target_length * self.num_stems).to(device)
         nn.init.xavier_normal_(self.fc2.weight)
 
-    def save_intermediate(self, x, segment_idx, stage):
-        with h5py.File(self.cache_file_path, 'a') as f:
-            dset_name = f"segment_{segment_idx}_{stage}"
-            if dset_name in f:
-                del f[dset_name]
-            f.create_dataset(dset_name, data=x.cpu().numpy())
+    def get_cache_key(self, segment_idx, stage):
+        """Generate a unique cache key based on the input data."""
+        data_string = f"{segment_idx}_{stage}"
+        return hashlib.md5(data_string.encode()).hexdigest()
 
-    def load_intermediate(self, segment_idx, stage):
+    def load_cache_index(self):
+        try:
+            if os.path.exists(self.index_file_path):
+                with open(self.index_file_path, 'r') as f:
+                    self.cache_index = json.load(f)
+            else:
+                self.cache_index = defaultdict(list)
+                self.rebuild_cache_index()
+        except json.JSONDecodeError:
+            logger.error("Error decoding JSON cache index. Rebuilding cache index.")
+            self.rebuild_cache_index()
+
+    def save_cache_index(self):
+        try:
+            with open(self.index_file_path, 'w') as f:
+                json.dump(self.cache_index, f, default=str)
+        except Exception as e:
+            logger.error(f"Error saving cache index: {e}")
+            self.handle_cache_error()
+
+    def rebuild_cache_index(self):
         try:
             with h5py.File(self.cache_file_path, 'r') as f:
-                dset_name = f"segment_{segment_idx}_{stage}"
-                if dset_name in f:
-                    return torch.tensor(f[dset_name][:])
-        except FileNotFoundError:
-            return None
+                for key in f.keys():
+                    segment_idx, stage = key.split('_')
+                    self.cache_index[key] = (int(segment_idx), stage)
+            self.save_cache_index()
+        except Exception as e:
+            logger.error(f"Error rebuilding cache index: {e}")
+
+    def save_intermediate(self, x, segment_idx, stage):
+        try:
+            with h5py.File(self.cache_file_path, 'a') as f:
+                key = self.get_cache_key(segment_idx, stage)
+                if key in f:
+                    del f[key]
+                f.create_dataset(key, data=x.cpu().detach().numpy())
+                self.cache_index[key] = (segment_idx, stage)
+                self.save_cache_index()
+        except Exception as e:
+            logger.error(f"Error saving intermediate data: {e}")
+            self.handle_cache_error()
+
+    def load_intermediate(self, segment_idx, stage):
+        key = self.get_cache_key(segment_idx, stage)
+        if key in self.cache_index:
+            try:
+                with h5py.File(self.cache_file_path, 'r') as f:
+                    return torch.tensor(f[key][:])
+            except Exception as e:
+                logger.error(f"Error loading intermediate data: {e}")
+                self.handle_cache_error()
         return None
+
+    def handle_cache_error(self):
+        if os.path.exists(self.cache_file_path):
+            os.remove(self.cache_file_path)
+        self.rebuild_cache_index()
 
     def clear_intermediate(self):
         if os.path.exists(self.cache_file_path):
             os.remove(self.cache_file_path)
+        self.cache_index.clear()
+        self.save_cache_index()
 
     def preprocess_and_cache(self, x, segment_idx, stage):
         cached_data = self.load_intermediate(segment_idx, stage)
@@ -208,6 +265,30 @@ class KANWithDepthwiseConv(nn.Module):
             x = F.pad(x, padding, mode='constant')
         return x
 
+    def save_concat_output(self, x, stage):
+        try:
+            with h5py.File(self.cache_file_path, 'a') as f:
+                dset_name = f"{stage}_output"
+                if dset_name in f:
+                    del f[dset_name]
+                f.create_dataset(dset_name, data=x.cpu().detach().numpy())
+                self.cache_index[dset_name] = x.cpu().detach().numpy().tolist()  # Ensure the data is serializable
+                self.save_cache_index()
+        except Exception as e:
+            logger.error(f"Error saving concatenated output: {e}")
+            self.handle_cache_error()
+
+    def load_concat_output(self, expected_size):
+        dset_name = "concat_output"
+        try:
+            with h5py.File(self.cache_file_path, 'r') as f:
+                if dset_name in f and f[dset_name].shape[1] == expected_size:
+                    return torch.tensor(f[dset_name][:])
+        except Exception as e:
+            logger.error(f"Error loading concatenated output: {e}")
+            self.handle_cache_error()
+        return None
+
     def forward(self, x, suppress_reading_messages=True, initialize=False):
         if not suppress_reading_messages:
             logger.info(f"Input shape: {x.shape}")
@@ -242,13 +323,13 @@ class KANWithDepthwiseConv(nn.Module):
             x = self.flatten(x)
             return x
 
-        segment_length = x.shape[-1] // 10
-        num_full_segments = (x.shape[-1] - 2) // segment_length
-        segments = x.split(segment_length, dim=-1)[:num_full_segments]
+        segment_length = x.shape[-2] // 10  # Ensure this calculation is correct
+        num_full_segments = (x.shape[-2] - 2) // segment_length
+        segments = x.split(segment_length, dim=-2)[:num_full_segments]
 
-        if x.shape[-1] % segment_length != 0:
-            last_segment = x[..., num_full_segments * segment_length:]
-            if last_segment.shape[-1] >= self.conv1.kernel_size[0]:
+        if x.shape[-2] % segment_length != 0:
+            last_segment = x[..., num_full_segments * segment_length:, :]
+            if last_segment.shape[-2] >= self.conv1.kernel_size[0]:
                 segments = list(segments)
                 segments.append(last_segment)
 
@@ -291,8 +372,14 @@ class KANWithDepthwiseConv(nn.Module):
 
         fc_input_size = x.shape[1]
 
+        cached_data = self.load_concat_output(fc_input_size)
+        if cached_data is not None:
+            x = cached_data.to(self.device)
+        else:
+            self.save_concat_output(x, 'concat')
+
         if self.fc1 is None or self.fc1.in_features != fc_input_size or initialize:
-            self.fc1 = nn.Linear(fc_input_size, 1024).to(self.device)
+            self.fc1 = nn.Linear(fc_input_size, 512).to(self.device)
             nn.init.xavier_normal_(self.fc1.weight)
 
         x = F.relu(self.fc1(x))
@@ -442,3 +529,26 @@ def dynamic_max_split_size():
     max_split_size_mb = int(total_memory * 0.5)
     os.environ['PYTORCH_CUDA_ALLOC_CONF'] = f'max_split_size_mb={max_split_size_mb}'
     logger.info(f'Set PYTORCH_CUDA_ALLOC_CONF to max_split_size_mb={max_split_size_mb}')
+
+def check_and_reshape(outputs, targets, logger):
+    target_numel = targets.numel()
+    output_numel = outputs.numel()
+
+    if output_numel != target_numel:
+        logger.warning(f"Output size ({output_numel}) does not match the expected size ({target_numel}). Attempting to reshape.")
+        
+        # Flatten the output tensor
+        outputs = outputs.view(-1)
+        
+        if output_numel > target_numel:
+            # Truncate the output tensor if it's larger
+            outputs = outputs[:target_numel]
+        else:
+            # Pad the output tensor if it's smaller
+            padding_size = target_numel - output_numel
+            outputs = F.pad(outputs, (0, padding_size))
+        
+        # Reshape the output tensor to match the target shape
+        outputs = outputs.view(targets.shape)
+
+    return outputs

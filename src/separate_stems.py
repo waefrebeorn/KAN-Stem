@@ -1,13 +1,11 @@
 import os
 import torch
-import torchaudio.transforms as T
+import torchaudio
 import logging
 import soundfile as sf
+from torchaudio import transforms as T
 from model import load_model
-import warnings
-
-warnings.filterwarnings("ignore", message="Lazy modules are a new feature under heavy development")
-warnings.filterwarnings("ignore", message="oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders.")
+import librosa
 
 logger = logging.getLogger(__name__)
 
@@ -48,13 +46,18 @@ def perform_separation(checkpoints, file_path, n_mels, target_length, n_fft, cac
         model.eval()
         
         with torch.no_grad():
-            input_mel = []
-            for hop_length in [512, 1024]:  # Different hop lengths for multi-scale
-                mel_spectrogram = T.MelSpectrogram(
-                    sample_rate=sr, n_mels=n_mels, n_fft=n_fft, hop_length=hop_length
-                )(input_audio.float()).unsqueeze(0).to(device)
-                input_mel.append(mel_spectrogram)
-            input_mel = torch.cat(input_mel, dim=1)  # Concatenate along channel dimension
+            mel_spectrogram = T.MelSpectrogram(
+                sample_rate=sr, n_mels=n_mels, n_fft=n_fft, hop_length=n_fft // 4
+            )(input_audio.float()).unsqueeze(0).to(device)
+            
+            # Calculate harmonic and percussive content and stack into 4D spectrogram
+            spectrogram_np = mel_spectrogram.cpu().detach().numpy()
+            harmonic, percussive = librosa.decompose.hpss(spectrogram_np)
+            harmonic_t = torch.from_numpy(harmonic).to(device)
+            percussive_t = torch.from_numpy(percussive).to(device)
+            
+            input_mel = torch.stack([mel_spectrogram, harmonic_t, percussive_t], dim=-1)
+            
             output_mel = model(input_mel).cpu()
             inverse_mel_transform = T.InverseMelScale(n_stft=n_fft // 2 + 1, n_mels=n_mels)
             griffin_lim_transform = T.GriffinLim(n_fft=n_fft, n_iter=32)

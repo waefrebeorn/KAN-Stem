@@ -54,6 +54,7 @@ def objective_optuna(trial, gradio_params):
         num_stems=gradio_params["num_stems"],
         num_workers=gradio_params["num_workers"],
         cache_dir=gradio_params["cache_dir"],
+        use_cache=gradio_params["use_cache"],  # Added use_cache parameter
         loss_function_g=nn.L1Loss(),
         loss_function_d=wasserstein_loss,
         optimizer_name_g="Adam",
@@ -108,6 +109,7 @@ def train_ray_tune(config, gradio_params):
         num_stems=gradio_params["num_stems"],
         num_workers=gradio_params["num_workers"],
         cache_dir=gradio_params["cache_dir"],
+        use_cache=gradio_params["use_cache"],  # Added use_cache parameter
         loss_function_g=nn.L1Loss(),
         loss_function_d=wasserstein_loss,
         optimizer_name_g="Adam",

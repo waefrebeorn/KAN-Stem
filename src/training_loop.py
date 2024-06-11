@@ -21,6 +21,15 @@ import h5py
 
 logger = logging.getLogger(__name__)
 
+def ensure_dir_exists(directory):
+    if not os.path.exists(directory):
+        try:
+            os.makedirs(directory)
+            logger.info(f"Created directory: {directory}")
+        except Exception as e:
+            logger.error(f"Failed to create directory {directory}: {e}")
+            raise
+
 def log_training_parameters(params):
     """Logs the training parameters."""
     logger.info("Training Parameters Selected:")
@@ -44,22 +53,6 @@ def monitor_memory_usage(training_params):
     else:
         logger.info('GPU not available, skipping memory monitoring.')
 
-def dynamic_cache_management(preprocess_and_cache):
-    if torch.cuda.is_available():
-        reserved_memory = torch.cuda.memory_reserved() / 1024 ** 3
-        allocated_memory = torch.cuda.memory_allocated() / 1024 ** 3
-        physical_memory = torch.cuda.get_device_properties(0).total_memory / 1024 ** 3  # Get physical memory only
-        if reserved_memory < physical_memory * 0.7:
-            current_cache_size = preprocess_and_cache.cache_info().currsize
-            new_cache_size = min(current_cache_size + 10, 100)
-            preprocess_and_cache.cache_clear()
-        elif reserved_memory > physical_memory * 0.9:
-            current_cache_size = preprocess_and_cache.cache_info().currsize
-            new_cache_size = max(current_cache_size - 10, 10)
-            preprocess_and_cache.cache_clear()
-        preprocess_and_cache = cached(cache=LRUCache(maxsize=new_cache_size))(preprocess_and_cache.cache_info().func)
-        logger.info(f'Cache size adjusted to: {preprocess_and_cache.cache_info().maxsize}')
-
 def warm_up_cache(loader, preprocess_data, n_mels, target_length, n_fft, device_str, num_batches=5):
     for i, data in enumerate(loader):
         _ = preprocess_data(data['input'], data['target'], n_mels, target_length, n_fft, device_str)
@@ -67,9 +60,13 @@ def warm_up_cache(loader, preprocess_data, n_mels, target_length, n_fft, device_
             break
 
 def save_batch_to_hdf5(data, batch_idx, dataset_type, cache_dir='./cache'):
+    ensure_dir_exists(cache_dir)
     file_path = os.path.join(cache_dir, f"{dataset_type}_batch_{batch_idx}.h5")
-    with h5py.File(file_path, 'w') as f:
-        f.create_dataset(dataset_type, data=data.cpu().numpy())
+    try:
+        with h5py.File(file_path, 'w') as f:
+            f.create_dataset(dataset_type, data=data.cpu().numpy())
+    except Exception as e:
+        logger.error(f"Failed to save batch {batch_idx} to {file_path}: {e}")
 
 def load_batch_from_hdf5(batch_idx, dataset_type, cache_dir='./cache'):
     file_path = os.path.join(cache_dir, f"{dataset_type}_batch_{batch_idx}.h5")
@@ -79,17 +76,47 @@ def load_batch_from_hdf5(batch_idx, dataset_type, cache_dir='./cache'):
     except FileNotFoundError:
         return None
 
-def dynamic_max_split_size():
-    if torch.cuda.is_available():
-        free_memory = torch.cuda.memory_reserved() - torch.cuda.memory_allocated()
-        free_memory_mb = free_memory / 1024 / 1024
-        max_split_size_mb = max(32, int(free_memory_mb * 0.1))  # Use 10% of free memory, with a minimum of 32 MB
-        os.environ['PYTORCH_CUDA_ALLOC_CONF'] = f'max_split_size_mb:{max_split_size_mb}'
-        logger.info(f'Set PYTORCH_CUDA_ALLOC_CONF to max_split_size_mb:{max_split_size_mb}')
+def dynamic_batching(data_loader, device, batch_size):
+    for data in data_loader:
+        if data is None or data['input'].numel() == 0:
+            continue  # Skip empty batches
 
-def train_single_stem(stem, dataset, val_dir, training_params, model_params, sample_rate, n_mels, n_fft, target_length, stop_flag, suppress_reading_messages=False):
-    dynamic_max_split_size()  # Set the environment variable dynamically
+        max_length = max([segment.shape[-1] for segment in data['input']])
+        padded_inputs = [F.pad(segment, (0, max_length - segment.shape[-1])) for segment in data['input']]
+        padded_targets = [F.pad(segment, (0, max_length - segment.shape[-1])) for segment in data['target']]
+
+        batched_inputs = torch.stack(padded_inputs).to(device)
+        batched_targets = torch.stack(padded_targets).to(device)
+
+        yield {
+            'input': batched_inputs,
+            'target': batched_targets
+        }
+
+def check_and_reshape(outputs, targets, logger):
+    target_numel = targets.numel()
+    output_numel = outputs.numel()
+
+    if output_numel != target_numel:
+        logger.warning(f"Output size ({output_numel}) does not match the expected size ({target_numel}). Attempting to reshape.")
+        
+        # Flatten the output tensor
+        outputs = outputs.view(-1)
+        
+        if output_numel > target_numel:
+            # Truncate the output tensor if it's larger
+            outputs = outputs[:target_numel]
+        else:
+            # Pad the output tensor if it's smaller
+            padding_size = target_numel - output_numel
+            outputs = F.pad(outputs, (0, padding_size))
+        
+        # Reshape the output tensor to match the target shape
+        outputs = outputs.view(targets.shape)
+
+    return outputs
     
+def train_single_stem(stem, dataset, val_dir, training_params, model_params, sample_rate, n_mels, n_fft, target_length, stop_flag, suppress_reading_messages=False):
     logger.info("Starting training for single stem: %s", stem)
     writer = SummaryWriter(log_dir=os.path.join(training_params['checkpoint_dir'], 'runs', f'stem_{stem}_{datetime.now().strftime("%Y%m%d-%H%M%S")}')) if model_params['tensorboard_flag'] else None
 
@@ -164,7 +191,7 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
         optimizer_g.zero_grad()
         optimizer_d.zero_grad()
 
-        for i, data in enumerate(train_loader):
+        for i, data in enumerate(dynamic_batching(train_loader, training_params['device_str'], training_params['batch_size'])):
             if stop_flag.value == 1:
                 logger.info("Training stopped.")
                 return
@@ -194,6 +221,7 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
                 inputs, targets = preprocess_data(inputs, targets, n_mels, target_length // 10, n_fft, training_params['device_str'])
 
                 logger.debug(f"Input shape before reshaping: {inputs.shape}")
+                logger.debug(f"Target shape before reshaping: {targets.shape}")
 
                 if inputs.dim() == 2:
                     inputs = inputs.view(inputs.size(0), 1, n_mels, target_length // 10)
@@ -202,31 +230,24 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
                 elif inputs.dim() == 4 and inputs.size(1) != 1:
                     inputs = inputs.view(inputs.size(0), 1, n_mels, target_length // 10)
 
+                if targets.dim() == 2:
+                    targets = targets.view(targets.size(0), 1, n_mels, target_length // 10)
+                elif targets.dim() == 3:
+                    targets = targets.unsqueeze(1)
+                elif targets.dim() == 4 and targets.size(1) != 1:
+                    targets = targets.view(targets.size(0), 1, n_mels, target_length // 10)
+
                 logger.debug(f"Input shape after reshaping: {inputs.shape}")
+                logger.debug(f"Target shape after reshaping: {targets.shape}")
 
                 with autocast():
-                    outputs = model(inputs)
-                    outputs = outputs[..., :target_length // 10]
+                    outputs = model(inputs, initialize=(epoch == 0 and i == 0))
 
-                    if targets.dim() == 2:
-                        targets = targets.view(targets.size(0), 1, n_mels, target_length // 10)
-                    if targets.dim() == 3:
-                        targets = targets.unsqueeze(1)
-                    if outputs.dim() == 2:
-                        outputs = outputs.view(outputs.size(0), 1, n_mels, target_length // 10)
-                    if outputs.dim() == 3:
-                        outputs = outputs.view(outputs.size(0), 1, n_mels, target_length // 10)
+                    logger.debug(f"Output shape before reshaping: {outputs.shape}")
 
-                    logger.debug(f"Output shape before squeezing: {outputs.shape}")
-                    logger.debug(f"Target shape before squeezing: {targets.shape}")
+                    outputs = check_and_reshape(outputs, targets, logger)
 
-                    if outputs.dim() == 5:
-                        outputs = outputs.squeeze(2)
-                    if targets.dim() == 5:
-                        targets = targets.squeeze(2)
-
-                    logger.debug(f"Output shape after squeezing: {outputs.shape}")
-                    logger.debug(f"Target shape after squeezing: {targets.shape}")
+                    logger.debug(f"Output shape after reshaping: {outputs.shape}")
 
                     combined_inputs.append(inputs.detach().cpu())
                     combined_targets.append(targets.detach().cpu())
@@ -308,17 +329,18 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
                         optimizer_d.step()
                         scheduler_d.step()
 
-            # Combine all segments into one tensor and save to HDF5 cache
-            combined_inputs = torch.cat(combined_inputs, dim=-1)
-            combined_targets = torch.cat(combined_targets, dim=-1)
-            combined_outputs = torch.cat(combined_outputs, dim=-1)
+            if combined_inputs and combined_targets and combined_outputs:
+                # Combine all segments into one tensor and save to HDF5 cache
+                combined_inputs = torch.cat(combined_inputs, dim=-1)
+                combined_targets = torch.cat(combined_targets, dim=-1)
+                combined_outputs = torch.cat(combined_outputs, dim=-1)
 
-            save_batch_to_hdf5(combined_inputs, f'inputs_epoch{epoch}_batch{i}', 'inputs', training_params['cache_dir'])
-            save_batch_to_hdf5(combined_targets, f'targets_epoch{epoch}_batch{i}', 'targets', training_params['cache_dir'])
-            save_batch_to_hdf5(combined_outputs, f'outputs_epoch{epoch}_batch{i}', 'outputs', training_params['cache_dir'])
+                save_batch_to_hdf5(combined_inputs, f'inputs_epoch{epoch}_batch{i}', 'inputs', training_params['cache_dir'])
+                save_batch_to_hdf5(combined_targets, f'targets_epoch{epoch}_batch{i}', 'targets', training_params['cache_dir'])
+                save_batch_to_hdf5(combined_outputs, f'outputs_epoch{epoch}_batch{i}', 'outputs', training_params['cache_dir'])
 
-            # Clear cache frequently
-            preprocess_data.cache_clear()
+                # Clear cache frequently
+                preprocess_data.cache_clear()
 
         if isinstance(scheduler_g, ReduceLROnPlateau):
             optimizer_g.step()
@@ -346,6 +368,7 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
                     inputs, targets = preprocess_data(data['input'], data['target'], n_mels, target_length, n_fft, training_params['device_str'])
 
                     logger.debug(f"Validation input shape before reshaping: {inputs.shape}")
+                    logger.debug(f"Validation target shape before reshaping: {targets.shape}")
 
                     if inputs.dim() == 2:
                         inputs = inputs.view(inputs.size(0), 1, n_mels, target_length)
@@ -354,24 +377,23 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
                     elif inputs.dim() == 4 and inputs.size(1) != 1:
                         inputs = inputs.view(inputs.size(0), 1, n_mels, target_length)
 
-                    logger.debug(f"Validation input shape after reshaping: {inputs.shape}")
-
-                    outputs = model(inputs)
-                    outputs = outputs[..., :target_length]
-
                     if targets.dim() == 2:
                         targets = targets.view(targets.size(0), 1, n_mels, target_length)
-                    if targets.dim() == 3:
+                    elif targets.dim() == 3:
                         targets = targets.view(targets.size(0), 1, n_mels, target_length)
-                    if outputs.dim() == 2:
-                        outputs = outputs.view(outputs.size(0), 1, n_mels, target_length)
-                    if outputs.dim() == 3:
-                        outputs = outputs.view(outputs.size(0), 1, n_mels, target_length)
+                    elif targets.dim() == 4 and targets.size(1) != 1:
+                        targets = targets.view(targets.size(0), 1, n_mels, target_length)
 
-                    if outputs.dim() == 5:
-                        outputs = outputs.squeeze(2)
-                    if targets.dim() == 5:
-                        targets = targets.squeeze(2)
+                    logger.debug(f"Validation input shape after reshaping: {inputs.shape}")
+                    logger.debug(f"Validation target shape after reshaping: {targets.shape}")
+
+                    outputs = model(inputs)
+
+                    logger.debug(f"Validation output shape before reshaping: {outputs.shape}")
+
+                    outputs = check_and_reshape(outputs, targets, logger)
+
+                    logger.debug(f"Validation output shape after reshaping: {outputs.shape}")
 
                     loss = model_params['loss_function_g'](outputs.to(training_params['device_str']), targets.to(training_params['device_str']))
                     val_loss += loss.item()
@@ -496,3 +518,46 @@ def start_training(data_dir, val_dir, batch_size, num_epochs, initial_lr_g, init
         train_single_stem(stem, dataset, val_dir, training_params, model_params, sample_rate, n_mels, n_fft, target_length, stop_flag)
 
     logger.info("Training finished.")
+
+if __name__ == '__main__':
+    # Add your parameters for start_training here
+    start_training(
+        data_dir='path_to_data',
+        val_dir='path_to_val_data',
+        batch_size=32,
+        num_epochs=10,
+        initial_lr_g=1e-4,
+        initial_lr_d=1e-4,
+        use_cuda=True,
+        checkpoint_dir='./checkpoints',
+        save_interval=1,
+        accumulation_steps=1,
+        num_stems=4,
+        num_workers=4,
+        cache_dir='./cache',
+        loss_function_g=torch.nn.L1Loss(),
+        loss_function_d=torch.nn.BCELoss(),
+        optimizer_name_g='Adam',
+        optimizer_name_d='Adam',
+        perceptual_loss_flag=True,
+        perceptual_loss_weight=0.1,
+        clip_value=0.1,
+        scheduler_step_size=10,
+        scheduler_gamma=0.1,
+        tensorboard_flag=True,
+        apply_data_augmentation=False,
+        add_noise=False,
+        noise_amount=0.1,
+        early_stopping_patience=5,
+        disable_early_stopping=False,
+        weight_decay=0,
+        suppress_warnings=False,
+        suppress_reading_messages=False,
+        use_cpu_for_prep=False,
+        discriminator_update_interval=5,
+        label_smoothing_real=0.9,
+        label_smoothing_fake=0.1,
+        suppress_detailed_logs=False,
+        stop_flag=torch.tensor(0),
+        use_cache=True
+    )
