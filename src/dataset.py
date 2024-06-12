@@ -101,6 +101,9 @@ class StemSeparationDataset(Dataset):
         cache_key = self._get_cache_key(stem_name, apply_data_augmentation)
         if self.use_cache and cache_key in self.cache_index:
             stem_cache_path = self.cache_index[cache_key]
+            if isinstance(stem_cache_path, list):  # Check if stem_cache_path is a list
+                stem_cache_path = stem_cache_path[0]  # Extract the first (and only) element
+
             if os.path.exists(stem_cache_path):
                 try:
                     data = load_from_cache(stem_cache_path)

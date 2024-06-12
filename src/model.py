@@ -146,24 +146,16 @@ class KANWithDepthwiseConv(nn.Module):
         return hashlib.md5(data_string.encode()).hexdigest()
 
     def load_cache_index(self):
-        try:
-            if os.path.exists(self.index_file_path):
-                with open(self.index_file_path, 'r') as f:
-                    self.cache_index = json.load(f)
-            else:
-                self.cache_index = defaultdict(list)
-                self.rebuild_cache_index()
-        except json.JSONDecodeError:
-            logger.error("Error decoding JSON cache index. Rebuilding cache index.")
+        if os.path.exists(self.index_file_path):
+            with open(self.index_file_path, 'r') as f:
+                self.cache_index = json.load(f)
+        else:
+            self.cache_index = defaultdict(list)
             self.rebuild_cache_index()
 
     def save_cache_index(self):
-        try:
-            with open(self.index_file_path, 'w') as f:
-                json.dump(self.cache_index, f, default=str)
-        except Exception as e:
-            logger.error(f"Error saving cache index: {e}")
-            self.handle_cache_error()
+        with open(self.index_file_path, 'w') as f:
+            json.dump(self.cache_index, f)
 
     def rebuild_cache_index(self):
         try:
@@ -210,6 +202,7 @@ class KANWithDepthwiseConv(nn.Module):
         self.cache_index.clear()
         self.save_cache_index()
 
+    @cached(cache=LRUCache(maxsize=100))
     def preprocess_and_cache(self, x, segment_idx, stage):
         cached_data = self.load_intermediate(segment_idx, stage)
         if cached_data is not None:
@@ -217,9 +210,11 @@ class KANWithDepthwiseConv(nn.Module):
         
         with torch.no_grad():
             x = x.to(self.device)
+            logger.info(f"Segment {segment_idx}, Stage {stage}: Input shape: {x.shape}")
             try:
                 if stage == 'conv1':
                     x = self.conv1(x)
+                    assert x.shape[1] == self.conv1.pointwise.out_channels, f"Expected {self.conv1.pointwise.out_channels} channels after conv1, got {x.shape[1]}"
                 elif stage == 'pool1':
                     x = self.pool1(x)
                 elif stage == 'res_block1':
@@ -228,6 +223,7 @@ class KANWithDepthwiseConv(nn.Module):
                     x = self.attention1(x)
                 elif stage == 'conv2':
                     x = self.conv2(x)
+                    assert x.shape[1] == self.conv2[1].out_channels, f"Expected {self.conv2[1].out_channels} channels after conv2, got {x.shape[1]}"
                 elif stage == 'pool2':
                     x = self.pool2(x)
                 elif stage == 'res_block2':
@@ -237,11 +233,13 @@ class KANWithDepthwiseConv(nn.Module):
                 elif stage == 'conv3':
                     x = self.pad_if_needed(x, self.conv3[0].kernel_size, self.conv3[0].dilation[0])
                     x = self.conv3(x)
+                    assert x.shape[1] == self.conv3[1].out_channels, f"Expected {self.conv3[1].out_channels} channels after conv3, got {x.shape[1]}"
                 elif stage == 'pool3':
                     x = self.pool3(x)
                 elif stage == 'conv4':
                     x = self.pad_if_needed(x, self.conv4[0].kernel_size, self.conv4[0].dilation[0])
                     x = self.conv4(x)
+                    assert x.shape[1] == self.conv4[1].out_channels, f"Expected {self.conv4[1].out_channels} channels after conv4, got {x.shape[1]}"
                 elif stage == 'pool4':
                     x = self.pool4(x)
                 elif stage == 'context_aggregation':
@@ -249,6 +247,8 @@ class KANWithDepthwiseConv(nn.Module):
             except Exception as e:
                 logger.error(f"Error in preprocess_and_cache (segment {segment_idx}, stage {stage}): {type(e).__name__} - {e}")
                 raise
+            logger.info(f"Segment {segment_idx}, Stage {stage}: Output shape: {x.shape}")
+
             self.save_intermediate(x, segment_idx, stage)
         return x
 
@@ -272,7 +272,7 @@ class KANWithDepthwiseConv(nn.Module):
                 if dset_name in f:
                     del f[dset_name]
                 f.create_dataset(dset_name, data=x.cpu().detach().numpy())
-                self.cache_index[dset_name] = x.cpu().detach().numpy().tolist()  # Ensure the data is serializable
+                self.cache_index[dset_name] = x.cpu().detach().numpy()
                 self.save_cache_index()
         except Exception as e:
             logger.error(f"Error saving concatenated output: {e}")
@@ -303,6 +303,9 @@ class KANWithDepthwiseConv(nn.Module):
         if not suppress_reading_messages:
             logger.info(f"Shape after adding dimensions: {x.shape}")
 
+        # Ensure preprocess_and_cache is correctly cached
+        dynamic_cache_management(self.preprocess_and_cache.cache)
+
         if initialize:
             x = self.conv1(x)
             x = self.pool1(x)
@@ -323,15 +326,13 @@ class KANWithDepthwiseConv(nn.Module):
             x = self.flatten(x)
             return x
 
-        segment_length = x.shape[-2] // 10  # Ensure this calculation is correct
-        num_full_segments = (x.shape[-2] - 2) // segment_length
-        segments = x.split(segment_length, dim=-2)[:num_full_segments]
+        kernel_size = self.conv1.kernel_size[0]
+        dilation = self.conv1.dilation[0]
+        min_segment_length = (kernel_size - 1) * dilation + 1
+        segment_length = max(x.shape[-2] // 10, min_segment_length)
 
-        if x.shape[-2] % segment_length != 0:
-            last_segment = x[..., num_full_segments * segment_length:, :]
-            if last_segment.shape[-2] >= self.conv1.kernel_size[0]:
-                segments = list(segments)
-                segments.append(last_segment)
+        num_segments = (x.shape[-2] + segment_length - 1) // segment_length
+        segments = [x[:, :, i*segment_length:(i+1)*segment_length, :] for i in range(num_segments)]
 
         outputs = []
         for i, segment in enumerate(segments):
@@ -405,13 +406,7 @@ class KANDiscriminator(nn.Module):
         self.conv2 = nn.utils.spectral_norm(self.conv2)
         self.conv3 = nn.utils.spectral_norm(self.conv3)
 
-        with torch.no_grad():
-            dummy_input = torch.randn(1, in_channels, n_mels, target_length, device=device)
-            dummy_output = self._forward_conv_layers(dummy_input)
-            flattened_size = dummy_output.view(-1).shape[0]
-
-        self.fc1 = nn.Linear(flattened_size, 1).to(device)
-        nn.init.xavier_normal_(self.fc1.weight)
+        self.fc1 = None
 
     def _forward_conv_layers(self, x):
         x = F.relu(self.bn1(self.conv1(x)))
@@ -426,13 +421,12 @@ class KANDiscriminator(nn.Module):
         x = self._forward_conv_layers(x)
         x = x.view(x.size(0), -1)
 
-        if x.shape[1] != self.fc1.in_features:
-            desired_shape = (x.shape[0], self.fc1.in_features)
-            if x.numel() == desired_shape[0] * desired_shape[1]:
-                x = x.view(desired_shape)
-            else:
-                logger.warning("Flattened input size doesn't match fc1. Skipping this batch.")
-                return None
+        if self.fc1 is None:
+            self.fc1 = nn.Linear(x.shape[1], 1).to(self.device)
+            nn.init.xavier_normal_(self.fc1.weight)
+        elif x.shape[1] != self.fc1.in_features:
+            logger.warning("Flattened input size doesn't match fc1. Skipping this batch.")
+            return None
 
         x = torch.sigmoid(self.fc1(x))
         return x
@@ -507,20 +501,15 @@ def dynamic_cache_management(preprocess_and_cache):
         physical_memory = torch.cuda.get_device_properties(0).total_memory / 1024 ** 3
 
         # Ensure we are aggressive with caching to stay within 8GB physical memory
-        if reserved_memory > 8.0:
-            current_cache_size = preprocess_and_cache.cache_info().currsize
-            new_cache_size = max(current_cache_size - 10, 10)
-            preprocess_and_cache.cache_clear()
-        elif allocated_memory > 8.0:
-            current_cache_size = preprocess_and_cache.cache_info().currsize
-            new_cache_size = max(current_cache_size - 10, 10)
-            preprocess_and_cache.cache_clear()
+        if reserved_memory > 8.0 or allocated_memory > 8.0:
+            preprocess_and_cache.clear()
+            new_cache_size = 10
         else:
-            current_cache_size = preprocess_and_cache.cache_info().currsize
+            current_cache_size = preprocess_and_cache.currsize
             new_cache_size = min(current_cache_size + 10, 100)
         
-        preprocess_and_cache = cached(cache=LRUCache(maxsize=new_cache_size))(preprocess_and_cache.cache_info().func)
-        logger.info(f'Cache size adjusted to: {preprocess_and_cache.cache_info().maxsize}')
+        preprocess_and_cache.maxsize = new_cache_size
+        logger.info(f'Cache size adjusted to: {preprocess_and_cache.maxsize}')
 
     dynamic_max_split_size()
 

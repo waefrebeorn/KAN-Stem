@@ -1,82 +1,73 @@
 # KAN-Stem
 
-KAN-Stem is an advanced project leveraging Kolmogorov–Arnold Networks (KANs) for state-of-the-art audio stem separation. This project aims to push the boundaries of audio processing and separation by integrating KANs with cutting-edge techniques and tools.
+**KAN-Stem** is a cutting-edge audio stem separation project leveraging the power of **Kolmogorov–Arnold Networks (KANs)** and incorporating the latest advancements from the paper ["On the Representational Power of the Kolmogorov-Arnold Network"](https://arxiv.org/html/2312.10949v1). The goal is to set new standards in audio processing and separation by integrating KANs with state-of-the-art techniques and tools.
 
-## Features
+## Key Features
 
-- **State-of-the-Art Model**: Train a KAN model specifically designed for audio stem separation, delivering superior performance.
-- **Advanced Separation Techniques**: Separate audio into different stems using the trained KAN model with high precision and quality.
-- **Optimized Performance**: Utilizes CUDA 12.1 and cuDNN v8.9.7 for accelerated training and inference.
+- **State-of-the-Art Model:**  The project trains a KAN model specifically tailored for audio stem separation, enabling superior performance and accuracy.
+- **Advanced Separation Techniques:** Utilizes the trained KAN model to separate audio into distinct stems (vocals, drums, bass, etc.) with high precision and quality.
+- **Optimized Performance:** Leverages CUDA 12.1 and cuDNN v8.9.7 for accelerated training and inference, ensuring efficient and fast processing.
+- **Novel KAN Architecture:** Incorporates architectural improvements inspired by ["On the Representational Power of the Kolmogorov-Arnold Network"](https://arxiv.org/html/2312.10949v1) to enhance the model's capacity for audio representation and separation. 
 
 ## Installation
 
-1. **Download and Install CUDA 12.1**
-   - Visit [CUDA 12.1](https://developer.nvidia.com/cuda-12-1-1-download-archive) and follow the instructions.
+1. **CUDA 12.1 and cuDNN v8.9.7:**
+   - Download and install CUDA 12.1 from [https://developer.nvidia.com/cuda-12-1-1-download-archive](https://developer.nvidia.com/cuda-12-1-1-download-archive).
+   - Download cuDNN v8.9.7 from [https://developer.nvidia.com/rdp/cudnn-archive](https://developer.nvidia.com/rdp/cudnn-archive) (requires NVIDIA Developer account).
+   - Copy cuDNN contents to the CUDA installation directory.
 
-2. **Download cuDNN v8.9.7**
-   - Visit [cuDNN v8.9.7](https://developer.nvidia.com/rdp/cudnn-archive) (requires NVIDIA Developer account).
-   - Copy its contents to the CUDA installation directory:
-
-```
-Copy-Item -Path "C:\path\to\cudnn\bin\*" -Destination "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\bin"
-Copy-Item -Path "C:\path\to\cudnn\include\*" -Destination "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\include"
-Copy-Item -Path "C:\path\to\cudnn\lib\x64\*" -Destination "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v12.1\lib\x64"
-```
-
-3. **Set up the environment and install dependencies**
-
-```
-python -m venv venv
-source venv/bin/activate  # On Windows use env\Scripts\activate
-pip install -r requirements.txt
-```
+2. **Environment Setup:**
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # On Windows use env\Scripts\activate
+   pip install -r requirements.txt
+   ```
 
 ## Usage
 
-To train the model, run:
+- **Training:**
+  ```bash
+  python gradio_app.py
+  ```
+  This launches a user-friendly Gradio interface for training the model, visualizing results, and experimenting with different settings.
 
-```
-python gradio_app.py
-```
+- **Inference:**
+  ```bash
+  python infer.py --input_audio_path <path_to_your_audio_file> --output_path <path_to_save_separated_stems> 
+  ```
+  This command takes an audio file as input and generates the separated stems in the specified output directory.
 
-## Credits
+## Expanded Credits
 
-This project integrates the combined efforts and innovations from various researchers and repositories in the field of deep learning and audio processing. Special thanks to the following contributors:
+KAN-Stem builds upon the collective knowledge and innovations from a wide range of contributors:
 
-- [awesome-kan](https://github.com/mintisan/awesome-kan) repository for their comprehensive resources on Kolmogorov–Arnold Networks.
-- [KindXiaoming-pykan](https://github.com/KindXiaoming/pykan) for the initial implementation and the insightful arXiv paper.
-- [facebookresearch/demucs](https://github.com/facebookresearch/demucs) for their groundbreaking work in music source separation which influenced this project.
-- The authors of the [Kolmogorov–Arnold Network paper](https://arxiv.org/pdf/2404.19756) for their foundational research that inspired this project.
-- [Optuna](https://github.com/optuna/optuna) and [Ray Tune](https://github.com/ray-project/ray) for their exceptional hyperparameter optimization tools used in this project.
-- The [Gradio](https://gradio.app/) team for providing a user-friendly interface for training and testing the model.
-- [Librosa](https://github.com/librosa/librosa) for their Python package for music and audio analysis.
-- [PyTorch](https://pytorch.org/) for their deep learning framework that serves as the backbone of this project.
-- [Scikit-learn](https://scikit-learn.org/) for their machine learning tools which were utilized for various preprocessing tasks.
-- [NumPy](https://numpy.org/) for their fundamental package for scientific computing with Python.
-- [Pandas](https://pandas.pydata.org/) for their data analysis and manipulation tools.
-- [SciPy](https://www.scipy.org/) for their ecosystem of open-source software for mathematics, science, and engineering.
-- [Matplotlib](https://matplotlib.org/) for their plotting library used for visualizing results.
-- [Seaborn](https://seaborn.pydata.org/) for their data visualization library based on Matplotlib.
-- [TensorBoard](https://www.tensorflow.org/tensorboard) for providing the tools to visualize and debug the training process.
-- **Orion** for their valuable tools and resources that supported this project.
-- **Gemini** for web search and instructional guidance.
-- **Claude Opus** for logical assistance during challenging phases of the project.
-- **ChatGPT** for hybridizing and coding, ensuring the successful implementation and integration of various components.
+- **Research and Papers:**
+  - The authors of ["Leveraged Mel spectrograms using Harmonic and Percussive Components in Speech Emotion Recognition"](https://arxiv.org/html/2312.10949v1) for their significant contributions to KAN theory and architecture.
+  - The original Kolmogorov–Arnold Network paper ([https://arxiv.org/pdf/2404.19756](https://arxiv.org/pdf/2404.19756)) for laying the foundation for this project.
+  - [facebookresearch/demucs](https://github.com/facebookresearch/demucs) for their influential work in music source separation. 
+  - [awesome-kan](https://github.com/mintisan/awesome-kan) for their comprehensive resources on KANs.
 
-## Additional Information
+- **Implementations:**
+  - [KindXiaoming-pykan](https://github.com/KindXiaoming/pykan) for their initial implementation and insightful arXiv paper.
 
-- **Performance Metrics**: The project evaluates model performance using SDR, SIR, and SAR metrics to ensure high-quality audio separation.
-- **Hyperparameter Optimization**: Utilizes Optuna and Ray Tune for efficient and effective hyperparameter optimization.
-- **Logging and Visualization**: Integrated with TensorBoard for detailed logging and visualization of training progress and results.
+- **Tools and Libraries:**
+  - [Optuna](https://github.com/optuna/optuna) and [Ray Tune](https://github.com/ray-project/ray) for their powerful hyperparameter optimization capabilities.
+  - [Gradio](https://gradio.app/) for simplifying the model training and testing experience with an intuitive interface.
+  - [Librosa](https://github.com/librosa/librosa) for audio analysis and manipulation.
+  - [PyTorch](https://pytorch.org/) for the deep learning framework.
+  - [Scikit-learn](https://scikit-learn.org/), [NumPy](https://numpy.org/), [Pandas](https://pandas.pydata.org/), [SciPy](https://www.scipy.org/), [Matplotlib](https://matplotlib.org/), [Seaborn](https://seaborn.pydata.org/) for machine learning, data analysis, and visualization.
+  - [TensorBoard](https://www.tensorflow.org/tensorboard) for monitoring and debugging the training process.
 
-By incorporating these state-of-the-art techniques and tools, KAN-Stem sets a new benchmark in the field of audio stem separation. The project aims to provide researchers and developers with a powerful tool to achieve high-quality audio separation with minimal effort.
+- **AI Assistants:**
+  - Orion, Gemini, Claude Opus, and ChatGPT for their invaluable assistance in research, coding, debugging, and optimization throughout the project's development.
+
+## Additional Notes
+
+- **Performance Metrics:**  SDR, SIR, and SAR metrics are used to rigorously assess the model's audio separation quality.
+- **Hyperparameter Optimization:** Optuna and Ray Tune are employed for efficient and thorough hyperparameter tuning, leading to optimal model performance.
+- **Logging and Visualization:** TensorBoard integration allows for comprehensive tracking and visualization of training progress and results.
+
 
 ## License
 
-This project is licensed under the MIT License.
-
----
-
-For any further questions or contributions, feel free to open an issue or pull request on our GitHub repository.
-
----
+This project is licensed under the MIT License. Feel free to contribute and improve KAN-Stem by opening issues or submitting pull requests on our GitHub repository.
