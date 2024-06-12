@@ -5,6 +5,7 @@ import torch.nn.functional as F
 import logging
 import torch.utils.checkpoint as checkpoint
 import h5py
+import numpy as np
 from cachetools import LRUCache, cached
 from collections import defaultdict
 import hashlib
@@ -99,6 +100,7 @@ class KANWithDepthwiseConv(nn.Module):
         self.cache_dir = cache_dir
         self.cache_file_path = os.path.join(cache_dir, 'intermediate_cache.h5')
         self.index_file_path = os.path.join(cache_dir, 'cache_index.json')
+        self.json_cache_file_path = os.path.join(cache_dir, 'intermediate_cache.json')
 
         self.cache_index = defaultdict(list)
         self.load_cache_index()
@@ -147,8 +149,13 @@ class KANWithDepthwiseConv(nn.Module):
 
     def load_cache_index(self):
         if os.path.exists(self.index_file_path):
-            with open(self.index_file_path, 'r') as f:
-                self.cache_index = json.load(f)
+            try:
+                with open(self.index_file_path, 'r') as f:
+                    self.cache_index = json.load(f)
+            except (json.JSONDecodeError, ValueError):
+                logger.error("Cache index file is corrupted. Rebuilding index.")
+                self.cache_index = defaultdict(list)
+                self.rebuild_cache_index()
         else:
             self.cache_index = defaultdict(list)
             self.rebuild_cache_index()
@@ -159,7 +166,7 @@ class KANWithDepthwiseConv(nn.Module):
 
     def rebuild_cache_index(self):
         try:
-            with h5py.File(self.cache_file_path, 'r') as f:
+            with h5py.File(self.cache_file_path, 'a') as f:
                 for key in f.keys():
                     segment_idx, stage = key.split('_')
                     self.cache_index[key] = (int(segment_idx), stage)
@@ -167,15 +174,35 @@ class KANWithDepthwiseConv(nn.Module):
         except Exception as e:
             logger.error(f"Error rebuilding cache index: {e}")
 
+    def save_fixed_length_string(self, data, file_name, dataset_name, length=100):
+        with h5py.File(file_name, 'a') as f:
+            dtype = 'S{}'.format(length)  # Fixed length string
+            if dataset_name in f:
+                del f[dataset_name]
+            dset = f.create_dataset(dataset_name, (len(data),), dtype=dtype)
+            dset[:] = [d.encode('utf-8')[:length] for d in data]
+
+    def sanitize_data(self, data):
+        if isinstance(data, str):
+            return data.replace('\x00', '')  # Remove NULL characters
+        elif isinstance(data, list):
+            return [self.sanitize_data(item) for item in data]
+        elif isinstance(data, dict):
+            return {key: self.sanitize_data(value) for key, value in data.items()}
+        return data
+
     def save_intermediate(self, x, segment_idx, stage):
+        key = self.get_cache_key(segment_idx, stage)
         try:
-            with h5py.File(self.cache_file_path, 'a') as f:
-                key = self.get_cache_key(segment_idx, stage)
-                if key in f:
-                    del f[key]
-                f.create_dataset(key, data=x.cpu().detach().numpy())
-                self.cache_index[key] = (segment_idx, stage)
-                self.save_cache_index()
+            if x.numel() > 1e6:  # If data is too large, save in JSON
+                data = x.cpu().detach().numpy().tolist()
+                with open(self.json_cache_file_path, 'a') as f:
+                    json.dump({key: data}, f)
+            else:
+                sanitized_data = self.sanitize_data(x.cpu().detach().numpy().astype(np.float32).tobytes())
+                self.save_fixed_length_string(sanitized_data, self.cache_file_path, key)
+            self.cache_index[key] = x.cpu().detach().numpy().shape
+            self.save_cache_index()
         except Exception as e:
             logger.error(f"Error saving intermediate data: {e}")
             self.handle_cache_error()
@@ -184,8 +211,16 @@ class KANWithDepthwiseConv(nn.Module):
         key = self.get_cache_key(segment_idx, stage)
         if key in self.cache_index:
             try:
-                with h5py.File(self.cache_file_path, 'r') as f:
-                    return torch.tensor(f[key][:])
+                if os.path.exists(self.json_cache_file_path):
+                    with open(self.json_cache_file_path, 'r') as f:
+                        data = json.load(f).get(key)
+                        if data:
+                            return torch.tensor(data, device=self.device)
+                else:
+                    with h5py.File(self.cache_file_path, 'r') as f:
+                        data = np.frombuffer(f[key][:], dtype=np.float32)
+                        data = torch.from_numpy(data).view(self.cache_index[key]).to(self.device)
+                        return data
             except Exception as e:
                 logger.error(f"Error loading intermediate data: {e}")
                 self.handle_cache_error()
@@ -194,11 +229,15 @@ class KANWithDepthwiseConv(nn.Module):
     def handle_cache_error(self):
         if os.path.exists(self.cache_file_path):
             os.remove(self.cache_file_path)
+        if os.path.exists(self.json_cache_file_path):
+            os.remove(self.json_cache_file_path)
         self.rebuild_cache_index()
 
     def clear_intermediate(self):
         if os.path.exists(self.cache_file_path):
             os.remove(self.cache_file_path)
+        if os.path.exists(self.json_cache_file_path):
+            os.remove(self.json_cache_file_path)
         self.cache_index.clear()
         self.save_cache_index()
 
@@ -267,13 +306,15 @@ class KANWithDepthwiseConv(nn.Module):
 
     def save_concat_output(self, x, stage):
         try:
-            with h5py.File(self.cache_file_path, 'a') as f:
-                dset_name = f"{stage}_output"
-                if dset_name in f:
-                    del f[dset_name]
-                f.create_dataset(dset_name, data=x.cpu().detach().numpy())
-                self.cache_index[dset_name] = x.cpu().detach().numpy()
-                self.save_cache_index()
+            if x.numel() > 1e6:  # If data is too large, save in JSON
+                data = x.cpu().detach().numpy().tolist()
+                with open(self.json_cache_file_path, 'a') as f:
+                    json.dump({f"{stage}_output": data}, f)
+            else:
+                sanitized_data = self.sanitize_data(x.cpu().detach().numpy().astype(np.float32).tobytes())
+                self.save_fixed_length_string(sanitized_data, self.cache_file_path, f"{stage}_output")
+            self.cache_index[f"{stage}_output"] = x.cpu().detach().numpy().shape
+            self.save_cache_index()
         except Exception as e:
             logger.error(f"Error saving concatenated output: {e}")
             self.handle_cache_error()
@@ -281,9 +322,16 @@ class KANWithDepthwiseConv(nn.Module):
     def load_concat_output(self, expected_size):
         dset_name = "concat_output"
         try:
-            with h5py.File(self.cache_file_path, 'r') as f:
-                if dset_name in f and f[dset_name].shape[1] == expected_size:
-                    return torch.tensor(f[dset_name][:])
+            if os.path.exists(self.json_cache_file_path):
+                with open(self.json_cache_file_path, 'r') as f:
+                    data = json.load(f).get(dset_name)
+                    if data and len(data) == expected_size:
+                        return torch.tensor(data, device=self.device)
+            else:
+                with h5py.File(self.cache_file_path, 'r') as f:
+                    if dset_name in f and f[dset_name].shape[1] == expected_size:
+                        data = np.frombuffer(f[dset_name][:], dtype=np.float32)
+                        return torch.from_numpy(data).view(expected_size).to(self.device)
         except Exception as e:
             logger.error(f"Error loading concatenated output: {e}")
             self.handle_cache_error()
@@ -362,12 +410,10 @@ class KANWithDepthwiseConv(nn.Module):
             if not suppress_reading_messages:
                 logger.info(f"Shape of segment {i+1} after processing: {segment.shape}")
 
-            segment = self.flatten(segment).cpu()
-            outputs.append(segment)
-            if not suppress_reading_messages:
-                logger.info(f"Shape of segment {i+1} after flatten: {segment.shape}")
-
-        x = torch.cat(outputs, dim=1).to(self.device)
+            segment = self.flatten(segment)
+            outputs.append(segment)  # No need to move to CPU here
+        
+        x = torch.cat(outputs, dim=0).to(self.device)  # Concatenate along the batch dimension (0)
 
         logger.info(f"Shape of x after concatenation: {x.shape}")
 
@@ -500,16 +546,14 @@ def dynamic_cache_management(preprocess_and_cache):
         allocated_memory = torch.cuda.memory_allocated() / 1024 ** 3
         physical_memory = torch.cuda.get_device_properties(0).total_memory / 1024 ** 3
 
-        # Ensure we are aggressive with caching to stay within 8GB physical memory
         if reserved_memory > 8.0 or allocated_memory > 8.0:
             preprocess_and_cache.clear()
-            new_cache_size = 10
+            new_cache_size = max(preprocess_and_cache.maxsize - 10, 10)
         else:
-            current_cache_size = preprocess_and_cache.currsize
-            new_cache_size = min(current_cache_size + 10, 100)
+            new_cache_size = min(preprocess_and_cache.maxsize + 10, 100)
         
-        preprocess_and_cache.maxsize = new_cache_size
-        logger.info(f'Cache size adjusted to: {preprocess_and_cache.maxsize}')
+        preprocess_and_cache = LRUCache(maxsize=new_cache_size)
+        logger.info(f'Cache size adjusted to: {new_cache_size}')
 
     dynamic_max_split_size()
 
@@ -526,18 +570,20 @@ def check_and_reshape(outputs, targets, logger):
     if output_numel != target_numel:
         logger.warning(f"Output size ({output_numel}) does not match the expected size ({target_numel}). Attempting to reshape.")
         
-        # Flatten the output tensor
         outputs = outputs.view(-1)
         
         if output_numel > target_numel:
-            # Truncate the output tensor if it's larger
             outputs = outputs[:target_numel]
         else:
-            # Pad the output tensor if it's smaller
             padding_size = target_numel - output_numel
             outputs = F.pad(outputs, (0, padding_size))
         
-        # Reshape the output tensor to match the target shape
         outputs = outputs.view(targets.shape)
 
     return outputs
+
+def main():
+    logging.info("KANWithDepthwiseConv model script executed")
+
+if __name__ == "__main__":
+    main()

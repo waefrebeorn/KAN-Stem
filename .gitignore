@@ -6,3 +6,4 @@ checkpoints/runs
 *.pt
 *.
 checkpoints
+*.h5

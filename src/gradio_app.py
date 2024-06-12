@@ -11,7 +11,7 @@ import soundfile as sf
 import mir_eval
 from prepare_dataset import organize_and_prepare_dataset_gradio
 from generate_other_noise import generate_shuffled_noise_gradio
-from hyperparameter_optimization import objective_optuna, train_ray_tune, start_optuna_optimization, start_ray_tune_optimization
+from hyperparameter_optimization import objective_optuna, start_optuna_optimization
 import warnings
 
 warnings.filterwarnings("ignore", message="Lazy modules are a new feature under heavy development")
@@ -132,9 +132,8 @@ with gr.Blocks() as demo:
         perceptual_loss_weight = gr.Number(label="Perceptual Loss Weight", value=0.1)
         suppress_detailed_logs = gr.Checkbox(label="Suppress Detailed Logs", value=False)
         use_cache = gr.Checkbox(label="Use Cache", value=True)
-        optimization_method = gr.Dropdown(label="Optimization Method", choices=["None", "Optuna", "Ray Tune"], value="Optuna")
+        optimization_method = gr.Dropdown(label="Optimization Method", choices=["None", "Optuna"], value="Optuna")
         optuna_trials = gr.Number(label="Optuna Trials", value=1)
-        ray_samples = gr.Number(label="Ray Tune Samples", value=1)
         start_training_button = gr.Button("Start Training")
         stop_training_button = gr.Button("Stop Training")
         resume_training_button = gr.Button("Resume Training")
@@ -144,7 +143,7 @@ with gr.Blocks() as demo:
                                           accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
                                           perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation,
                                           add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep,
-                                          discriminator_update_interval, label_smoothing_real, label_smoothing_fake, perceptual_loss_weight, suppress_detailed_logs, optimization_method, optuna_trials, ray_samples, use_cache):
+                                          discriminator_update_interval, label_smoothing_real, label_smoothing_fake, perceptual_loss_weight, suppress_detailed_logs, optimization_method, optuna_trials, use_cache):
             gradio_params = {
                 "data_dir": data_dir,
                 "val_dir": val_dir,
@@ -187,8 +186,6 @@ with gr.Blocks() as demo:
             log_training_parameters(gradio_params)
             if optimization_method == "Optuna":
                 return start_optuna_optimization(optuna_trials, gradio_params)
-            elif optimization_method == "Ray Tune":
-                return start_ray_tune_optimization(ray_samples, gradio_params)
             else:
                 return start_training_wrapper(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval,
                                           accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
@@ -203,7 +200,7 @@ with gr.Blocks() as demo:
                 accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
                 perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation,
                 add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages, use_cpu_for_prep,
-                discriminator_update_interval, label_smoothing_real, label_smoothing_fake, perceptual_loss_weight, suppress_detailed_logs, optimization_method, optuna_trials, ray_samples, use_cache
+                discriminator_update_interval, label_smoothing_real, label_smoothing_fake, perceptual_loss_weight, suppress_detailed_logs, optimization_method, optuna_trials, use_cache
             ],
             outputs=output
         )
