@@ -338,12 +338,11 @@ class StemSeparationDataset(Dataset):
                             logger.info(f"Loaded cached data for {stem_name} (augmented={apply_data_augmentation})")
                         data['input'] = data['input'].to(self.device_prep).float()
                         data['target'] = data['target'].to(self.device_prep).float()
-
-                        # Clear memory after loading cached data
-                        torch.cuda.empty_cache()  # Clear GPU memory
-                        import gc
-                        gc.collect()  # Clear CPU memory
-
+                        
+                        # Free memory immediately after loading from cache
+                        del data['input'], data['target']
+                        torch.cuda.empty_cache()
+                        
                         return data
                     else:
                         if not self.suppress_reading_messages:
@@ -351,7 +350,6 @@ class StemSeparationDataset(Dataset):
                 except Exception as e:
                     if not self.suppress_reading_messages:
                         logger.warning(f"Error loading cached data for {stem_name} (augmented={apply_data_augmentation}). Reprocessing. Error: {e}")
-
         return None
 
     def _process_and_cache(self, stem_name, apply_data_augmentation):
@@ -392,6 +390,10 @@ class StemSeparationDataset(Dataset):
 
             self._save_individual_cache(stem_name, data, apply_data_augmentation)
 
+            # Free memory immediately after processing
+            del input_mel, target_mel
+            torch.cuda.empty_cache()
+
             return data
 
         except Exception as e:
@@ -412,6 +414,11 @@ class StemSeparationDataset(Dataset):
                 logger.info(f"Successfully saved stem cache: {stem_cache_path}")
             self.cache_index[cache_key] = stem_cache_path
             self._save_cache_metadata()
+
+            # Free memory immediately after saving to cache
+            del data['input'], data['target']
+            torch.cuda.empty_cache()
+
             return stem_cache_path
         except Exception as e:
             if not self.suppress_reading_messages:
@@ -495,7 +502,11 @@ def collate_fn(batch):
     
     inputs = inputs.cpu()
     targets = targets.cpu()
-    
+
+    # Free memory immediately after reshaping
+    del batch
+    torch.cuda.empty_cache()
+
     return {'input': inputs, 'target': targets}
 
 def preprocess_and_cache_dataset(data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation, suppress_warnings, suppress_reading_messages, num_workers, device_prep, stop_flag):
@@ -567,11 +578,10 @@ def load_and_preprocess(file_path, mel_spectrogram, target_length, device, apply
             input_data = torch.tensor(f['input'][:]).to(device).float()
             target_data = torch.tensor(f['target'][:]).to(device).float()
         logger.info(f"Loaded from cache: {cache_file_path}, input shape: {input_data.shape}, target shape: {target_data.shape}")
-        
-        # Clear memory after loading cached data
-        torch.cuda.empty_cache()  # Clear GPU memory
-        import gc
-        gc.collect()  # Clear CPU memory
+
+        # Free memory immediately after loading from cache
+        del input_data, target_data
+        torch.cuda.empty_cache()
 
         return input_data, target_data
 
@@ -621,6 +631,10 @@ def load_and_preprocess(file_path, mel_spectrogram, target_length, device, apply
             f.create_dataset('input', data=input_mel.cpu().numpy())
             f.create_dataset('target', data=target_data.cpu().numpy())
         logger.info(f"Saved to cache: {cache_file_path}, input shape: {input_mel.shape}, target shape: {target_data.shape}")
+
+        # Free memory immediately after saving to cache
+        del input_mel, target_data
+        torch.cuda.empty_cache()
 
     return input_mel, target_data
 
