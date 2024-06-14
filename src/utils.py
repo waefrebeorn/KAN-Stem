@@ -275,14 +275,22 @@ class StemSeparationDataset(Dataset):
         self.stop_flag = stop_flag
         self.use_cache = use_cache
 
-        self.valid_stems = [f for f in os.listdir(data_dir) if f.endswith('.wav')]
-        if not self.valid_stems:
+        self.stem_names = self._load_stem_names()
+        if not self.stem_names:
             raise ValueError(f"No valid audio files found in {data_dir}")
 
         os.makedirs(cache_dir, exist_ok=True)
         self.cache_index = self._load_cache_metadata()
 
         self.cache = LRUCache(cache_capacity)
+
+    def _load_stem_names(self) -> Dict[str, List[str]]:
+        stem_names = defaultdict(list)
+        for file_name in os.listdir(self.data_dir):
+            if file_name.endswith('.wav'):
+                stem_name = file_name.split('_')[0]  # Assuming file names are in format `stemname_*.wav`
+                stem_names[stem_name].append(file_name)
+        return stem_names
 
     def _load_cache_metadata(self) -> Dict[str, List[str]]:
         index_file_path = os.path.join(self.cache_dir, "cache_index.h5")
@@ -314,43 +322,40 @@ class StemSeparationDataset(Dataset):
                 logger.error(f"Error saving cache metadata file: {e}")
 
     def __len__(self) -> int:
-        return len(self.valid_stems)
+        return len(self.stem_names)
 
     def __getitem__(self, idx: int) -> Union[Dict[str, torch.Tensor], None]:
         if self.stop_flag.value == 1:
             return None
 
-        stem_name = self.valid_stems[idx]
+        stem_name = list(self.stem_names.keys())[idx]
+        file_name = self.stem_names[stem_name][0]
         try:
-            data = self._get_data(stem_name, apply_data_augmentation=False)
+            data = self._get_data(file_name, apply_data_augmentation=False)
             if data is None:
-                data = self._process_and_cache(stem_name, apply_data_augmentation=False)
+                data = self._process_and_cache(file_name, apply_data_augmentation=False)
                 if data is None:
-                    raise ValueError(f"Failed to process and cache data for {stem_name}")
+                    raise ValueError(f"Failed to process and cache data for {file_name}")
 
             if self.apply_data_augmentation:
-                augmented_data = self._get_data(stem_name, apply_data_augmentation=True)
+                augmented_data = self._get_data(file_name, apply_data_augmentation=True)
                 if augmented_data is None:
-                    augmented_data = self._process_and_cache(stem_name, apply_data_augmentation=True)
+                    augmented_data = self._process_and_cache(file_name, apply_data_augmentation=True)
                     if augmented_data is None:
-                        raise ValueError(f"Failed to process and cache augmented data for {stem_name}")
-                logger.debug(f"Augmented input shape: {augmented_data['input'].shape}")
-                logger.debug(f"Augmented target shape: {augmented_data['target'].shape}")
+                        raise ValueError(f"Failed to process and cache augmented data for {file_name}")
                 return augmented_data
 
-            logger.debug(f"Original input shape: {data['input'].shape}")
-            logger.debug(f"Original target shape: {data['target'].shape}")
             return data
 
         except Exception as e:
-            logger.error(f"Error in __getitem__ for stem {stem_name}: {e}")
+            logger.error(f"Error in __getitem__ for stem {file_name}: {e}")
             return None
 
-    def _get_cache_key(self, stem_name: str, apply_data_augmentation: bool) -> str:
-        return f"{stem_name}_{apply_data_augmentation}_{self.n_mels}_{self.target_length}_{self.n_fft}"
+    def _get_cache_key(self, file_name: str, apply_data_augmentation: bool) -> str:
+        return f"{file_name}_{apply_data_augmentation}_{self.n_mels}_{self.target_length}_{self.n_fft}"
 
-    def _get_data(self, stem_name: str, apply_data_augmentation: bool) -> Union[Dict[str, torch.Tensor], None]:
-        cache_key = self._get_cache_key(stem_name, apply_data_augmentation)
+    def _get_data(self, file_name: str, apply_data_augmentation: bool) -> Union[Dict[str, torch.Tensor], None]:
+        cache_key = self._get_cache_key(file_name, apply_data_augmentation)
         data = self.cache.get(cache_key)
         if data is not None:
             return data
@@ -365,25 +370,25 @@ class StemSeparationDataset(Dataset):
                     data = load_from_cache(stem_cache_path)
                     if self._validate_data(data):
                         if not self.suppress_reading_messages:
-                            logger.info(f"Loaded cached data for {stem_name} (augmented={apply_data_augmentation})")
+                            logger.info(f"Loaded cached data for {file_name} (augmented={apply_data_augmentation})")
                         data['input'] = data['input'].to(self.device_prep).float()
                         data['target'] = data['target'].to(self.device_prep).float()
                         self.cache.put(cache_key, data)
                         return data
                     else:
                         if not self.suppress_reading_messages:
-                            logger.warning(f"Invalid cached data for {stem_name} (augmented={apply_data_augmentation}). Reprocessing.")
+                            logger.warning(f"Invalid cached data for {file_name} (augmented={apply_data_augmentation}). Reprocessing.")
                 except Exception as e:
                     if not self.suppress_reading_messages:
-                        logger.warning(f"Error loading cached data for {stem_name} (augmented={apply_data_augmentation}). Reprocessing. Error: {e}")
+                        logger.warning(f"Error loading cached data for {file_name} (augmented={apply_data_augmentation}). Reprocessing. Error: {e}")
         return None
 
-    def _process_and_cache(self, stem_name: str, apply_data_augmentation: bool) -> Union[Dict[str, torch.Tensor], None]:
+    def _process_and_cache(self, file_name: str, apply_data_augmentation: bool) -> Union[Dict[str, torch.Tensor], None]:
         if self.stop_flag.value == 1:
             return None
 
         try:
-            file_path = os.path.join(self.data_dir, stem_name)
+            file_path = os.path.join(self.data_dir, file_name)
             mel_spectrogram = T.MelSpectrogram(
                 sample_rate=22050,
                 n_fft=self.n_fft,
@@ -396,7 +401,7 @@ class StemSeparationDataset(Dataset):
             extra_features = [calculate_harmonic_content, calculate_percussive_content]
             input_mel, target_mel = load_and_preprocess(file_path, mel_spectrogram, self.target_length, self.device_prep, cache_dir=self.cache_dir, use_cache=self.use_cache, extra_features=extra_features)
             if input_mel is None:
-                raise ValueError(f"Failed to load and preprocess data for {stem_name}")
+                raise ValueError(f"Failed to load and preprocess data for {file_name}")
 
             input_mel = input_mel.to(torch.float32)
             target_mel = target_mel.to(torch.float32)
@@ -411,20 +416,17 @@ class StemSeparationDataset(Dataset):
 
             data = {"input": input_mel, "target": target_mel}
 
-            logger.debug(f"Processed input shape: {input_mel.shape}")
-            logger.debug(f"Processed target shape: {target_mel.shape}")
-
-            self._save_individual_cache(stem_name, data, apply_data_augmentation)
-            self.cache.put(self._get_cache_key(stem_name, apply_data_augmentation), data)
+            self._save_individual_cache(file_name, data, apply_data_augmentation)
+            self.cache.put(self._get_cache_key(file_name, apply_data_augmentation), data)
             return data
 
         except Exception as e:
             if not self.suppress_reading_messages:
-                logger.error(f"Error processing stem {stem_name}: {e}")
+                logger.error(f"Error processing stem {file_name}: {e}")
             return None
 
-    def _save_individual_cache(self, stem_name: str, data: Dict[str, torch.Tensor], apply_data_augmentation: bool) -> Union[str, None]:
-        cache_key = self._get_cache_key(stem_name, apply_data_augmentation)
+    def _save_individual_cache(self, file_name: str, data: Dict[str, torch.Tensor], apply_data_augmentation: bool) -> Union[str, None]:
+        cache_key = self._get_cache_key(file_name, apply_data_augmentation)
         stem_cache_path = os.path.join(self.cache_dir, f"{cache_key}.h5")
         try:
             if not self.suppress_reading_messages:
@@ -463,31 +465,7 @@ class StemSeparationDataset(Dataset):
             return False
 
         return True
-
-    def load_all_stems(self):
-        with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
-            futures = [executor.submit(self._load_stem_data, stem_name) for stem_name in self.valid_stems]
-            for future in as_completed(futures):
-                if self.stop_flag.value == 1:
-                    break
-                future.result()
-
-    def _load_stem_data(self, stem_name: str):
-        if self.stop_flag.value == 1:
-            return None
-
-        data = self._get_data(stem_name, apply_data_augmentation=False)
-        if data is None:
-            data = self._process_and_cache(stem_name, apply_data_augmentation=False)
-
-        if self.apply_data_augmentation:
-            augmented_data = self._get_data(stem_name, apply_data_augmentation=True)
-            if augmented_data is None:
-                augmented_data = self._process_and_cache(stem_name, apply_data_augmentation=True)
-            return augmented_data
-
-        return data
-
+        
 def pad_tensor(tensor: torch.Tensor, target_length: int, target_width: int) -> torch.Tensor:
     if tensor.dim() == 2:
         current_length = tensor.size(1)
@@ -540,8 +518,7 @@ def preprocess_and_cache_dataset(
         stop_flag=stop_flag,
         use_cache=True
     )
-    dataset.load_all_stems()
-    logger.info("Dataset preprocessing and caching complete.")
+    logger.info("Dataset preprocessing and caching initialization complete.")
 
 def ensure_dir_exists(directory: str):
     if not os.path.exists(directory):

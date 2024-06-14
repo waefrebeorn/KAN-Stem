@@ -97,11 +97,8 @@ class KANWithDepthwiseConv(nn.Module):
         self.flatten = nn.Flatten()
 
         self.fc1 = nn.Linear(int(out_channels * 8 * 2 * 2 * channel_multiplier), 512)
-        self.fc2 = nn.Linear(512, n_mels * target_length * num_stems)
+        self.fc2 = nn.Linear(512, n_mels * target_length)
         nn.init.xavier_normal_(self.fc2.weight)
-
-        self.min_segment_length = max((self.conv1.kernel_size[0] - 1) * self.conv1.dilation[0] + 1, self.target_length)
-        self.segment_length = max(self.min_segment_length, self.target_length // 10)
 
     def forward_impl(self, x, suppress_reading_messages=False):
         layers = [
@@ -112,7 +109,7 @@ class KANWithDepthwiseConv(nn.Module):
         ]
         for layer in layers:
             try:
-                x = checkpoint(layer, x)
+                x = checkpoint(layer, x, use_reentrant=True)
             except Exception as e:
                 logger.error(f"Error in layer {layer.__class__.__name__}: {e}")
                 raise
@@ -124,6 +121,10 @@ class KANWithDepthwiseConv(nn.Module):
     def forward(self, x, suppress_reading_messages=True, initialize=False):
         if not suppress_reading_messages:
             logger.info(f"Input shape: {x.shape}")
+
+        # Input Validation
+        if x.dim() not in [2, 3]:
+            raise ValueError(f"Expected input tensor to have 2 or 3 dimensions, got {x.dim()}")
 
         x = x.to(self.device)
 
@@ -139,9 +140,9 @@ class KANWithDepthwiseConv(nn.Module):
             x = self.forward_impl(x, suppress_reading_messages)
             return x
 
-        if x.shape[-1] > self.min_segment_length:
-            num_segments = (x.shape[-1] + self.segment_length - 1) // self.segment_length
-            segments = [x[:, :, :, i*self.segment_length:(i+1)*self.segment_length] for i in range(num_segments)]
+        if x.shape[-1] > self.n_mels * self.target_length:
+            num_segments = (x.shape[-1] + self.n_mels * self.target_length - 1) // (self.n_mels * self.target_length)
+            segments = [x[:, :, :, i * self.n_mels * self.target_length:(i + 1) * self.n_mels * self.target_length] for i in range(num_segments)]
         else:
             segments = [x]
 
@@ -151,16 +152,16 @@ class KANWithDepthwiseConv(nn.Module):
         outputs = []
         for i, segment in enumerate(segments):
             if not suppress_reading_messages:
-                logger.info(f"Shape of segment {i+1} before processing: {segment.shape}")
-            
+                logger.info(f"Shape of segment {i + 1} before processing: {segment.shape}")
+
             if segment.numel() == 0:
-                logger.error(f"Segment {i+1} is empty and cannot be processed.")
+                logger.error(f"Segment {i + 1} is empty and cannot be processed.")
                 continue
             try:
                 segment_output = self.forward_impl(segment, suppress_reading_messages)
                 outputs.append(segment_output)
             except Exception as e:
-                logger.error(f"Error processing segment {i+1}: {e}")
+                logger.error(f"Error processing segment {i + 1}: {e}")
                 raise
 
         if not outputs:
@@ -169,15 +170,16 @@ class KANWithDepthwiseConv(nn.Module):
 
         x = torch.cat(outputs, dim=0)
 
-        x = x.view(-1, self.n_mels, self.target_length).unsqueeze(1)
-        logger.info(f"Shape of x after concatenation: {x.shape}")
-
-        x = F.relu(self.fc1(x))
-        x = self.fc2(x)
-        x = torch.tanh(x)
-
-        x = x.view(-1, self.num_stems, self.n_mels, self.target_length)
-        logger.info(f"Shape of final output: {x.shape}")
+        # Adjust the shape here based on actual output
+        try:
+            output_shape = (-1, 1, self.n_mels, self.target_length)
+            x = x.view(*output_shape)
+            logger.info(f"Shape of final output: {x.shape}")
+        except RuntimeError as e:
+            logger.error(f"Error reshaping tensor: {e}")
+            logger.error(f"Input shape: {x.shape}")
+            logger.error(f"Expected shape: {output_shape}")
+            raise e
 
         return x
 

@@ -5,7 +5,7 @@ from torch.utils.data import DataLoader, Dataset
 from torch.cuda.amp import autocast, GradScaler
 from torch.utils.tensorboard import SummaryWriter
 import torch.nn.functional as F
-import torch.nn as nn 
+import torch.nn as nn
 from datetime import datetime
 import logging
 from torchvision import models
@@ -25,12 +25,12 @@ from typing import Any, List
 logger = logging.getLogger(__name__)
 
 def train_single_stem(
-    stem: int, dataset: Dataset, val_dir: str, training_params: dict, model_params: dict,
+    stem_name: str, dataset: Dataset, val_dataset: Dataset, training_params: dict, model_params: dict,
     sample_rate: int, n_mels: int, n_fft: int, target_length: int, stop_flag: Any,
     suppress_reading_messages: bool = False
 ):
-    logger.info("Starting training for single stem: %s", stem)
-    writer = SummaryWriter(log_dir=os.path.join(training_params['checkpoint_dir'], 'runs', f'stem_{stem}_{datetime.now().strftime("%Y%m%d-%H%M%S")}')) if model_params['tensorboard_flag'] else None
+    logger.info("Starting training for single stem: %s", stem_name)
+    writer = SummaryWriter(log_dir=os.path.join(training_params['checkpoint_dir'], 'runs', f'stem_{stem_name}_{datetime.now().strftime("%Y%m%d-%H%M%S")}')) if model_params['tensorboard_flag'] else None
 
     model, discriminator, optimizer_g, optimizer_d = create_model_and_optimizer(
         training_params['device_str'], n_mels, target_length,
@@ -80,7 +80,7 @@ def train_single_stem(
             if data is None:
                 continue
 
-            logger.debug(f"Processing batch {i+1}/{len(train_loader)}")
+            logger.debug(f"Processing batch {i+1}/{len(dataset)}")
 
             inputs, targets = data['input'].to(training_params['device_str']).float(), data['target'].to(training_params['device_str']).float()
             input_segments = inputs.chunk(training_params.get('segments_per_track', 1), dim=-1)
@@ -137,16 +137,16 @@ def train_single_stem(
                         scaler.update()
                         optimizer_d.zero_grad(set_to_none=True)
 
-            if (i + 1) % accumulation_steps == 0 or (i + 1) == len(train_loader):
+            if (i + 1) % accumulation_steps == 0 or (i + 1) == len(dataset):
                 torch.nn.utils.clip_grad_norm_(model.parameters(), model_params['clip_value'])
                 scaler.step(optimizer_g)
                 scaler.update()
                 optimizer_g.zero_grad(set_to_none=True)
 
-                logger.info(f"Epoch [{epoch+1}/{training_params['num_epochs']}], Step [{i+1}/{len(train_loader)}], Loss G: {running_loss_g:.4f}, Loss D: {running_loss_d:.4f}")
+                logger.info(f"Epoch [{epoch+1}/{training_params['num_epochs']}], Step [{i+1}/{len(dataset)}], Loss G: {running_loss_g:.4f}, Loss D: {running_loss_d:.4f}")
                 if model_params['tensorboard_flag']:
-                    writer.add_scalar('Loss/Generator', running_loss_g, epoch * len(train_loader) + i)
-                    writer.add_scalar('Loss/Discriminator', running_loss_d, epoch * len(train_loader) + i)
+                    writer.add_scalar('Loss/Generator', running_loss_g, epoch * len(dataset) + i)
+                    writer.add_scalar('Loss/Discriminator', running_loss_d, epoch * len(dataset) + i)
 
                 if isinstance(scheduler_g, CyclicLR):
                     scheduler_g.step()
@@ -155,8 +155,8 @@ def train_single_stem(
             torch.cuda.empty_cache()
 
         if isinstance(scheduler_g, ReduceLROnPlateau):
-            scheduler_g.step(running_loss_g / len(train_loader))
-            scheduler_d.step(running_loss_d / len(train_loader))
+            scheduler_g.step(running_loss_g / len(dataset))
+            scheduler_d.step(running_loss_d / len(dataset))
 
         model.eval()
         val_loss = 0.0
@@ -173,7 +173,7 @@ def train_single_stem(
                     if data is None:
                         continue
 
-                    logger.debug(f"Validating batch {i+1}/{len(val_loader)}")
+                    logger.debug(f"Validating batch {i+1}/{len(val_dataset)}")
 
                     inputs, targets = data['input'].to(training_params['device_str']).float(), data['target'].to(training_params['device_str']).float()
                     outputs = model(inputs)
@@ -199,7 +199,7 @@ def train_single_stem(
                     num_sir_samples += torch.isfinite(sir).sum().item()
                     num_sar_samples += torch.isfinite(sar).sum().item()
 
-                val_loss /= len(val_loader)
+                val_loss /= len(val_dataset)
                 sdr_avg = sdr_total / max(num_sdr_samples, 1)
                 sir_avg = sir_total / max(num_sir_samples, 1)
                 sar_avg = sar_total / max(num_sar_samples, 1)
@@ -224,15 +224,15 @@ def train_single_stem(
                 logger.error(f"Error during validation step: {e}", exc_info=True)
 
         if (epoch + 1) % training_params['save_interval'] == 0:
-            checkpoint_path = os.path.join(training_params['checkpoint_dir'], f'checkpoint_stem_{stem}_epoch_{epoch+1}.pt')
+            checkpoint_path = os.path.join(training_params['checkpoint_dir'], f'checkpoint_stem_{stem_name}_epoch_{epoch+1}.pt')
             torch.save(model.state_dict(), checkpoint_path)
             logger.info(f'Saved checkpoint: {checkpoint_path}')
 
         monitor_memory_usage()
 
-    final_model_path = f"{training_params['checkpoint_dir']}/model_final_stem_{stem}.pt"
+    final_model_path = f"{training_params['checkpoint_dir']}/model_final_stem_{stem_name}.pt"
     torch.save(model.state_dict(), final_model_path)
-    logger.info(f"Training completed for stem {stem}. Final model saved at {final_model_path}")
+    logger.info(f"Training completed for stem {stem_name}. Final model saved at {final_model_path}")
 
     if model_params['tensorboard_flag']:
         writer.close()
@@ -305,15 +305,20 @@ def start_training(
             suppress_warnings=training_params['suppress_warnings'], suppress_reading_messages=training_params['suppress_reading_messages'],
             num_workers=training_params['num_workers'], device_prep=device, stop_flag=stop_flag, use_cache=use_cache
         )
+        val_dataset = StemSeparationDataset(
+            val_dir, n_mels, target_length, n_fft, training_params['cache_dir'], apply_data_augmentation=False,
+            suppress_warnings=training_params['suppress_warnings'], suppress_reading_messages=training_params['suppress_reading_messages'],
+            num_workers=training_params['num_workers'], device_prep=device, stop_flag=stop_flag, use_cache=use_cache
+        )
     else:
         raise ValueError("use_cache must be True for this code.")
 
-    for stem in range(num_stems):
+    for stem_name in dataset.stem_names.keys():
         if stop_flag.value == 1:
             logger.info("Training stopped.")
             return
 
-        train_single_stem(stem, dataset, val_dir, training_params, model_params, sample_rate, n_mels, n_fft, target_length, stop_flag)
+        train_single_stem(stem_name, dataset, val_dataset, training_params, model_params, sample_rate, n_mels, n_fft, target_length, stop_flag)
 
     logger.info("Training finished.")
 
