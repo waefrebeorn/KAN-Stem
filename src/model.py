@@ -124,7 +124,7 @@ class KANWithDepthwiseConv(nn.Module):
 
         # Input Validation
         if x.dim() not in [2, 3, 4]:
-            raise ValueError(f"Expected input tensor to have 2, 3 or 4 dimensions, got {x.dim()}")
+            raise ValueError(f"Expected input tensor to have 2, 3, or 4 dimensions, got {x.dim()}")
 
         x = x.to(self.device)
 

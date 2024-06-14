@@ -577,8 +577,10 @@ def load_and_preprocess(
         logger.error(f"Error reading file {file_path}: {e}")
         return None, None  
 
-    data = librosa.resample(data, orig_sr=sample_rate, target_sr=mel_spectrogram.sample_rate) if sample_rate != mel_spectrogram.sample_rate else data
-    input_mel = mel_spectrogram(torch.tensor(data).to(device).float())
+    if sample_rate != mel_spectrogram.sample_rate:
+        data = librosa.resample(data, orig_sr=sample_rate, target_sr=mel_spectrogram.sample_rate)
+
+    input_mel = mel_spectrogram(torch.tensor(data).to(device).float()).unsqueeze(0)
 
     if input_mel.shape[-1] < target_length:
         input_mel = F.pad(input_mel, (0, target_length - input_mel.shape[-1]))
@@ -587,10 +589,8 @@ def load_and_preprocess(
 
     logger.info(f"Input data shape after padding: {input_mel.shape}")
 
-    target_data = input_mel.clone()
-
+    features = []
     if extra_features:
-        features = []
         for feature in extra_features:
             feature_data = feature(data, sample_rate, mel_spectrogram.n_mels, target_length).to(device)
             logger.info(f"Feature {feature.__name__} shape before padding: {feature_data.shape}")
@@ -599,14 +599,14 @@ def load_and_preprocess(
                 feature_data = F.pad(feature_data, (0, target_length - feature_data.shape[-1]))
 
             feature_data = feature_data.unsqueeze(0) if feature_data.dim() == 2 else feature_data
+            features.append(feature_data)
 
-            logger.info(f"Feature {feature.__name__} shape after padding: {feature_data.shape}")
-            target_data = torch.cat([target_data, feature_data], dim=1)
+    if features:
+        input_mel = torch.cat([input_mel] + features, dim=1)
 
-    logger.info(f"Target data shape before unsqueeze: {target_data.shape}")
-    target_data = target_data.unsqueeze(0)
+    logger.info(f"Input data shape after concatenation: {input_mel.shape}")
 
-    logger.info(f"Target data shape after concatenation: {target_data.shape}")
+    target_data = input_mel.clone()
 
     if use_cache and cache_file_path:
         with h5py.File(cache_file_path, 'w') as f:
@@ -615,7 +615,7 @@ def load_and_preprocess(
         logger.info(f"Saved to cache: {cache_file_path}, input shape: {input_mel.shape}, target shape: {target_data.shape}")
 
     return input_mel, target_data
-
+    
 def monitor_memory_usage():
     try:
         memory_info = psutil.virtual_memory()
