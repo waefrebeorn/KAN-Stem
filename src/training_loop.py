@@ -1,10 +1,11 @@
 import os
 import torch
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from torch.cuda.amp import autocast, GradScaler
 from torch.utils.tensorboard import SummaryWriter
 import torch.nn.functional as F
+import torch.nn as nn 
 from datetime import datetime
 import logging
 from torchvision import models
@@ -14,15 +15,20 @@ from utils import (
     compute_sdr, compute_sir, compute_sar, convert_to_3_channels,
     gradient_penalty, PerceptualLoss, detect_parameters, preprocess_and_cache_dataset,
     StemSeparationDataset, collate_fn, log_training_parameters, ensure_dir_exists,
-    get_optimizer, warm_up_cache, monitor_memory_usage
+    get_optimizer, warm_up_cache_batch, monitor_memory_usage, dynamic_batching
 )
 from model_setup import create_model_and_optimizer
 import gc
 import numpy as np
+from typing import Any, List
 
 logger = logging.getLogger(__name__)
 
-def train_single_stem(stem, dataset, val_dir, training_params, model_params, sample_rate, n_mels, n_fft, target_length, stop_flag, suppress_reading_messages=False):
+def train_single_stem(
+    stem: int, dataset: Dataset, val_dir: str, training_params: dict, model_params: dict,
+    sample_rate: int, n_mels: int, n_fft: int, target_length: int, stop_flag: Any,
+    suppress_reading_messages: bool = False
+):
     logger.info("Starting training for single stem: %s", stem)
     writer = SummaryWriter(log_dir=os.path.join(training_params['checkpoint_dir'], 'runs', f'stem_{stem}_{datetime.now().strftime("%Y%m%d-%H%M%S")}')) if model_params['tensorboard_flag'] else None
 
@@ -35,32 +41,6 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
     feature_extractor = models.vgg16(weights=VGG16_Weights.IMAGENET1K_V1).features.to(training_params['device_str']).eval()
     for param in feature_extractor.parameters():
         param.requires_grad = False
-
-    prep_device = training_params['device_str']  # Use GPU for preprocessing
-
-    train_loader = DataLoader(
-        dataset,
-        batch_size=training_params['batch_size'],
-        shuffle=True,
-        pin_memory=True,
-        num_workers=training_params['num_workers'],
-        collate_fn=collate_fn
-    )
-
-    val_dataset = StemSeparationDataset(
-        val_dir, n_mels, target_length, n_fft, training_params['cache_dir'], apply_data_augmentation=False,
-        suppress_warnings=training_params['suppress_warnings'], suppress_reading_messages=training_params['suppress_reading_messages'],
-        num_workers=training_params['num_workers'], device_prep=prep_device, stop_flag=stop_flag, use_cache=training_params['use_cache']
-    )
-
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=training_params['batch_size'],
-        shuffle=False,
-        pin_memory=True,
-        num_workers=training_params['num_workers'],
-        collate_fn=collate_fn
-    )
 
     def choose_scheduler(optimizer, optimizer_name):
         if optimizer_name in ['SGD', 'Momentum', 'RMSprop']:
@@ -76,12 +56,7 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
     best_val_loss = float('inf')
 
     perceptual_loss_frequency = 5  # Calculate perceptual loss every 5 mini-batches
-
     accumulation_steps = training_params['accumulation_steps']
-    
-    # Cache warming: only warm up a subset of the dataset to conserve VRAM
-    warm_up_cache_batch(dataset, list(range(0, min(training_params['batch_size'] * 10, len(dataset)))))
-    warm_up_cache_batch(val_dataset, list(range(0, min(training_params['batch_size'] * 10, len(val_dataset)))))
 
     for epoch in range(training_params['num_epochs']):
         if stop_flag.value == 1:
@@ -93,12 +68,11 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
         discriminator.train()
         running_loss_g = 0.0
         running_loss_d = 0.0
-        
-        # Initialize the gradient accumulators
+
         optimizer_g.zero_grad(set_to_none=True)
         optimizer_d.zero_grad(set_to_none=True)
 
-        for i, data in enumerate(train_loader):
+        for i, data in enumerate(dynamic_batching(dataset, training_params['batch_size'])):
             if stop_flag.value == 1:
                 logger.info("Training stopped.")
                 return
@@ -109,8 +83,6 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
             logger.debug(f"Processing batch {i+1}/{len(train_loader)}")
 
             inputs, targets = data['input'].to(training_params['device_str']).float(), data['target'].to(training_params['device_str']).float()
-            
-            # Split inputs and targets into segments along the time axis
             input_segments = inputs.chunk(training_params.get('segments_per_track', 1), dim=-1)
             target_segments = targets.chunk(training_params.get('segments_per_track', 1), dim=-1)
 
@@ -137,7 +109,6 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
                         torch.cuda.empty_cache()
 
                     running_loss_g += loss_g.item() / accumulation_steps
-
                     scaler.scale(loss_g).backward(retain_graph=True)
 
                     if (i + 1) % training_params['discriminator_update_interval'] == 0:
@@ -160,7 +131,6 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
                         loss_d = (loss_d_real + loss_d_fake) / 2 + gp
 
                         running_loss_d += loss_d.item() / accumulation_steps
-
                         scaler.scale(loss_d).backward()
                         torch.nn.utils.clip_grad_norm_(discriminator.parameters(), model_params['clip_value'])
                         scaler.step(optimizer_d)
@@ -182,6 +152,8 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
                     scheduler_g.step()
                     scheduler_d.step()
 
+            torch.cuda.empty_cache()
+
         if isinstance(scheduler_g, ReduceLROnPlateau):
             scheduler_g.step(running_loss_g / len(train_loader))
             scheduler_d.step(running_loss_d / len(train_loader))
@@ -193,7 +165,7 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
 
         with torch.no_grad():
             try:
-                for i, data in enumerate(val_loader):
+                for i, data in enumerate(dynamic_batching(val_dataset, training_params['batch_size'])):
                     if stop_flag.value == 1:
                         logger.info("Training stopped.")
                         return
@@ -204,7 +176,6 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
                     logger.debug(f"Validating batch {i+1}/{len(val_loader)}")
 
                     inputs, targets = data['input'].to(training_params['device_str']).float(), data['target'].to(training_params['device_str']).float()
-
                     outputs = model(inputs)
 
                     if outputs is None:
@@ -266,23 +237,17 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
     if model_params['tensorboard_flag']:
         writer.close()
 
-def warm_up_cache(dataset, batch_size, num_workers):
-    """Warm up the cache by loading a subset of stems into memory using multiple workers."""
-    with ThreadPoolExecutor(max_workers=num_workers) as executor:
-        futures = []
-        for idx in range(0, len(dataset), batch_size):
-            batch_indices = list(range(idx, min(idx + batch_size, len(dataset))))
-            futures.append(executor.submit(warm_up_cache_batch, dataset, batch_indices))
-
-        for future in as_completed(futures):
-            future.result()
-    logger.info("Cache warming complete.")
-
-def warm_up_cache_batch(dataset, batch_indices):
-    for idx in batch_indices:
-        _ = dataset[idx] 
-
-def start_training(data_dir, val_dir, batch_size, num_epochs, initial_lr_g, initial_lr_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages, discriminator_update_interval, label_smoothing_real, label_smoothing_fake, suppress_detailed_logs, stop_flag, use_cache, channel_multiplier, segments_per_track=10):
+def start_training(
+    data_dir: str, val_dir: str, batch_size: int, num_epochs: int, initial_lr_g: float, initial_lr_d: float, 
+    use_cuda: bool, checkpoint_dir: str, save_interval: int, accumulation_steps: int, num_stems: int, 
+    num_workers: int, cache_dir: str, loss_function_g: nn.Module, loss_function_d: nn.Module, 
+    optimizer_name_g: str, optimizer_name_d: str, perceptual_loss_flag: bool, perceptual_loss_weight: float, 
+    clip_value: float, scheduler_step_size: int, scheduler_gamma: float, tensorboard_flag: bool, 
+    apply_data_augmentation: bool, add_noise: bool, noise_amount: float, early_stopping_patience: int, 
+    disable_early_stopping: bool, weight_decay: float, suppress_warnings: bool, suppress_reading_messages: bool, 
+    discriminator_update_interval: int, label_smoothing_real: float, label_smoothing_fake: float, 
+    suppress_detailed_logs: bool, stop_flag: Any, use_cache: bool, channel_multiplier: float, segments_per_track: int = 10
+):
     device = torch.device('cuda' if use_cuda and torch.cuda.is_available() else 'cpu')
     training_params = {
         'device_str': str(device),
@@ -311,7 +276,7 @@ def start_training(data_dir, val_dir, batch_size, num_epochs, initial_lr_g, init
         'label_smoothing_fake': label_smoothing_fake,
         'suppress_detailed_logs': suppress_detailed_logs,
         'segments_per_track': segments_per_track,
-        'use_cache': use_cache  # Added this line to include the use_cache parameter
+        'use_cache': use_cache
     }
     model_params = {
         'optimizer_name_g': optimizer_name_g,
@@ -397,4 +362,3 @@ if __name__ == '__main__':
         channel_multiplier=0.5,
         segments_per_track=10  # Adjust this value as needed
     )
-

@@ -8,23 +8,23 @@ import psutil
 import GPUtil
 import time
 import torch.nn as nn
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
 import torchaudio.transforms as T
 import h5py
 import numpy as np
 import librosa
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from mir_eval.separation import bss_eval_sources
+from typing import List, Dict, Tuple, Any, Union, Callable
 
 logger = logging.getLogger(__name__)
 
-def setup_logger(name):
+def setup_logger(name: str) -> logging.Logger:
     logger = logging.getLogger(name)
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     return logger
 
-def detect_parameters(data_dir, default_n_mels=64, default_n_fft=1024):
+def detect_parameters(data_dir: str, default_n_mels: int = 64, default_n_fft: int = 1024) -> Tuple[int, int, int]:
     sample_rates = []
     durations = []
 
@@ -51,7 +51,7 @@ def detect_parameters(data_dir, default_n_mels=64, default_n_fft=1024):
 
     return int(avg_sample_rate), n_mels, n_fft
 
-def analyze_audio(file_path):
+def analyze_audio(file_path: str) -> Tuple[int, float, bool]:
     try:
         data, sample_rate = sf.read(file_path)
         duration = len(data) / sample_rate
@@ -61,16 +61,16 @@ def analyze_audio(file_path):
         logger.error(f"Error analyzing audio file {file_path}: {e}")
         return None, None, True
 
-def convert_to_3_channels(tensor):
+def convert_to_3_channels(tensor: torch.Tensor) -> torch.Tensor:
     """Convert a single-channel tensor to a 3-channel tensor by repeating the single channel."""
     return tensor.repeat(1, 3, 1, 1)
 
 class MultiScaleSpectralLoss(nn.Module):
-    def __init__(self, n_ffts=[2048, 1024, 512, 256, 128]):
+    def __init__(self, n_ffts: List[int] = [2048, 1024, 512, 256, 128]):
         super(MultiScaleSpectralLoss, self).__init__()
         self.n_ffts = n_ffts
 
-    def forward(self, y_true, y_pred):
+    def forward(self, y_true: torch.Tensor, y_pred: torch.Tensor) -> torch.Tensor:
         loss = 0.0
         for n_fft in self.n_ffts:
             y_true_stft = torch.stft(y_true, n_fft=n_fft, hop_length=n_fft//2, win_length=n_fft, return_complex=True)
@@ -79,12 +79,12 @@ class MultiScaleSpectralLoss(nn.Module):
         return loss
 
 class PerceptualLoss(nn.Module):
-    def __init__(self, feature_extractor, layer_weights=None):
+    def __init__(self, feature_extractor: nn.Module, layer_weights: List[float] = None):
         super(PerceptualLoss, self).__init__()
         self.feature_extractor = feature_extractor
         self.layer_weights = layer_weights if layer_weights is not None else [1.0] * len(self.feature_extractor)
 
-    def forward(self, y_true, y_pred):
+    def forward(self, y_true: torch.Tensor, y_pred: torch.Tensor) -> torch.Tensor:
         loss = 0.0
         features_true = self.feature_extractor(y_true)
         features_pred = self.feature_extractor(y_pred)
@@ -92,7 +92,7 @@ class PerceptualLoss(nn.Module):
             loss += weight * F.l1_loss(feature_true, feature_pred)
         return loss
 
-def compute_adversarial_loss(discriminator, y_true, y_pred, device):
+def compute_adversarial_loss(discriminator: nn.Module, y_true: torch.Tensor, y_pred: torch.Tensor, device: torch.device) -> Tuple[torch.Tensor, torch.Tensor]:
     y_true = y_true.unsqueeze(1) if y_true.dim() == 3 else y_true
     y_pred = y_pred.unsqueeze(1) if y_pred.dim() == 3 else y_pred
     real_labels = torch.ones(y_true.size(0), 1, device=device)
@@ -101,7 +101,7 @@ def compute_adversarial_loss(discriminator, y_true, y_pred, device):
     fake_loss = F.binary_cross_entropy_with_logits(discriminator(y_pred), fake_labels)
     return real_loss, fake_loss
 
-def gradient_penalty(discriminator, real_data, fake_data, device, lambda_gp=10):
+def gradient_penalty(discriminator: nn.Module, real_data: torch.Tensor, fake_data: torch.Tensor, device: torch.device, lambda_gp: float = 10) -> torch.Tensor:
     batch_size = real_data.size(0)
     alpha = torch.rand(batch_size, 1, 1, 1).to(device)
     interpolated = alpha * real_data + ((1 - alpha) * fake_data)
@@ -135,7 +135,7 @@ def log_system_resources():
     except Exception as e:
         logger.error(f"Error logging system resources: {e}")
 
-def process_file(file_path, mel_spectrogram, target_length, apply_data_augmentation, device, queue):
+def process_file(file_path: str, mel_spectrogram: T.MelSpectrogram, target_length: int, apply_data_augmentation: bool, device: torch.device, queue: Any):
     try:
         logger.info(f"Processing file: {file_path}")
         log_system_resources()
@@ -150,10 +150,13 @@ def process_file(file_path, mel_spectrogram, target_length, apply_data_augmentat
 
         queue.put(file_path)
 
+        # Clear CUDA cache after processing each file
+        torch.cuda.empty_cache()
+
     except Exception as e:
         logger.error(f"Failed to process {file_path}: {e}")
 
-def worker_loop(file_paths, mel_spectrogram_params, target_length, apply_data_augmentation, queue):
+def worker_loop(file_paths: List[str], mel_spectrogram_params: Dict[str, Any], target_length: int, apply_data_augmentation: bool, queue: Any):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     mel_spectrogram = T.MelSpectrogram(**mel_spectrogram_params).to(device).float()
 
@@ -170,20 +173,17 @@ def worker_loop(file_paths, mel_spectrogram_params, target_length, apply_data_au
     except Exception as e:
         logger.error(f"Error in worker loop: {e}")
 
-def calculate_metrics(y_true, y_pred):
+def calculate_metrics(y_true: torch.Tensor, y_pred: torch.Tensor) -> Dict[str, float]:
     """Calculate evaluation metrics for audio prediction."""
     try:
         mse = F.mse_loss(y_pred, y_true).item()
         snr = 10 * torch.log10(torch.mean(y_true ** 2) / torch.mean((y_true - y_pred) ** 2)).item()
-        sdr = compute_sdr(y_true, y_pred)
-        sir = compute_sir(y_true, y_pred)
-        sar = compute_sar(y_true, y_pred)
-        return {'mse': mse, 'snr': snr, 'sdr': sdr, 'sir': sir, 'sar': sar}
+        return {'mse': mse, 'snr': snr}
     except Exception as e:
         logger.error(f"Error calculating metrics: {e}", exc_info=True)
         raise e
 
-def get_checkpoints(checkpoints_dir):
+def get_checkpoints(checkpoints_dir: str) -> List[str]:
     """Retrieve all checkpoint files in the specified directory."""
     try:
         checkpoints = [os.path.join(checkpoints_dir, f) for f in os.listdir(checkpoints_dir) if f.endswith('.ckpt')]
@@ -193,25 +193,34 @@ def get_checkpoints(checkpoints_dir):
         logger.error(f"Error retrieving checkpoints: {e}")
         return []
 
-def compute_sdr(true, pred):
-    sdr, _, _, _ = bss_eval_sources(true.cpu().numpy(), pred.cpu().numpy())
-    return np.mean(sdr)
+def compute_sdr(true: torch.Tensor, pred: torch.Tensor) -> torch.Tensor:
+    noise = true - pred
+    s_true = torch.sum(true ** 2, dim=[1, 2, 3])
+    s_noise = torch.sum(noise ** 2, dim=[1, 2, 3])
+    sdr = 10 * torch.log10(s_true / (s_noise + 1e-8))
+    return sdr
 
-def compute_sir(true, pred):
-    _, sir, _, _ = bss_eval_sources(true.cpu().numpy(), pred.cpu().numpy())
-    return np.mean(sir)
+def compute_sir(true: torch.Tensor, pred: torch.Tensor) -> torch.Tensor:
+    noise = true - pred
+    s_true = torch.sum(true ** 2, dim=[1, 2, 3])
+    s_interf = torch.sum((true - noise) ** 2, dim=[1, 2, 3])
+    sir = 10 * torch.log10(s_true / (s_interf + 1e-8))
+    return sir
 
-def compute_sar(true, pred):
-    _, _, sar, _ = bss_eval_sources(true.cpu().numpy(), pred.cpu().numpy())
-    return np.mean(sar)
+def compute_sar(true: torch.Tensor, pred: torch.Tensor) -> torch.Tensor:
+    noise = true - pred
+    s_noise = torch.sum(noise ** 2, dim=[1, 2, 3])
+    s_artif = torch.sum((pred - noise) ** 2, dim=[1, 2, 3])
+    sar = 10 * torch.log10(s_noise / (s_artif + 1e-8))
+    return sar
 
-def log_training_parameters(params):
+def log_training_parameters(params: Dict[str, Any]):
     """Logs the training parameters."""
     logger.info("Training Parameters Selected:")
     for key, value in params.items():
         logger.info(f"{key}: {value}")
 
-def get_optimizer(optimizer_name, model_parameters, learning_rate, weight_decay):
+def get_optimizer(optimizer_name: str, model_parameters: Any, learning_rate: float, weight_decay: float) -> optim.Optimizer:
     if optimizer_name == "SGD":
         return optim.SGD(model_parameters, lr=learning_rate, weight_decay=weight_decay)
     elif optimizer_name == "Momentum":
@@ -227,7 +236,7 @@ def get_optimizer(optimizer_name, model_parameters, learning_rate, weight_decay)
     else:
         raise ValueError(f"Unknown optimizer: {optimizer_name}")
 
-def wasserstein_loss(real_output, fake_output):
+def wasserstein_loss(real_output: torch.Tensor, fake_output: torch.Tensor) -> torch.Tensor:
     return torch.mean(fake_output) - torch.mean(real_output)
 
 class LRUCache:
@@ -241,14 +250,18 @@ class LRUCache:
         self.cache.move_to_end(key)
         return self.cache[key]
 
-    def put(self, key: str, value):
+    def put(self, key: str, value: Any):
         self.cache[key] = value
         self.cache.move_to_end(key)
         if len(self.cache) > self.capacity:
             self.cache.popitem(last=False)
 
 class StemSeparationDataset(Dataset):
-    def __init__(self, data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation, suppress_warnings, suppress_reading_messages, num_workers, device_prep, stop_flag, cache_capacity=100, use_cache=True):
+    def __init__(
+        self, data_dir: str, n_mels: int, target_length: int, n_fft: int, cache_dir: str, apply_data_augmentation: bool,
+        suppress_warnings: bool, suppress_reading_messages: bool, num_workers: int, device_prep: torch.device, stop_flag: Any,
+        use_cache: bool = True, cache_capacity: int = 100
+    ):
         self.data_dir = data_dir
         self.n_mels = n_mels
         self.target_length = target_length
@@ -261,7 +274,6 @@ class StemSeparationDataset(Dataset):
         self.device_prep = device_prep
         self.stop_flag = stop_flag
         self.use_cache = use_cache
-        self.cache = LRUCache(cache_capacity)
 
         self.valid_stems = [f for f in os.listdir(data_dir) if f.endswith('.wav')]
         if not self.valid_stems:
@@ -270,7 +282,9 @@ class StemSeparationDataset(Dataset):
         os.makedirs(cache_dir, exist_ok=True)
         self.cache_index = self._load_cache_metadata()
 
-    def _load_cache_metadata(self):
+        self.cache = LRUCache(cache_capacity)
+
+    def _load_cache_metadata(self) -> Dict[str, List[str]]:
         index_file_path = os.path.join(self.cache_dir, "cache_index.h5")
         cache_index = defaultdict(list)
         if os.path.exists(index_file_path):
@@ -299,41 +313,27 @@ class StemSeparationDataset(Dataset):
             if not self.suppress_reading_messages:
                 logger.error(f"Error saving cache metadata file: {e}")
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.valid_stems)
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> Union[Dict[str, torch.Tensor], None]:
         if self.stop_flag.value == 1:
             return None
 
         stem_name = self.valid_stems[idx]
         try:
-            cache_key = self._get_cache_key(stem_name, apply_data_augmentation=False)
-            data = self.cache.get(cache_key)
+            data = self._get_data(stem_name, apply_data_augmentation=False)
             if data is None:
-                data = self._get_data(stem_name, apply_data_augmentation=False)
+                data = self._process_and_cache(stem_name, apply_data_augmentation=False)
                 if data is None:
-                    data = self._process_and_cache(stem_name, apply_data_augmentation=False)
-                    if data is not None:
-                        self.cache.put(cache_key, data)
-                else:
-                    self.cache.put(cache_key, data)
-
-            if data is None:
-                raise ValueError(f"Failed to process and cache data for {stem_name}")
+                    raise ValueError(f"Failed to process and cache data for {stem_name}")
 
             if self.apply_data_augmentation:
-                augmented_cache_key = self._get_cache_key(stem_name, apply_data_augmentation=True)
-                augmented_data = self.cache.get(augmented_cache_key)
+                augmented_data = self._get_data(stem_name, apply_data_augmentation=True)
                 if augmented_data is None:
-                    augmented_data = self._get_data(stem_name, apply_data_augmentation=True)
+                    augmented_data = self._process_and_cache(stem_name, apply_data_augmentation=True)
                     if augmented_data is None:
-                        augmented_data = self._process_and_cache(stem_name, apply_data_augmentation=True)
-                        if augmented_data is not None:
-                            self.cache.put(augmented_cache_key, augmented_data)
-                    else:
-                        self.cache.put(augmented_cache_key, augmented_data)
-
+                        raise ValueError(f"Failed to process and cache augmented data for {stem_name}")
                 logger.debug(f"Augmented input shape: {augmented_data['input'].shape}")
                 logger.debug(f"Augmented target shape: {augmented_data['target'].shape}")
                 return augmented_data
@@ -346,11 +346,15 @@ class StemSeparationDataset(Dataset):
             logger.error(f"Error in __getitem__ for stem {stem_name}: {e}")
             return None
 
-    def _get_cache_key(self, stem_name, apply_data_augmentation):
+    def _get_cache_key(self, stem_name: str, apply_data_augmentation: bool) -> str:
         return f"{stem_name}_{apply_data_augmentation}_{self.n_mels}_{self.target_length}_{self.n_fft}"
 
-    def _get_data(self, stem_name, apply_data_augmentation):
+    def _get_data(self, stem_name: str, apply_data_augmentation: bool) -> Union[Dict[str, torch.Tensor], None]:
         cache_key = self._get_cache_key(stem_name, apply_data_augmentation)
+        data = self.cache.get(cache_key)
+        if data is not None:
+            return data
+
         if self.use_cache and cache_key in self.cache_index:
             stem_cache_path = self.cache_index[cache_key]
             if isinstance(stem_cache_path, list):
@@ -364,6 +368,7 @@ class StemSeparationDataset(Dataset):
                             logger.info(f"Loaded cached data for {stem_name} (augmented={apply_data_augmentation})")
                         data['input'] = data['input'].to(self.device_prep).float()
                         data['target'] = data['target'].to(self.device_prep).float()
+                        self.cache.put(cache_key, data)
                         return data
                     else:
                         if not self.suppress_reading_messages:
@@ -373,7 +378,7 @@ class StemSeparationDataset(Dataset):
                         logger.warning(f"Error loading cached data for {stem_name} (augmented={apply_data_augmentation}). Reprocessing. Error: {e}")
         return None
 
-    def _process_and_cache(self, stem_name, apply_data_augmentation):
+    def _process_and_cache(self, stem_name: str, apply_data_augmentation: bool) -> Union[Dict[str, torch.Tensor], None]:
         if self.stop_flag.value == 1:
             return None
 
@@ -410,6 +415,7 @@ class StemSeparationDataset(Dataset):
             logger.debug(f"Processed target shape: {target_mel.shape}")
 
             self._save_individual_cache(stem_name, data, apply_data_augmentation)
+            self.cache.put(self._get_cache_key(stem_name, apply_data_augmentation), data)
             return data
 
         except Exception as e:
@@ -417,7 +423,7 @@ class StemSeparationDataset(Dataset):
                 logger.error(f"Error processing stem {stem_name}: {e}")
             return None
 
-    def _save_individual_cache(self, stem_name, data, apply_data_augmentation):
+    def _save_individual_cache(self, stem_name: str, data: Dict[str, torch.Tensor], apply_data_augmentation: bool) -> Union[str, None]:
         cache_key = self._get_cache_key(stem_name, apply_data_augmentation)
         stem_cache_path = os.path.join(self.cache_dir, f"{cache_key}.h5")
         try:
@@ -436,7 +442,7 @@ class StemSeparationDataset(Dataset):
                 logger.error(f"Error saving stem cache: {stem_cache_path}. Error: {e}")
             return None
 
-    def _validate_data(self, data):
+    def _validate_data(self, data: Dict[str, torch.Tensor]) -> bool:
         if 'input' not in data or 'target' not in data:
             if not self.suppress_reading_messages:
                 logger.warning(f"Data validation failed: 'input' or 'target' key missing")
@@ -466,7 +472,7 @@ class StemSeparationDataset(Dataset):
                     break
                 future.result()
 
-    def _load_stem_data(self, stem_name):
+    def _load_stem_data(self, stem_name: str):
         if self.stop_flag.value == 1:
             return None
 
@@ -482,7 +488,7 @@ class StemSeparationDataset(Dataset):
 
         return data
 
-def pad_tensor(tensor, target_length, target_width):
+def pad_tensor(tensor: torch.Tensor, target_length: int, target_width: int) -> torch.Tensor:
     if tensor.dim() == 2:
         current_length = tensor.size(1)
         current_width = tensor.size(0)
@@ -497,7 +503,7 @@ def pad_tensor(tensor, target_length, target_width):
             tensor = torch.nn.functional.pad(tensor, padding)
     return tensor
 
-def collate_fn(batch):
+def collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
     batch = [item for item in batch if item is not None]
     if not batch:
         return {'input': torch.empty(0), 'target': torch.empty(0)}
@@ -516,7 +522,10 @@ def collate_fn(batch):
 
     return {'input': inputs, 'target': targets}
 
-def preprocess_and_cache_dataset(data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation, suppress_warnings, suppress_reading_messages, num_workers, device_prep, stop_flag):
+def preprocess_and_cache_dataset(
+    data_dir: str, n_mels: int, target_length: int, n_fft: int, cache_dir: str, apply_data_augmentation: bool,
+    suppress_warnings: bool, suppress_reading_messages: bool, num_workers: int, device_prep: torch.device, stop_flag: Any
+):
     dataset = StemSeparationDataset(
         data_dir=data_dir,
         n_mels=n_mels,
@@ -534,12 +543,15 @@ def preprocess_and_cache_dataset(data_dir, n_mels, target_length, n_fft, cache_d
     dataset.load_all_stems()
     logger.info("Dataset preprocessing and caching complete.")
 
-def ensure_dir_exists(directory):
+def ensure_dir_exists(directory: str):
     if not os.path.exists(directory):
         os.makedirs(directory)
         logger.info(f"Created directory: {directory}")
 
-def preprocess_data(file_path, mel_spectrogram, target_length, apply_data_augmentation, device, cache_dir=None, use_cache=True, extra_features=None):
+def preprocess_data(
+    file_path: str, mel_spectrogram: T.MelSpectrogram, target_length: int, apply_data_augmentation: bool,
+    device: torch.device, cache_dir: str = None, use_cache: bool = True, extra_features: List[Callable] = None
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """Preprocess and cache individual data files."""
     logger.info(f"Preprocessing file: {file_path}")
     cache_key = os.path.splitext(os.path.basename(file_path))[0]
@@ -575,7 +587,10 @@ def preprocess_data(file_path, mel_spectrogram, target_length, apply_data_augmen
 
     return input_data, target_data
 
-def load_and_preprocess(file_path, mel_spectrogram, target_length, device, apply_data_augmentation=False, cache_dir=None, use_cache=True, extra_features=None):
+def load_and_preprocess(
+    file_path: str, mel_spectrogram: T.MelSpectrogram, target_length: int, device: torch.device,
+    apply_data_augmentation: bool = False, cache_dir: str = None, use_cache: bool = True, extra_features: List[Callable] = None
+) -> Tuple[torch.Tensor, torch.Tensor]:
     logger.info(f"Preprocessing file: {file_path}")
     cache_key = os.path.splitext(os.path.basename(file_path))[0]
     cache_file_path = os.path.join(cache_dir, f"{cache_key}.h5") if cache_dir else None
@@ -639,16 +654,11 @@ def monitor_memory_usage():
     except Exception as e:
         logger.error(f"Error monitoring memory usage: {e}")
 
-def warm_up_cache(dataset):
-    """Warm up the cache by loading all stems into memory."""
-    dataset.load_all_stems()
-    logger.info("Cache warming complete.")
-
-def warm_up_cache_batch(dataset, batch_indices):
+def warm_up_cache_batch(dataset: Dataset, batch_indices: List[int]):
     for idx in batch_indices:
         _ = dataset[idx]
 
-def save_batch_to_hdf5(batch, file_path):
+def save_batch_to_hdf5(batch: Dict[str, torch.Tensor], file_path: str):
     try:
         with h5py.File(file_path, 'w') as f:
             f.create_dataset('input', data=batch['input'].cpu().numpy())
@@ -657,7 +667,7 @@ def save_batch_to_hdf5(batch, file_path):
     except Exception as e:
         logger.error(f"Error saving batch to HDF5: {e}")
 
-def load_batch_from_hdf5(file_path):
+def load_batch_from_hdf5(file_path: str) -> Union[Dict[str, torch.Tensor], None]:
     try:
         with h5py.File(file_path, 'r') as f:
             input_data = torch.tensor(f['input'][:]).float()
@@ -668,12 +678,12 @@ def load_batch_from_hdf5(file_path):
         logger.error(f"Error loading batch from HDF5: {e}")
         return None
 
-def dynamic_batching(dataset, batch_size):
-    loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, collate_fn=collate_fn)
+def dynamic_batching(dataset: Dataset, batch_size: int):
+    loader = DataLoader(dataset, batch_size=batch_size, collate_fn=collate_fn)
     for batch in loader:
         yield batch
 
-def check_and_reshape(tensor, target_shape, logger):
+def check_and_reshape(tensor: torch.Tensor, target_shape: torch.Tensor, logger: logging.Logger) -> torch.Tensor:
     target_numel = target_shape.numel()
     output_numel = tensor.numel()
 
@@ -692,7 +702,7 @@ def check_and_reshape(tensor, target_shape, logger):
 
     return tensor
 
-def calculate_harmonic_content(data, sample_rate, n_mels, target_length):
+def calculate_harmonic_content(data: np.ndarray, sample_rate: int, n_mels: int, target_length: int) -> torch.Tensor:
     """Calculate harmonic content and match the shape of the Mel spectrogram."""
     harmonic, _ = librosa.effects.hpss(data)
     
@@ -704,7 +714,7 @@ def calculate_harmonic_content(data, sample_rate, n_mels, target_length):
     harmonic_content = harmonic_content[:n_mels, :target_length]
     return harmonic_content.unsqueeze(0)
 
-def calculate_percussive_content(data, sample_rate, n_mels, target_length):
+def calculate_percussive_content(data: np.ndarray, sample_rate: int, n_mels: int, target_length: int) -> torch.Tensor:
     """Calculate percussive content and match the shape of the Mel spectrogram."""
     _, percussive = librosa.effects.hpss(data)
     
@@ -716,31 +726,8 @@ def calculate_percussive_content(data, sample_rate, n_mels, target_length):
     percussive_content = percussive_content[:n_mels, :target_length]
     return percussive_content.unsqueeze(0)
 
-def load_from_cache(file_path):
+def load_from_cache(file_path: str) -> Dict[str, torch.Tensor]:
     with h5py.File(file_path, 'r') as f:
         input_data = torch.tensor(f['input'][:]).float()
         target_data = torch.tensor(f['target'][:]).float()
     return {'input': input_data, 'target': target_data}
-
-def preprocess_and_cache_dataset(data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation, suppress_warnings, suppress_reading_messages, num_workers, device_prep, stop_flag):
-    dataset = StemSeparationDataset(
-        data_dir=data_dir,
-        n_mels=n_mels,
-        target_length=target_length,
-        n_fft=n_fft,
-        cache_dir=cache_dir,
-        apply_data_augmentation=apply_data_augmentation,
-        suppress_warnings=suppress_warnings,
-        suppress_reading_messages=suppress_reading_messages,
-        num_workers=num_workers,
-        device_prep=device_prep,
-        stop_flag=stop_flag,
-        use_cache=True
-    )
-    dataset.load_all_stems()
-    logger.info("Dataset preprocessing and caching complete.")
-
-def warm_up_cache(dataset):
-    """Warm up the cache by loading all stems into memory."""
-    dataset.load_all_stems()
-    logger.info("Cache warming complete.")
