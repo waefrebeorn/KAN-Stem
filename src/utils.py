@@ -15,7 +15,6 @@ import numpy as np
 import librosa
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from queue import Queue
 
 logger = logging.getLogger(__name__)
 
@@ -327,8 +326,8 @@ class StemSeparationDataset(Dataset):
         cache_key = self._get_cache_key(stem_name, apply_data_augmentation)
         if self.use_cache and cache_key in self.cache_index:
             stem_cache_path = self.cache_index[cache_key]
-            if isinstance(stem_cache_path, list):  # Check if stem_cache_path is a list
-                stem_cache_path = stem_cache_path[0]  # Extract the first (and only) element
+            if isinstance(stem_cache_path, list):
+                stem_cache_path = stem_cache_path[0]
 
             if os.path.exists(stem_cache_path):
                 try:
@@ -338,11 +337,6 @@ class StemSeparationDataset(Dataset):
                             logger.info(f"Loaded cached data for {stem_name} (augmented={apply_data_augmentation})")
                         data['input'] = data['input'].to(self.device_prep).float()
                         data['target'] = data['target'].to(self.device_prep).float()
-                        
-                        # Free memory immediately after loading from cache
-                        del data['input'], data['target']
-                        torch.cuda.empty_cache()
-                        
                         return data
                     else:
                         if not self.suppress_reading_messages:
@@ -374,14 +368,14 @@ class StemSeparationDataset(Dataset):
 
             input_mel = input_mel.to(torch.float32)
             target_mel = target_mel.to(torch.float32)
-                
+
             if input_mel.shape[-1] < self.target_length:
                 input_mel = torch.nn.functional.pad(input_mel, (0, self.target_length - input_mel.shape[-1]), mode='constant')
 
             if input_mel.shape[0] != target_mel.shape[0]:
-                input_mel = input_mel.unsqueeze(0)  # Adding batch dimension if missing
+                input_mel = input_mel.unsqueeze(0)
             if target_mel.shape[0] != input_mel.shape[0]:
-                target_mel = target_mel.unsqueeze(0)  # Adding batch dimension if missing
+                target_mel = target_mel.unsqueeze(0)
 
             data = {"input": input_mel, "target": target_mel}
 
@@ -389,11 +383,6 @@ class StemSeparationDataset(Dataset):
             logger.debug(f"Processed target shape: {target_mel.shape}")
 
             self._save_individual_cache(stem_name, data, apply_data_augmentation)
-
-            # Free memory immediately after processing
-            del input_mel, target_mel
-            torch.cuda.empty_cache()
-
             return data
 
         except Exception as e:
@@ -414,11 +403,6 @@ class StemSeparationDataset(Dataset):
                 logger.info(f"Successfully saved stem cache: {stem_cache_path}")
             self.cache_index[cache_key] = stem_cache_path
             self._save_cache_metadata()
-
-            # Free memory immediately after saving to cache
-            del data['input'], data['target']
-            torch.cuda.empty_cache()
-
             return stem_cache_path
         except Exception as e:
             if not self.suppress_reading_messages:
@@ -472,13 +456,13 @@ class StemSeparationDataset(Dataset):
         return data
 
 def pad_tensor(tensor, target_length, target_width):
-    if tensor.dim() == 2:  # If tensor is 2D, it should be (n_mels, length)
+    if tensor.dim() == 2:
         current_length = tensor.size(1)
         current_width = tensor.size(0)
         if current_length < target_length or current_width < target_width:
             padding = (0, target_length - current_length, 0, target_width - current_width)
             tensor = torch.nn.functional.pad(tensor, padding)
-    elif tensor.dim() == 3:  # If tensor is 3D, it should be (1, n_mels, length)
+    elif tensor.dim() == 3:
         current_length = tensor.size(2)
         current_width = tensor.size(1)
         if current_length < target_length or current_width < target_width:
@@ -502,10 +486,6 @@ def collate_fn(batch):
     
     inputs = inputs.cpu()
     targets = targets.cpu()
-
-    # Free memory immediately after reshaping
-    del batch
-    torch.cuda.empty_cache()
 
     return {'input': inputs, 'target': targets}
 
@@ -578,34 +558,26 @@ def load_and_preprocess(file_path, mel_spectrogram, target_length, device, apply
             input_data = torch.tensor(f['input'][:]).to(device).float()
             target_data = torch.tensor(f['target'][:]).to(device).float()
         logger.info(f"Loaded from cache: {cache_file_path}, input shape: {input_data.shape}, target shape: {target_data.shape}")
-
-        # Free memory immediately after loading from cache
-        del input_data, target_data
-        torch.cuda.empty_cache()
-
         return input_data, target_data
 
     try:
         data, sample_rate = sf.read(file_path)
-    except Exception as e:  # Add error handling for file reading
+    except Exception as e:
         logger.error(f"Error reading file {file_path}: {e}")
         return None, None  
 
     data = librosa.resample(data, orig_sr=sample_rate, target_sr=mel_spectrogram.sample_rate) if sample_rate != mel_spectrogram.sample_rate else data
     input_mel = mel_spectrogram(torch.tensor(data).to(device).float())
 
-    # Padding is applied here before unsqueezing, ensuring all feature dimensions align correctly
     if input_mel.shape[-1] < target_length:
         input_mel = F.pad(input_mel, (0, target_length - input_mel.shape[-1]))
 
-    input_mel = input_mel.unsqueeze(0)  # Add channel dimension
+    input_mel = input_mel.unsqueeze(0)
 
     logger.info(f"Input data shape after padding: {input_mel.shape}")
 
-    # Initialize target_data without the channel dimension 
     target_data = input_mel.clone()
-    
-    # Calculate and add extra features to target_data
+
     if extra_features:
         features = []
         for feature in extra_features:
@@ -615,14 +587,13 @@ def load_and_preprocess(file_path, mel_spectrogram, target_length, device, apply
             if feature_data.shape[-1] < target_length:
                 feature_data = F.pad(feature_data, (0, target_length - feature_data.shape[-1]))
 
-            # Ensure correct dimensions before adding to target_data
-            feature_data = feature_data.unsqueeze(0) if feature_data.dim() == 2 else feature_data  # Add channel dimension if needed
+            feature_data = feature_data.unsqueeze(0) if feature_data.dim() == 2 else feature_data
 
             logger.info(f"Feature {feature.__name__} shape after padding: {feature_data.shape}")
-            target_data = torch.cat([target_data, feature_data], dim=1)  # Concatenate along the channel dimension
-    
+            target_data = torch.cat([target_data, feature_data], dim=1)
+
     logger.info(f"Target data shape before unsqueeze: {target_data.shape}")
-    target_data = target_data.unsqueeze(0)  # Add batch dimension here
+    target_data = target_data.unsqueeze(0)
 
     logger.info(f"Target data shape after concatenation: {target_data.shape}")
 
@@ -631,10 +602,6 @@ def load_and_preprocess(file_path, mel_spectrogram, target_length, device, apply
             f.create_dataset('input', data=input_mel.cpu().numpy())
             f.create_dataset('target', data=target_data.cpu().numpy())
         logger.info(f"Saved to cache: {cache_file_path}, input shape: {input_mel.shape}, target shape: {target_data.shape}")
-
-        # Free memory immediately after saving to cache
-        del input_mel, target_data
-        torch.cuda.empty_cache()
 
     return input_mel, target_data
 
@@ -646,7 +613,13 @@ def monitor_memory_usage():
         logger.error(f"Error monitoring memory usage: {e}")
 
 def warm_up_cache(dataset):
+    """Warm up the cache by loading all stems into memory."""
     dataset.load_all_stems()
+    logger.info("Cache warming complete.")
+
+def warm_up_cache_batch(dataset, batch_indices):
+    for idx in batch_indices:
+        _ = dataset[idx]
 
 def save_batch_to_hdf5(batch, file_path):
     try:
@@ -696,27 +669,25 @@ def calculate_harmonic_content(data, sample_rate, n_mels, target_length):
     """Calculate harmonic content and match the shape of the Mel spectrogram."""
     harmonic, _ = librosa.effects.hpss(data)
     
-    # Ensure harmonic content is 1D (some versions of librosa might return 2D)
     if harmonic.ndim > 1:
         harmonic = harmonic.mean(axis=0)
     
-    harmonic_content = torch.tensor(harmonic).float().unsqueeze(0)  # Create tensor and add a dimension
-    harmonic_content = pad_tensor(harmonic_content, target_length, n_mels)  # Pad to match Mel spectrogram size
-    harmonic_content = harmonic_content[:n_mels, :target_length]  # Crop if necessary
-    return harmonic_content.unsqueeze(0)  # Add batch dimension
+    harmonic_content = torch.tensor(harmonic).float().unsqueeze(0)
+    harmonic_content = pad_tensor(harmonic_content, target_length, n_mels)
+    harmonic_content = harmonic_content[:n_mels, :target_length]
+    return harmonic_content.unsqueeze(0)
 
 def calculate_percussive_content(data, sample_rate, n_mels, target_length):
     """Calculate percussive content and match the shape of the Mel spectrogram."""
     _, percussive = librosa.effects.hpss(data)
     
-    # Ensure percussive content is 1D
     if percussive.ndim > 1:
         percussive = percussive.mean(axis=0)
 
-    percussive_content = torch.tensor(percussive).float().unsqueeze(0)  # Create tensor and add a dimension
+    percussive_content = torch.tensor(percussive).float().unsqueeze(0)
     percussive_content = pad_tensor(percussive_content, target_length, n_mels)
     percussive_content = percussive_content[:n_mels, :target_length]
-    return percussive_content.unsqueeze(0)  # Add batch dimension
+    return percussive_content.unsqueeze(0)
 
 def load_from_cache(file_path):
     with h5py.File(file_path, 'r') as f:
@@ -724,7 +695,24 @@ def load_from_cache(file_path):
         target_data = torch.tensor(f['target'][:]).float()
     return {'input': input_data, 'target': target_data}
 
-# Add warm_up_cache to the utility functions to ensure cache warming before processing
+def preprocess_and_cache_dataset(data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation, suppress_warnings, suppress_reading_messages, num_workers, device_prep, stop_flag):
+    dataset = StemSeparationDataset(
+        data_dir=data_dir,
+        n_mels=n_mels,
+        target_length=target_length,
+        n_fft=n_fft,
+        cache_dir=cache_dir,
+        apply_data_augmentation=apply_data_augmentation,
+        suppress_warnings=suppress_warnings,
+        suppress_reading_messages=suppress_reading_messages,
+        num_workers=num_workers,
+        device_prep=device_prep,
+        stop_flag=stop_flag,
+        use_cache=True
+    )
+    dataset.load_all_stems()
+    logger.info("Dataset preprocessing and caching complete.")
+
 def warm_up_cache(dataset):
     """Warm up the cache by loading all stems into memory."""
     dataset.load_all_stems()

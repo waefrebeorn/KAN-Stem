@@ -9,9 +9,10 @@ from datetime import datetime
 import logging
 from torchvision import models
 from torchvision.models import VGG16_Weights
+from torch.optim.lr_scheduler import CyclicLR, ReduceLROnPlateau
 from utils import (
-    compute_sdr, compute_sir, compute_sar, convert_to_3_channels, 
-    gradient_penalty, PerceptualLoss, detect_parameters, preprocess_and_cache_dataset, 
+    compute_sdr, compute_sir, compute_sar, convert_to_3_channels,
+    gradient_penalty, PerceptualLoss, detect_parameters, preprocess_and_cache_dataset,
     StemSeparationDataset, collate_fn, log_training_parameters, ensure_dir_exists,
     get_optimizer, warm_up_cache, monitor_memory_usage
 )
@@ -47,9 +48,9 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
     )
 
     val_dataset = StemSeparationDataset(
-        val_dir, n_mels, target_length, n_fft, training_params['cache_dir'], apply_data_augmentation=False, 
-        suppress_warnings=training_params['suppress_warnings'], suppress_reading_messages=training_params['suppress_reading_messages'], 
-        num_workers=training_params['num_workers'], device_prep=prep_device, use_cache=training_params['use_cache']
+        val_dir, n_mels, target_length, n_fft, training_params['cache_dir'], apply_data_augmentation=False,
+        suppress_warnings=training_params['suppress_warnings'], suppress_reading_messages=training_params['suppress_reading_messages'],
+        num_workers=training_params['num_workers'], device_prep=prep_device, stop_flag=stop_flag, use_cache=training_params['use_cache']
     )
 
     val_loader = DataLoader(
@@ -78,12 +79,12 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
 
     accumulation_steps = training_params['accumulation_steps']
     
-    # Cache warming
-    warm_up_cache(dataset)
-    warm_up_cache(val_dataset)
+    # Cache warming: only warm up a subset of the dataset to conserve VRAM
+    warm_up_cache_batch(dataset, list(range(0, min(training_params['batch_size'] * 10, len(dataset)))))
+    warm_up_cache_batch(val_dataset, list(range(0, min(training_params['batch_size'] * 10, len(val_dataset)))))
 
     for epoch in range(training_params['num_epochs']):
-        if stop_flag.item() == 1:
+        if stop_flag.value == 1:
             logger.info("Training stopped.")
             return
 
@@ -98,7 +99,7 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
         optimizer_d.zero_grad(set_to_none=True)
 
         for i, data in enumerate(train_loader):
-            if stop_flag.item() == 1:
+            if stop_flag.value == 1:
                 logger.info("Training stopped.")
                 return
 
@@ -193,7 +194,7 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
         with torch.no_grad():
             try:
                 for i, data in enumerate(val_loader):
-                    if stop_flag.item() == 1:
+                    if stop_flag.value == 1:
                         logger.info("Training stopped.")
                         return
 
@@ -265,6 +266,22 @@ def train_single_stem(stem, dataset, val_dir, training_params, model_params, sam
     if model_params['tensorboard_flag']:
         writer.close()
 
+def warm_up_cache(dataset, batch_size, num_workers):
+    """Warm up the cache by loading a subset of stems into memory using multiple workers."""
+    with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        futures = []
+        for idx in range(0, len(dataset), batch_size):
+            batch_indices = list(range(idx, min(idx + batch_size, len(dataset))))
+            futures.append(executor.submit(warm_up_cache_batch, dataset, batch_indices))
+
+        for future in as_completed(futures):
+            future.result()
+    logger.info("Cache warming complete.")
+
+def warm_up_cache_batch(dataset, batch_indices):
+    for idx in batch_indices:
+        _ = dataset[idx] 
+
 def start_training(data_dir, val_dir, batch_size, num_epochs, initial_lr_g, initial_lr_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages, discriminator_update_interval, label_smoothing_real, label_smoothing_fake, suppress_detailed_logs, stop_flag, use_cache, channel_multiplier, segments_per_track=10):
     device = torch.device('cuda' if use_cuda and torch.cuda.is_available() else 'cpu')
     training_params = {
@@ -293,7 +310,8 @@ def start_training(data_dir, val_dir, batch_size, num_epochs, initial_lr_g, init
         'label_smoothing_real': label_smoothing_real,
         'label_smoothing_fake': label_smoothing_fake,
         'suppress_detailed_logs': suppress_detailed_logs,
-        'segments_per_track': segments_per_track  # Add this parameter
+        'segments_per_track': segments_per_track,
+        'use_cache': use_cache  # Added this line to include the use_cache parameter
     }
     model_params = {
         'optimizer_name_g': optimizer_name_g,
@@ -326,7 +344,7 @@ def start_training(data_dir, val_dir, batch_size, num_epochs, initial_lr_g, init
         raise ValueError("use_cache must be True for this code.")
 
     for stem in range(num_stems):
-        if stop_flag.item() == 1:
+        if stop_flag.value == 1:
             logger.info("Training stopped.")
             return
 
@@ -335,6 +353,9 @@ def start_training(data_dir, val_dir, batch_size, num_epochs, initial_lr_g, init
     logger.info("Training finished.")
 
 if __name__ == '__main__':
+    import multiprocessing
+    stop_flag = multiprocessing.Value('i', 0)
+    
     start_training(
         data_dir='path_to_data',
         val_dir='path_to_val_data',
@@ -371,8 +392,9 @@ if __name__ == '__main__':
         label_smoothing_real=0.9,
         label_smoothing_fake=0.1,
         suppress_detailed_logs=False,
-        stop_flag=torch.tensor(0),
+        stop_flag=stop_flag,
         use_cache=True,
         channel_multiplier=0.5,
         segments_per_track=10  # Adjust this value as needed
     )
+

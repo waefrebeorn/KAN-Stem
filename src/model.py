@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import logging
 import h5py
-import os
+from torch.utils.checkpoint import checkpoint
 
 logger = logging.getLogger(__name__)
 
@@ -100,22 +100,22 @@ class KANWithDepthwiseConv(nn.Module):
         self.fc2 = nn.Linear(512, n_mels * target_length * num_stems)
         nn.init.xavier_normal_(self.fc2.weight)
 
-    def forward_impl(self, x, suppress_reading_messages):
-        x = self.conv1(x)
-        x = self.pool1(x)
-        x = self.res_block1(x)
-        x = self.attention1(x)
-        x = self.conv2(x)
-        x = self.pool2(x)
-        x = self.res_block2(x)
-        x = self.attention2(x)
-        x = self.conv3(x)
-        x = self.pool3(x)
-        x = self.conv4(x)
-        x = self.pool4(x)
-        x = self.pool5(x)
-        x = self.context_aggregation(x)
-        x = self.flatten(x)
+    def forward_impl(self, x, suppress_reading_messages=False):
+        layers = [
+            self.conv1, self.pool1, self.res_block1, self.attention1, 
+            self.conv2, self.pool2, self.res_block2, self.attention2, 
+            self.conv3, self.pool3, self.conv4, self.pool4, 
+            self.pool5, self.context_aggregation, self.flatten
+        ]
+        for layer in layers:
+            try:
+                x = checkpoint(layer, x)
+            except Exception as e:
+                logger.error(f"Error in layer {layer.__class__.__name__}: {e}")
+                raise
+
+            if not suppress_reading_messages:
+                logger.info(f"{layer.__class__.__name__}: {x.shape}")
         return x
 
     def forward(self, x, suppress_reading_messages=True, initialize=False):
@@ -134,16 +134,29 @@ class KANWithDepthwiseConv(nn.Module):
 
         if initialize:
             x = self.forward_impl(x, suppress_reading_messages)
-            return
+            return x
 
-        num_segments = x.shape[-1] // self.target_length 
-        segments = [x[:, :, :, i*self.target_length:(i+1)*self.target_length] for i in range(num_segments)] 
+        kernel_size = self.conv1.kernel_size[0]
+        dilation = self.conv1.dilation[0]
+        min_segment_length = max((kernel_size - 1) * dilation + 1, self.target_length)
+        if x.shape[-1] > min_segment_length:
+            segment_length = max(min_segment_length, x.shape[-1] // 10)
+            num_segments = (x.shape[-1] + segment_length - 1) // segment_length
+            segments = [x[:, :, :, i*segment_length:(i+1)*segment_length] for i in range(num_segments)]
+        else:
+            segments = [x]
+
+        if not suppress_reading_messages:
+            logger.info(f"Number of segments: {len(segments)}")
 
         outputs = []
         for i, segment in enumerate(segments):
             if not suppress_reading_messages:
                 logger.info(f"Shape of segment {i+1} before processing: {segment.shape}")
-
+            
+            if segment.numel() == 0:
+                logger.error(f"Segment {i+1} is empty and cannot be processed.")
+                continue
             try:
                 segment_output = self.forward_impl(segment, suppress_reading_messages)
                 outputs.append(segment_output)
@@ -151,17 +164,22 @@ class KANWithDepthwiseConv(nn.Module):
                 logger.error(f"Error processing segment {i+1}: {e}")
                 raise
 
-        x = torch.cat(outputs, dim=-1)
+        if not outputs:
+            logger.error("No segments were processed successfully.")
+            return None
 
-        x = x.view(-1, self.num_stems, self.n_mels, x.size(-1))
+        x = torch.cat(outputs, dim=-1)  # Concatenate along the time dimension
 
+        total_length = x.shape[-1]  # Total length after concatenation
+
+        x = x.view(-1, self.num_stems, self.n_mels, total_length)
         logger.info(f"Shape of x after concatenation: {x.shape}")
 
         x = F.relu(self.fc1(x))
         x = self.fc2(x)
         x = torch.tanh(x)
 
-        x = x.view(-1, self.num_stems, self.n_mels, num_segments * self.target_length)
+        x = x.view(-1, self.num_stems, self.n_mels, total_length)
         logger.info(f"Shape of final output: {x.shape}")
 
         return x
