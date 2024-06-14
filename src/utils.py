@@ -331,19 +331,11 @@ class StemSeparationDataset(Dataset):
         stem_name = list(self.stem_names.keys())[idx]
         file_name = self.stem_names[stem_name][0]
         try:
-            data = self._get_data(file_name, apply_data_augmentation=False)
+            data = self._get_data(file_name, apply_data_augmentation=self.apply_data_augmentation)
             if data is None:
-                data = self._process_and_cache(file_name, apply_data_augmentation=False)
+                data = self._process_and_cache(file_name, apply_data_augmentation=self.apply_data_augmentation)
                 if data is None:
                     raise ValueError(f"Failed to process and cache data for {file_name}")
-
-            if self.apply_data_augmentation:
-                augmented_data = self._get_data(file_name, apply_data_augmentation=True)
-                if augmented_data is None:
-                    augmented_data = self._process_and_cache(file_name, apply_data_augmentation=True)
-                    if augmented_data is None:
-                        raise ValueError(f"Failed to process and cache augmented data for {file_name}")
-                return augmented_data
 
             return data
 
@@ -414,7 +406,7 @@ class StemSeparationDataset(Dataset):
             if target_mel.shape[0] != input_mel.shape[0]:
                 target_mel = target_mel.unsqueeze(0)
 
-            data = {"input": input_mel, "target": target_mel}
+            data = {"input": input_mel, "target": target_mel, "file_paths": file_path}
 
             self._save_individual_cache(file_name, data, apply_data_augmentation)
             self.cache.put(self._get_cache_key(file_name, apply_data_augmentation), data)
@@ -465,7 +457,7 @@ class StemSeparationDataset(Dataset):
             return False
 
         return True
-        
+
 def pad_tensor(tensor: torch.Tensor, target_length: int, target_width: int) -> torch.Tensor:
     if tensor.dim() == 2:
         current_length = tensor.size(1)
@@ -498,7 +490,7 @@ def collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
     inputs = inputs.cpu()
     targets = targets.cpu()
 
-    return {'input': inputs, 'target': targets}
+    return {'input': inputs, 'target': targets, 'file_paths': [item['file_paths'] for item in batch]}
 
 def preprocess_and_cache_dataset(
     data_dir: str, n_mels: int, target_length: int, n_fft: int, cache_dir: str, apply_data_augmentation: bool,
@@ -657,9 +649,13 @@ def load_batch_from_hdf5(file_path: str) -> Union[Dict[str, torch.Tensor], None]
 
 def dynamic_batching(dataset: Dataset, batch_size: int):
     loader = DataLoader(dataset, batch_size=batch_size, collate_fn=collate_fn)
-    for batch in loader:
-        yield batch
+    file_paths = None  # Initialize file_paths outside the loop
 
+    for batch_idx, batch in enumerate(loader):
+        if batch_idx == 0:
+            file_paths = batch.get("file_paths")  # Get file paths from the first batch
+        yield batch['input'], batch['target'], file_paths  # Yield input, target, and file paths
+        
 def check_and_reshape(tensor: torch.Tensor, target_shape: torch.Tensor, logger: logging.Logger) -> torch.Tensor:
     target_numel = target_shape.numel()
     output_numel = tensor.numel()

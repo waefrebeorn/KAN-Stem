@@ -72,17 +72,19 @@ def train_single_stem(
         optimizer_g.zero_grad(set_to_none=True)
         optimizer_d.zero_grad(set_to_none=True)
 
-        for i, data in enumerate(dynamic_batching(dataset, training_params['batch_size'])):
+        for i, (inputs, targets, file_paths) in enumerate(dynamic_batching(dataset, training_params['batch_size'])):
             if stop_flag.value == 1:
                 logger.info("Training stopped.")
                 return
 
-            if data is None:
+            if inputs is None or targets is None:
                 continue
 
             logger.debug(f"Processing batch {i+1}/{len(dataset)}")
 
-            inputs, targets = data['input'].to(training_params['device_str']).float(), data['target'].to(training_params['device_str']).float()
+            inputs = inputs.to(training_params['device_str']).float()
+            targets = targets.to(training_params['device_str']).float()
+
             input_segments = inputs.chunk(training_params.get('segments_per_track', 1), dim=-1)
             target_segments = targets.chunk(training_params.get('segments_per_track', 1), dim=-1)
 
@@ -165,17 +167,18 @@ def train_single_stem(
 
         with torch.no_grad():
             try:
-                for i, data in enumerate(dynamic_batching(val_dataset, training_params['batch_size'])):
+                for i, (inputs, targets, file_paths) in enumerate(dynamic_batching(val_dataset, training_params['batch_size'])):
                     if stop_flag.value == 1:
                         logger.info("Training stopped.")
                         return
 
-                    if data is None:
+                    if inputs is None or targets is None:
                         continue
 
                     logger.debug(f"Validating batch {i+1}/{len(val_dataset)}")
 
-                    inputs, targets = data['input'].to(training_params['device_str']).float(), data['target'].to(training_params['device_str']).float()
+                    inputs = inputs.to(training_params['device_str']).float()
+                    targets = targets.to(training_params['device_str']).float()
                     outputs = model(inputs)
 
                     if outputs is None:
@@ -236,7 +239,7 @@ def train_single_stem(
 
     if model_params['tensorboard_flag']:
         writer.close()
-
+        
 def start_training(
     data_dir: str, val_dir: str, batch_size: int, num_epochs: int, initial_lr_g: float, initial_lr_d: float, 
     use_cuda: bool, checkpoint_dir: str, save_interval: int, accumulation_steps: int, num_stems: int, 

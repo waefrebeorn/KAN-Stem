@@ -123,8 +123,8 @@ class KANWithDepthwiseConv(nn.Module):
             logger.info(f"Input shape: {x.shape}")
 
         # Input Validation
-        if x.dim() not in [2, 3]:
-            raise ValueError(f"Expected input tensor to have 2 or 3 dimensions, got {x.dim()}")
+        if x.dim() not in [2, 3, 4]:
+            raise ValueError(f"Expected input tensor to have 2, 3 or 4 dimensions, got {x.dim()}")
 
         x = x.to(self.device)
 
@@ -132,6 +132,8 @@ class KANWithDepthwiseConv(nn.Module):
             x = x.unsqueeze(0).unsqueeze(0)
         elif x.dim() == 3:
             x = x.unsqueeze(1)
+        elif x.dim() == 4 and x.shape[1] == 1:
+            x = x.repeat(1, 3, 1, 1)  # Repeat channels if input has 1 channel
 
         if not suppress_reading_messages:
             logger.info(f"Shape after adding dimensions: {x.shape}")
@@ -184,7 +186,7 @@ class KANWithDepthwiseConv(nn.Module):
         return x
 
 class KANDiscriminator(nn.Module):
-    def __init__(self, in_channels=1, out_channels=64, n_mels=128, target_length=256, device="cpu", channel_multiplier=1.0):
+    def __init__(self, in_channels=3, out_channels=64, n_mels=128, target_length=256, device="cpu", channel_multiplier=1.0):
         super(KANDiscriminator, self).__init__()
 
         self.device = device
