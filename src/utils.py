@@ -15,6 +15,7 @@ import numpy as np
 import librosa
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from mir_eval.separation import bss_eval_sources
 
 logger = logging.getLogger(__name__)
 
@@ -174,7 +175,10 @@ def calculate_metrics(y_true, y_pred):
     try:
         mse = F.mse_loss(y_pred, y_true).item()
         snr = 10 * torch.log10(torch.mean(y_true ** 2) / torch.mean((y_true - y_pred) ** 2)).item()
-        return {'mse': mse, 'snr': snr}
+        sdr = compute_sdr(y_true, y_pred)
+        sir = compute_sir(y_true, y_pred)
+        sar = compute_sar(y_true, y_pred)
+        return {'mse': mse, 'snr': snr, 'sdr': sdr, 'sir': sir, 'sar': sar}
     except Exception as e:
         logger.error(f"Error calculating metrics: {e}", exc_info=True)
         raise e
@@ -190,25 +194,16 @@ def get_checkpoints(checkpoints_dir):
         return []
 
 def compute_sdr(true, pred):
-    noise = true - pred
-    s_true = torch.sum(true ** 2, dim=[1, 2, 3])
-    s_noise = torch.sum(noise ** 2, dim=[1, 2, 3])
-    sdr = 10 * torch.log10(s_true / (s_noise + 1e-8))
-    return sdr
+    sdr, _, _, _ = bss_eval_sources(true.cpu().numpy(), pred.cpu().numpy())
+    return np.mean(sdr)
 
 def compute_sir(true, pred):
-    noise = true - pred
-    s_true = torch.sum(true ** 2, dim=[1, 2, 3])
-    s_interf = torch.sum((true - noise) ** 2, dim=[1, 2, 3])
-    sir = 10 * torch.log10(s_true / (s_interf + 1e-8))
-    return sir
+    _, sir, _, _ = bss_eval_sources(true.cpu().numpy(), pred.cpu().numpy())
+    return np.mean(sir)
 
 def compute_sar(true, pred):
-    noise = true - pred
-    s_noise = torch.sum(noise ** 2, dim=[1, 2, 3])
-    s_artif = torch.sum((pred - noise) ** 2, dim=[1, 2, 3])
-    sar = 10 * torch.log10(s_noise / (s_artif + 1e-8))
-    return sar
+    _, _, sar, _ = bss_eval_sources(true.cpu().numpy(), pred.cpu().numpy())
+    return np.mean(sar)
 
 def log_training_parameters(params):
     """Logs the training parameters."""
@@ -235,8 +230,25 @@ def get_optimizer(optimizer_name, model_parameters, learning_rate, weight_decay)
 def wasserstein_loss(real_output, fake_output):
     return torch.mean(fake_output) - torch.mean(real_output)
 
+class LRUCache:
+    def __init__(self, capacity: int):
+        self.cache = OrderedDict()
+        self.capacity = capacity
+
+    def get(self, key: str):
+        if key not in self.cache:
+            return None
+        self.cache.move_to_end(key)
+        return self.cache[key]
+
+    def put(self, key: str, value):
+        self.cache[key] = value
+        self.cache.move_to_end(key)
+        if len(self.cache) > self.capacity:
+            self.cache.popitem(last=False)
+
 class StemSeparationDataset(Dataset):
-    def __init__(self, data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation, suppress_warnings, suppress_reading_messages, num_workers, device_prep, stop_flag, use_cache=True):
+    def __init__(self, data_dir, n_mels, target_length, n_fft, cache_dir, apply_data_augmentation, suppress_warnings, suppress_reading_messages, num_workers, device_prep, stop_flag, cache_capacity=100, use_cache=True):
         self.data_dir = data_dir
         self.n_mels = n_mels
         self.target_length = target_length
@@ -249,6 +261,7 @@ class StemSeparationDataset(Dataset):
         self.device_prep = device_prep
         self.stop_flag = stop_flag
         self.use_cache = use_cache
+        self.cache = LRUCache(cache_capacity)
 
         self.valid_stems = [f for f in os.listdir(data_dir) if f.endswith('.wav')]
         if not self.valid_stems:
@@ -295,18 +308,32 @@ class StemSeparationDataset(Dataset):
 
         stem_name = self.valid_stems[idx]
         try:
-            data = self._get_data(stem_name, apply_data_augmentation=False)
+            cache_key = self._get_cache_key(stem_name, apply_data_augmentation=False)
+            data = self.cache.get(cache_key)
             if data is None:
-                data = self._process_and_cache(stem_name, apply_data_augmentation=False)
+                data = self._get_data(stem_name, apply_data_augmentation=False)
                 if data is None:
-                    raise ValueError(f"Failed to process and cache data for {stem_name}")
+                    data = self._process_and_cache(stem_name, apply_data_augmentation=False)
+                    if data is not None:
+                        self.cache.put(cache_key, data)
+                else:
+                    self.cache.put(cache_key, data)
+
+            if data is None:
+                raise ValueError(f"Failed to process and cache data for {stem_name}")
 
             if self.apply_data_augmentation:
-                augmented_data = self._get_data(stem_name, apply_data_augmentation=True)
+                augmented_cache_key = self._get_cache_key(stem_name, apply_data_augmentation=True)
+                augmented_data = self.cache.get(augmented_cache_key)
                 if augmented_data is None:
-                    augmented_data = self._process_and_cache(stem_name, apply_data_augmentation=True)
+                    augmented_data = self._get_data(stem_name, apply_data_augmentation=True)
                     if augmented_data is None:
-                        raise ValueError(f"Failed to process and cache augmented data for {stem_name}")
+                        augmented_data = self._process_and_cache(stem_name, apply_data_augmentation=True)
+                        if augmented_data is not None:
+                            self.cache.put(augmented_cache_key, augmented_data)
+                    else:
+                        self.cache.put(augmented_cache_key, augmented_data)
+
                 logger.debug(f"Augmented input shape: {augmented_data['input'].shape}")
                 logger.debug(f"Augmented target shape: {augmented_data['target'].shape}")
                 return augmented_data

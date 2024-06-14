@@ -100,6 +100,9 @@ class KANWithDepthwiseConv(nn.Module):
         self.fc2 = nn.Linear(512, n_mels * target_length * num_stems)
         nn.init.xavier_normal_(self.fc2.weight)
 
+        self.min_segment_length = max((self.conv1.kernel_size[0] - 1) * self.conv1.dilation[0] + 1, self.target_length)
+        self.segment_length = max(self.min_segment_length, self.target_length // 10)
+
     def forward_impl(self, x, suppress_reading_messages=False):
         layers = [
             self.conv1, self.pool1, self.res_block1, self.attention1, 
@@ -136,13 +139,9 @@ class KANWithDepthwiseConv(nn.Module):
             x = self.forward_impl(x, suppress_reading_messages)
             return x
 
-        kernel_size = self.conv1.kernel_size[0]
-        dilation = self.conv1.dilation[0]
-        min_segment_length = max((kernel_size - 1) * dilation + 1, self.target_length)
-        if x.shape[-1] > min_segment_length:
-            segment_length = max(min_segment_length, x.shape[-1] // 10)
-            num_segments = (x.shape[-1] + segment_length - 1) // segment_length
-            segments = [x[:, :, :, i*segment_length:(i+1)*segment_length] for i in range(num_segments)]
+        if x.shape[-1] > self.min_segment_length:
+            num_segments = (x.shape[-1] + self.segment_length - 1) // self.segment_length
+            segments = [x[:, :, :, i*self.segment_length:(i+1)*self.segment_length] for i in range(num_segments)]
         else:
             segments = [x]
 
@@ -168,18 +167,16 @@ class KANWithDepthwiseConv(nn.Module):
             logger.error("No segments were processed successfully.")
             return None
 
-        x = torch.cat(outputs, dim=-1)  # Concatenate along the time dimension
+        x = torch.cat(outputs, dim=0)
 
-        total_length = x.shape[-1]  # Total length after concatenation
-
-        x = x.view(-1, self.num_stems, self.n_mels, total_length)
+        x = x.view(-1, self.n_mels, self.target_length).unsqueeze(1)
         logger.info(f"Shape of x after concatenation: {x.shape}")
 
         x = F.relu(self.fc1(x))
         x = self.fc2(x)
         x = torch.tanh(x)
 
-        x = x.view(-1, self.num_stems, self.n_mels, total_length)
+        x = x.view(-1, self.num_stems, self.n_mels, self.target_length)
         logger.info(f"Shape of final output: {x.shape}")
 
         return x
