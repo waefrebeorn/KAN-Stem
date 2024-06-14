@@ -163,6 +163,8 @@ def _get_cache_key(file_path, target_length, apply_data_augmentation):
 
 def _save_to_hdf5_cache(cache_file_path, input_data, target_data):
     try:
+        if os.path.exists(cache_file_path):
+            os.remove(cache_file_path)
         with h5py.File(cache_file_path, 'w') as f:
             f.create_dataset('input', data=input_data.detach().cpu().numpy())
             f.create_dataset('target', data=target_data.detach().cpu().numpy())

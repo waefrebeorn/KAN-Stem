@@ -28,3 +28,4 @@ REM Run the PowerShell script with arguments
 powershell.exe -NoLogo -NoProfile -Command "& { . '%PS_SCRIPT_PATH%' -checkpointDir '.\checkpoints' -filePath '.\path\to\your\audio_file.wav' -pythonPath '%PYTHON_PATH%' }"
 
 REM End of script
+pause
