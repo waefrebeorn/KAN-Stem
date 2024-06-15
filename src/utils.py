@@ -151,13 +151,15 @@ def log_system_resources():
     except Exception as e:
         logger.error(f"Error logging system resources: {e}")
 
-def process_file(file_path: str, mel_spectrogram: T.MelSpectrogram, target_length: int, apply_data_augmentation: bool, device: torch.device, queue: Any):
+def process_file(dataset: Dataset, file_path: str, target_length: int, apply_data_augmentation: bool, device: torch.device, queue: Any):
     try:
         logger.info(f"Processing file: {file_path}")
         log_system_resources()
         start_time = time.time()
 
-        result = load_and_preprocess(file_path, mel_spectrogram, target_length, device, apply_data_augmentation=apply_data_augmentation)
+        result = load_and_preprocess(
+            dataset, file_path, target_length, device, apply_data_augmentation=apply_data_augmentation
+        )
         if result is not None:
             pass
 
@@ -172,14 +174,13 @@ def process_file(file_path: str, mel_spectrogram: T.MelSpectrogram, target_lengt
     except Exception as e:
         logger.error(f"Failed to process {file_path}: {e}")
 
-def worker_loop(file_paths: List[str], mel_spectrogram_params: Dict[str, Any], target_length: int, apply_data_augmentation: bool, queue: Any):
+def worker_loop(file_paths: List[str], dataset: Dataset, target_length: int, apply_data_augmentation: bool, queue: Any):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    mel_spectrogram = T.MelSpectrogram(**mel_spectrogram_params).to(device).float()
 
     try:
         for file_path in file_paths:
             logger.debug(f"Starting processing for file: {file_path}")
-            process_file(file_path, mel_spectrogram, target_length, apply_data_augmentation, device, queue)
+            process_file(dataset, file_path, target_length, apply_data_augmentation, device, queue)  # Pass dataset
             logger.debug(f"Finished processing for file: {file_path}")
         logger.debug("All files processed in worker loop")
 
@@ -408,7 +409,11 @@ class StemSeparationDataset(Dataset):
             file_path = os.path.join(self.data_dir, file_name)
 
             extra_features = [calculate_harmonic_content, calculate_percussive_content]
-            input_mel, target_mel = load_and_preprocess(file_path, self.mel_spectrogram, self.target_length, self.device_prep, cache_dir=self.cache_dir, use_cache=self.use_cache, extra_features=extra_features)
+            input_mel, target_mel = load_and_preprocess(
+                self, file_path, self.target_length, self.device_prep,
+                cache_dir=self.cache_dir, use_cache=self.use_cache, extra_features=extra_features
+            )
+
             if input_mel is None:
                 raise ValueError(f"Failed to load and preprocess data for {file_name}")
 
@@ -519,7 +524,7 @@ def preprocess_and_cache_dataset(
         cache_dir=cache_dir,
         apply_data_augmentation=apply_data_augmentation,
         suppress_warnings=suppress_warnings,
-        suppress_reading_messages=suppress_reading_messages,
+        suppress_reading_messages=suppress_warnings,
         num_workers=num_workers,
         device_prep=device_prep,
         stop_flag=stop_flag,
@@ -572,7 +577,7 @@ def preprocess_data(
     return input_data, target_data
 
 def load_and_preprocess(
-    file_path: str, mel_spectrogram: T.MelSpectrogram, target_length: int, device: torch.device,
+    dataset: Dataset, file_path: str, target_length: int, device: torch.device,
     apply_data_augmentation: bool = False, cache_dir: str = None, use_cache: bool = True, extra_features: List[Callable] = None
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     logger.info(f"Preprocessing file: {file_path}")
@@ -594,10 +599,10 @@ def load_and_preprocess(
         return None, None  
 
     try:
-        if sample_rate != mel_spectrogram.sample_rate:
-            data = librosa.resample(data, orig_sr=sample_rate, target_sr=mel_spectrogram.sample_rate)
+        if sample_rate != dataset.mel_spectrogram.sample_rate:
+            data = librosa.resample(data, orig_sr=sample_rate, target_sr=dataset.mel_spectrogram.sample_rate)
 
-        input_mel = mel_spectrogram(waveform=torch.tensor(data).to(device).float()).unsqueeze(0)
+        input_mel = dataset.mel_spectrogram(waveform=torch.tensor(data).to(device).float()).unsqueeze(0)
         if input_mel.shape[-1] < target_length:
             input_mel = F.pad(input_mel, (0, target_length - input_mel.shape[-1]))
 
@@ -607,7 +612,7 @@ def load_and_preprocess(
         features = []
         if extra_features:
             for feature in extra_features:
-                feature_data = feature(data, sample_rate, mel_spectrogram.n_mels, target_length).to(device).float()
+                feature_data = feature(data, sample_rate, dataset.mel_spectrogram.n_mels, target_length).to(device).float()
                 logger.info(f"Feature {feature.__name__} shape before padding: {feature_data.shape}")
                 if feature_data.shape[-1] < target_length:
                     feature_data = F.pad(feature_data, (0, target_length - feature_data.shape[-1]))
@@ -619,7 +624,7 @@ def load_and_preprocess(
         logger.info(f"Target data shape after concatenation: {target_data.shape}")
 
         if apply_data_augmentation:
-            input_mel, target_data = apply_augmentation(input_mel, target_data)
+            input_mel, target_data = dataset.apply_augmentation(input_mel, target_data)
 
         if use_cache and cache_file_path:
             with h5py.File(cache_file_path, 'w') as f:
@@ -660,9 +665,9 @@ def load_batch_from_hdf5(file_path: str) -> Union[Dict[str, torch.Tensor], None]
             target_data = torch.tensor(f['target'][:]).float()
         logger.info(f"Loaded batch from {file_path}")
         return {'input': input_data, 'target': target_data}
-    except (FileNotFoundError, h5py.H5Error, KeyError) as e:
+    except (FileNotFoundError, h5py.H5Error, KeyError) as e:  # Catch specific exceptions
         logger.error(f"Error loading from cache file '{file_path}': {e}")
-        raise # Re-raise for further handling
+        raise  # Re-raise for further handling
 
 def dynamic_batching(dataset: Dataset, batch_size: int):
     loader = DataLoader(dataset, batch_size=batch_size, collate_fn=collate_fn)
