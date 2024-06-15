@@ -29,7 +29,11 @@ def train_single_stem(
     sample_rate: int, n_mels: int, n_fft: int, target_length: int, stop_flag: Any,
     suppress_reading_messages: bool = False
 ):
-    logger.info("Starting training for single stem: %s", stem_name)
+    if stem_name == "input":
+        logger.info(f"Skipping training for stem: {stem_name} (test input)")
+        return
+
+    logger.info(f"Starting training for single stem: {stem_name}")
     writer = SummaryWriter(log_dir=os.path.join(training_params['checkpoint_dir'], 'runs', f'stem_{stem_name}_{datetime.now().strftime("%Y%m%d-%H%M%S")}')) if model_params['tensorboard_flag'] else None
 
     model, discriminator, optimizer_g, optimizer_d = create_model_and_optimizer(

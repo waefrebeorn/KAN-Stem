@@ -31,12 +31,15 @@ def detect_parameters(data_dir: str, default_n_mels: int = 64, default_n_fft: in
     for file_name in os.listdir(data_dir):
         if file_name.endswith('.wav'):
             file_path = os.path.join(data_dir, file_name)
-            sample_rate, duration, is_silent = analyze_audio(file_path)
-            if is_silent:
-                logger.info(f"Skipping silent file: {file_name}")
-                continue
-            sample_rates.append(sample_rate)
-            durations.append(duration)
+            try:
+                sample_rate, duration, is_silent = analyze_audio(file_path)
+                if is_silent:
+                    logger.info(f"Skipping silent file: {file_name}")
+                    continue
+                sample_rates.append(sample_rate)
+                durations.append(duration)
+            except Exception as e:
+                logger.error(f"Error analyzing audio file {file_path}: {e}")
 
     logger.info(f"Found {len(sample_rates)} valid audio files")
 
@@ -73,9 +76,22 @@ class MultiScaleSpectralLoss(nn.Module):
     def forward(self, y_true: torch.Tensor, y_pred: torch.Tensor) -> torch.Tensor:
         loss = 0.0
         for n_fft in self.n_ffts:
-            y_true_stft = torch.stft(y_true, n_fft=n_fft, hop_length=n_fft//2, win_length=n_fft, return_complex=True)
-            y_pred_stft = torch.stft(y_pred, n_fft=n_fft, hop_length=n_fft//2, win_length=n_fft, return_complex=True)
-            loss += F.l1_loss(torch.abs(y_true_stft), torch.abs(y_pred_stft))
+            y_true_mono = y_true[:, 0, :, :]  # Select the Mel spectrogram channel
+            y_pred_mono = y_pred[:, 0, :, :]
+
+            if y_true_mono.shape != y_pred_mono.shape:
+                raise ValueError(f"Shape mismatch: y_true_mono shape {y_true_mono.shape}, y_pred_mono shape {y_pred_mono.shape}")
+
+            y_true_stft = torch.stft(y_true_mono, n_fft=n_fft, hop_length=n_fft//2, win_length=n_fft, return_complex=True)
+            y_pred_stft = torch.stft(y_pred_mono, n_fft=n_fft, hop_length=n_fft//2, win_length=n_fft, return_complex=True)
+
+            # Normalize the magnitude spectrogram
+            y_true_mag = torch.abs(y_true_stft)
+            y_pred_mag = torch.abs(y_pred_stft)
+            y_true_mag = y_true_mag / y_true_mag.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+            y_pred_mag = y_pred_mag / y_pred_mag.sum(dim=-1, keepdim=True).clamp(min=1e-8)
+
+            loss += F.l1_loss(y_true_mag, y_pred_mag)
         return loss
 
 class PerceptualLoss(nn.Module):
@@ -284,6 +300,15 @@ class StemSeparationDataset(Dataset):
 
         self.cache = LRUCache(cache_capacity)
 
+        self.mel_spectrogram = T.MelSpectrogram(
+            sample_rate=22050,
+            n_fft=self.n_fft,
+            win_length=None,
+            hop_length=self.n_fft // 4,
+            n_mels=self.n_mels,
+            power=2.0
+        ).to(torch.float32).to(self.device_prep)
+
     def _load_stem_names(self) -> Dict[str, List[str]]:
         stem_names = defaultdict(list)
         for file_name in os.listdir(self.data_dir):
@@ -370,7 +395,7 @@ class StemSeparationDataset(Dataset):
                     else:
                         if not self.suppress_reading_messages:
                             logger.warning(f"Invalid cached data for {file_name} (augmented={apply_data_augmentation}). Reprocessing.")
-                except Exception as e:
+                except (FileNotFoundError, h5py.H5Error, KeyError) as e:
                     if not self.suppress_reading_messages:
                         logger.warning(f"Error loading cached data for {file_name} (augmented={apply_data_augmentation}). Reprocessing. Error: {e}")
         return None
@@ -381,17 +406,9 @@ class StemSeparationDataset(Dataset):
 
         try:
             file_path = os.path.join(self.data_dir, file_name)
-            mel_spectrogram = T.MelSpectrogram(
-                sample_rate=22050,
-                n_fft=self.n_fft,
-                win_length=None,
-                hop_length=self.n_fft // 4,
-                n_mels=self.n_mels,
-                power=2.0
-            ).to(torch.float32).to(self.device_prep)
 
             extra_features = [calculate_harmonic_content, calculate_percussive_content]
-            input_mel, target_mel = load_and_preprocess(file_path, mel_spectrogram, self.target_length, self.device_prep, cache_dir=self.cache_dir, use_cache=self.use_cache, extra_features=extra_features)
+            input_mel, target_mel = load_and_preprocess(file_path, self.mel_spectrogram, self.target_length, self.device_prep, cache_dir=self.cache_dir, use_cache=self.use_cache, extra_features=extra_features)
             if input_mel is None:
                 raise ValueError(f"Failed to load and preprocess data for {file_name}")
 
@@ -406,7 +423,10 @@ class StemSeparationDataset(Dataset):
             if target_mel.shape[0] != input_mel.shape[0]:
                 target_mel = target_mel.unsqueeze(0)
 
-            data = {"input": input_mel, "target": target_mel, "file_paths": file_path}
+            if apply_data_augmentation:
+                input_mel, target_mel = self.apply_augmentation(input_mel, target_mel)
+
+            data = {"input": input_mel, "target": target_mel}
 
             self._save_individual_cache(file_name, data, apply_data_augmentation)
             self.cache.put(self._get_cache_key(file_name, apply_data_augmentation), data)
@@ -449,27 +469,22 @@ class StemSeparationDataset(Dataset):
 
         input_shape = data['input'].shape
         target_shape = data['target'].shape
-        expected_shape = (1, self.n_mels, self.target_length)
+        expected_input_shape = (1, self.n_mels, self.target_length)
+        expected_target_shape = (1, 3, self.n_mels, self.target_length)  # Update this according to actual target shape
 
-        if input_shape != expected_shape or target_shape != expected_shape:
+        if input_shape != expected_input_shape or target_shape != expected_target_shape:
             if not self.suppress_reading_messages:
-                logger.warning(f"Data validation failed: shape mismatch. Input shape: {input_shape}, Target shape: {target_shape}, Expected shape: {expected_shape}")
+                logger.warning(f"Data validation failed: shape mismatch. Input shape: {input_shape}, Target shape: {target_shape}, Expected input shape: {expected_input_shape}, Expected target shape: {expected_target_shape}")
             return False
 
         return True
 
 def pad_tensor(tensor: torch.Tensor, target_length: int, target_width: int) -> torch.Tensor:
-    if tensor.dim() == 2:
+    if tensor.dim() >= 2:  # Check if tensor is 2D or 3D
         current_length = tensor.size(1)
         current_width = tensor.size(0)
         if current_length < target_length or current_width < target_width:
             padding = (0, target_length - current_length, 0, target_width - current_width)
-            tensor = torch.nn.functional.pad(tensor, padding)
-    elif tensor.dim() == 3:
-        current_length = tensor.size(2)
-        current_width = tensor.size(1)
-        if current_length < target_length or current_width < target_width:
-            padding = (0, target_length - current_length, 0, 0, 0, target_width - current_width)
             tensor = torch.nn.functional.pad(tensor, padding)
     return tensor
 
@@ -537,7 +552,7 @@ def preprocess_data(
     if sample_rate != mel_spectrogram.sample_rate:
         data = librosa.resample(data, orig_sr=sample_rate, target_sr=mel_spectrogram.sample_rate)
 
-    input_data = mel_spectrogram(torch.tensor(data).to(device).float()).unsqueeze(0)
+    input_data = mel_spectrogram(waveform=torch.tensor(data).to(device).float()).unsqueeze(0)
     if input_data.shape[-1] < target_length:
         input_data = F.pad(input_data, (0, target_length - input_data.shape[-1]))
 
@@ -551,8 +566,8 @@ def preprocess_data(
     if use_cache and cache_file_path:
         logger.info(f"Saving to cache: {cache_file_path}")
         with h5py.File(cache_file_path, 'w') as f:
-            f.create_dataset('input', data=input_data.cpu().numpy())
-            f.create_dataset('target', data=target_data.cpu().numpy())
+            f.create_dataset('input', data=input_data.cpu().detach().numpy())
+            f.create_dataset('target', data=target_data.cpu().detach().numpy())
 
     return input_data, target_data
 
@@ -565,6 +580,7 @@ def load_and_preprocess(
     cache_file_path = os.path.join(cache_dir, f"{cache_key}.h5") if cache_dir else None
 
     if use_cache and cache_file_path and os.path.exists(cache_file_path):
+        logger.info(f"Loading from cache: {cache_file_path}")
         with h5py.File(cache_file_path, 'r') as f:
             input_data = torch.tensor(f['input'][:]).to(device).float()
             target_data = torch.tensor(f['target'][:]).to(device).float()
@@ -577,45 +593,46 @@ def load_and_preprocess(
         logger.error(f"Error reading file {file_path}: {e}")
         return None, None  
 
-    if sample_rate != mel_spectrogram.sample_rate:
-        data = librosa.resample(data, orig_sr=sample_rate, target_sr=mel_spectrogram.sample_rate)
+    try:
+        if sample_rate != mel_spectrogram.sample_rate:
+            data = librosa.resample(data, orig_sr=sample_rate, target_sr=mel_spectrogram.sample_rate)
 
-    input_mel = mel_spectrogram(torch.tensor(data).to(device).float()).unsqueeze(0)
+        input_mel = mel_spectrogram(waveform=torch.tensor(data).to(device).float()).unsqueeze(0)
+        if input_mel.shape[-1] < target_length:
+            input_mel = F.pad(input_mel, (0, target_length - input_mel.shape[-1]))
 
-    if input_mel.shape[-1] < target_length:
-        input_mel = F.pad(input_mel, (0, target_length - input_mel.shape[-1]))
+        input_mel = input_mel.unsqueeze(0) if input_mel.dim() == 3 else input_mel
+        logger.info(f"Input data shape after padding: {input_mel.shape}")
 
-    input_mel = input_mel.unsqueeze(0)
+        features = []
+        if extra_features:
+            for feature in extra_features:
+                feature_data = feature(data, sample_rate, mel_spectrogram.n_mels, target_length).to(device).float()
+                logger.info(f"Feature {feature.__name__} shape before padding: {feature_data.shape}")
+                if feature_data.shape[-1] < target_length:
+                    feature_data = F.pad(feature_data, (0, target_length - feature_data.shape[-1]))
+                feature_data = feature_data.unsqueeze(0)  # Add a batch dimension
+                logger.info(f"Feature {feature.__name__} shape after padding: {feature_data.shape}")
+                features.append(feature_data)
 
-    logger.info(f"Input data shape after padding: {input_mel.shape}")
+        target_data = torch.cat([input_mel] + features, dim=1)
+        logger.info(f"Target data shape after concatenation: {target_data.shape}")
 
-    features = []
-    if extra_features:
-        for feature in extra_features:
-            feature_data = feature(data, sample_rate, mel_spectrogram.n_mels, target_length).to(device)
-            logger.info(f"Feature {feature.__name__} shape before padding: {feature_data.shape}")
+        if apply_data_augmentation:
+            input_mel, target_data = apply_augmentation(input_mel, target_data)
 
-            if feature_data.shape[-1] < target_length:
-                feature_data = F.pad(feature_data, (0, target_length - feature_data.shape[-1]))
+        if use_cache and cache_file_path:
+            with h5py.File(cache_file_path, 'w') as f:
+                f.create_dataset('input', data=input_mel.cpu().numpy())
+                f.create_dataset('target', data=target_data.cpu().numpy())
+            logger.info(f"Saved to cache: {cache_file_path}, input shape: {input_mel.shape}, target shape: {target_data.shape}")
 
-            feature_data = feature_data.unsqueeze(0) if feature_data.dim() == 2 else feature_data
-            features.append(feature_data)
+        return input_mel, target_data
 
-    if features:
-        input_mel = torch.cat([input_mel] + features, dim=1)
+    except Exception as e:
+        logger.error(f"Error processing file {file_path}: {e}")
+        return None, None
 
-    logger.info(f"Input data shape after concatenation: {input_mel.shape}")
-
-    target_data = input_mel.clone()
-
-    if use_cache and cache_file_path:
-        with h5py.File(cache_file_path, 'w') as f:
-            f.create_dataset('input', data=input_mel.cpu().numpy())
-            f.create_dataset('target', data=target_data.cpu().numpy())
-        logger.info(f"Saved to cache: {cache_file_path}, input shape: {input_mel.shape}, target shape: {target_data.shape}")
-
-    return input_mel, target_data
-    
 def monitor_memory_usage():
     try:
         memory_info = psutil.virtual_memory()
@@ -643,9 +660,9 @@ def load_batch_from_hdf5(file_path: str) -> Union[Dict[str, torch.Tensor], None]
             target_data = torch.tensor(f['target'][:]).float()
         logger.info(f"Loaded batch from {file_path}")
         return {'input': input_data, 'target': target_data}
-    except Exception as e:
-        logger.error(f"Error loading batch from HDF5: {e}")
-        return None
+    except (FileNotFoundError, h5py.H5Error, KeyError) as e:
+        logger.error(f"Error loading from cache file '{file_path}': {e}")
+        raise # Re-raise for further handling
 
 def dynamic_batching(dataset: Dataset, batch_size: int):
     loader = DataLoader(dataset, batch_size=batch_size, collate_fn=collate_fn)
@@ -655,7 +672,7 @@ def dynamic_batching(dataset: Dataset, batch_size: int):
         if batch_idx == 0:
             file_paths = batch.get("file_paths")  # Get file paths from the first batch
         yield batch['input'], batch['target'], file_paths  # Yield input, target, and file paths
-        
+
 def check_and_reshape(tensor: torch.Tensor, target_shape: torch.Tensor, logger: logging.Logger) -> torch.Tensor:
     target_numel = target_shape.numel()
     output_numel = tensor.numel()
@@ -682,10 +699,13 @@ def calculate_harmonic_content(data: np.ndarray, sample_rate: int, n_mels: int, 
     if harmonic.ndim > 1:
         harmonic = harmonic.mean(axis=0)
     
-    harmonic_content = torch.tensor(harmonic).float().unsqueeze(0)
+    mel_spectrogram = librosa.feature.melspectrogram(harmonic, sr=sample_rate, n_fft=1024, hop_length=512, n_mels=n_mels)
+    log_mel_spectrogram = librosa.power_to_db(mel_spectrogram)
+    harmonic_content = torch.tensor(log_mel_spectrogram).float()
     harmonic_content = pad_tensor(harmonic_content, target_length, n_mels)
     harmonic_content = harmonic_content[:n_mels, :target_length]
-    return harmonic_content.unsqueeze(0)
+
+    return harmonic_content.to(torch.float32)  # Convert to float32
 
 def calculate_percussive_content(data: np.ndarray, sample_rate: int, n_mels: int, target_length: int) -> torch.Tensor:
     """Calculate percussive content and match the shape of the Mel spectrogram."""
@@ -694,13 +714,19 @@ def calculate_percussive_content(data: np.ndarray, sample_rate: int, n_mels: int
     if percussive.ndim > 1:
         percussive = percussive.mean(axis=0)
 
-    percussive_content = torch.tensor(percussive).float().unsqueeze(0)
+    mel_spectrogram = librosa.feature.melspectrogram(percussive, sr=sample_rate, n_fft=1024, hop_length=512, n_mels=n_mels)
+    log_mel_spectrogram = librosa.power_to_db(mel_spectrogram)
+    percussive_content = torch.tensor(log_mel_spectrogram).float()
     percussive_content = pad_tensor(percussive_content, target_length, n_mels)
     percussive_content = percussive_content[:n_mels, :target_length]
-    return percussive_content.unsqueeze(0)
+    return percussive_content.to(torch.float32)  # Convert to float32
 
 def load_from_cache(file_path: str) -> Dict[str, torch.Tensor]:
-    with h5py.File(file_path, 'r') as f:
-        input_data = torch.tensor(f['input'][:]).float()
-        target_data = torch.tensor(f['target'][:]).float()
-    return {'input': input_data, 'target': target_data}
+    try:
+        with h5py.File(file_path, 'r') as f:
+            input_data = torch.tensor(f['input'][:]).float()
+            target_data = torch.tensor(f['target'][:]).float()
+        return {'input': input_data, 'target': target_data}
+    except (FileNotFoundError, h5py.H5Error, KeyError) as e:  # Catch specific exceptions
+        logger.error(f"Error loading from cache file '{file_path}': {e}")
+        raise  # Re-raise for further handling

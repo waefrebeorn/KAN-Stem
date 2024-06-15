@@ -118,7 +118,7 @@ class KANWithDepthwiseConv(nn.Module):
                 logger.info(f"{layer.__class__.__name__}: {x.shape}")
         return x
 
-    def forward(self, x, suppress_reading_messages=True, initialize=False):
+    def forward(self, x, suppress_reading_messages=True, is_initializing=False):
         if not suppress_reading_messages:
             logger.info(f"Input shape: {x.shape}")
 
@@ -138,14 +138,18 @@ class KANWithDepthwiseConv(nn.Module):
         if not suppress_reading_messages:
             logger.info(f"Shape after adding dimensions: {x.shape}")
 
-        if initialize:
+        if is_initializing:
             x = self.forward_impl(x, suppress_reading_messages)
             return x
 
         if x.shape[-1] > self.n_mels * self.target_length:
             num_segments = (x.shape[-1] + self.n_mels * self.target_length - 1) // (self.n_mels * self.target_length)
             segments = [x[:, :, :, i * self.n_mels * self.target_length:(i + 1) * self.n_mels * self.target_length] for i in range(num_segments)]
+            if segments[-1].shape[-1] < self.n_mels * self.target_length:
+                segments[-1] = F.pad(segments[-1], (0, self.n_mels * self.target_length - segments[-1].shape[-1]))
         else:
+            if x.shape[-1] < self.n_mels * self.target_length:
+                x = F.pad(x, (0, self.n_mels * self.target_length - x.shape[-1]))
             segments = [x]
 
         if not suppress_reading_messages:
@@ -290,10 +294,14 @@ def check_and_reshape(outputs, targets, logger):
     return outputs
 
 def load_from_cache(cache_file_path):
-    with h5py.File(cache_file_path, 'r') as f:
-        input_data = torch.tensor(f['input'][:]).float()
-        target_data = torch.tensor(f['target'][:]).float()
-    return {'input': input_data, 'target': target_data}
+    try:
+        with h5py.File(cache_file_path, 'r') as f:
+            input_data = torch.tensor(f['input'][:]).float()
+            target_data = torch.tensor(f['target'][:]).float()
+        return {'input': input_data, 'target': target_data}
+    except Exception as e:
+        logger.error(f"Error loading batch from HDF5: {e}")
+        raise
 
 if __name__ == "__main__":
     logger.info("Model script executed directly.")
