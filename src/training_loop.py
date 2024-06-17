@@ -303,20 +303,11 @@ def start_training(
     target_length = sample_rate // 2  # Assuming a 0.5-second target length
 
     if use_cache:
-        preprocess_and_cache_dataset(data_dir, n_mels, target_length, n_fft, training_params['cache_dir'], False, training_params['suppress_warnings'], training_params['suppress_reading_messages'], training_params['num_workers'], device, stop_flag)
+        dataset, mel_spectrogram = preprocess_and_cache_dataset(data_dir, n_mels, target_length, n_fft, training_params['cache_dir'], False, training_params['suppress_warnings'], training_params['suppress_reading_messages'], training_params['num_workers'], device, stop_flag)
         if apply_data_augmentation:
-            preprocess_and_cache_dataset(data_dir, n_mels, target_length, n_fft, training_params['cache_dir'], True, training_params['suppress_warnings'], training_params['suppress_reading_messages'], training_params['num_workers'], device, stop_flag)
-        
-        dataset = StemSeparationDataset(
-            data_dir, n_mels, target_length, n_fft, training_params['cache_dir'], apply_data_augmentation=training_params['apply_data_augmentation'],
-            suppress_warnings=training_params['suppress_warnings'], suppress_reading_messages=training_params['suppress_reading_messages'],
-            num_workers=training_params['num_workers'], device_prep=device, stop_flag=stop_flag, use_cache=use_cache
-        )
-        val_dataset = StemSeparationDataset(
-            val_dir, n_mels, target_length, n_fft, training_params['cache_dir'], apply_data_augmentation=False,
-            suppress_warnings=training_params['suppress_warnings'], suppress_reading_messages=training_params['suppress_reading_messages'],
-            num_workers=training_params['num_workers'], device_prep=device, stop_flag=stop_flag, use_cache=use_cache
-        )
+            val_dataset, _ = preprocess_and_cache_dataset(val_dir, n_mels, target_length, n_fft, training_params['cache_dir'], False, training_params['suppress_warnings'], training_params['suppress_reading_messages'], training_params['num_workers'], device, stop_flag)
+        else:
+            val_dataset = dataset  # Use the same dataset for training and validation
     else:
         raise ValueError("use_cache must be True for this code.")
 
