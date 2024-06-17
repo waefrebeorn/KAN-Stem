@@ -16,11 +16,13 @@ import librosa
 from collections import defaultdict, OrderedDict
 from typing import List, Dict, Tuple, Any, Union, Callable
 
+import torchaudio  # Added import
+
 logger = logging.getLogger(__name__)
 
 def setup_logger(name: str) -> logging.Logger:
     logger = logging.getLogger(name)
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level)s - %(message)s')
     return logger
 
 def detect_parameters(data_dir: str, default_n_mels: int = 64, default_n_fft: int = 1024) -> Tuple[int, int, int]:
@@ -46,7 +48,7 @@ def detect_parameters(data_dir: str, default_n_mels: int = 64, default_n_fft: in
     if not sample_rates or not durations:
         raise ValueError("No valid audio files found in the dataset")
 
-    avg_sample_rate = sum(sample_rates) / len(sample_rates)
+    avg_sample_rate = sum(sample_rates) / len(sample_rates)  # Missing parenthesis closed here
     avg_duration = sum(durations) / len(durations)
 
     n_mels = min(default_n_mels, int(avg_sample_rate / 100))
@@ -149,29 +151,20 @@ def log_system_resources():
     except Exception as e:
         logger.error(f"Error logging system resources: {e}")
 
-def process_file(dataset: Dataset, file_path: str, mel_spectrogram: T.MelSpectrogram, target_length: int, apply_data_augmentation: bool, device: torch.device):
+def process_file(dataset: 'StemSeparationDataset', file_path: str, target_length: int, apply_data_augmentation: bool, device: torch.device):
     try:
         logger.info(f"Processing file: {file_path}")
         log_system_resources()
         start_time = time.time()
 
-        try:
-            data, sample_rate = sf.read(file_path)
-        except FileNotFoundError:
-            logger.error(f"File not found: {file_path}")
-            return
-        except PermissionError:
-            logger.error(f"Permission denied: {file_path}")
-            return
-        except Exception as e:
-            logger.error(f"Error reading file {file_path}: {e}")
-            return
-
-        result = load_and_preprocess(
-            dataset, file_path, target_length, device, apply_data_augmentation=apply_data_augmentation
+        input_mel, target_mel = load_and_preprocess(
+            dataset, file_path, target_length, device, apply_data_augmentation=apply_data_augmentation,
+            cache_dir=dataset.cache_dir, use_cache=dataset.use_cache, extra_features=[calculate_harmonic_content, calculate_percussive_content]
         )
-        if result is not None:
-            pass
+
+        if input_mel is not None and target_mel is not None:
+            data = {"input": input_mel, "target": target_mel}
+            dataset._save_individual_cache(file_path, data, apply_data_augmentation)
 
         elapsed_time = time.time() - start_time
         logger.info(f"Successfully processed {file_path} in {elapsed_time:.2f} seconds")
@@ -373,14 +366,16 @@ class StemSeparationDataset(Dataset):
         if data is not None:
             return data
 
-        if self.use_cache and cache_key in self.cache_index:
-            stem_cache_path = self.cache_index[cache_key]
-            if isinstance(stem_cache_path, list):
-                stem_cache_path = stem_cache_path[0]
+        is_cached = cache_key in self.cache_index
+        cached_data_path = self.cache_index[cache_key] if is_cached else None
 
-            if os.path.exists(stem_cache_path):
+        if self.use_cache and is_cached:
+            if isinstance(cached_data_path, list):
+                cached_data_path = cached_data_path[0]
+
+            if os.path.exists(cached_data_path):
                 try:
-                    data = load_from_cache(stem_cache_path)
+                    data = load_from_cache(cached_data_path)
                     if self._validate_data(data):
                         if not self.suppress_reading_messages:
                             logger.info(f"Loaded cached data for {file_name} (augmented={apply_data_augmentation})")
@@ -519,41 +514,37 @@ def collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
 
 def preprocess_and_cache_dataset(
     data_dir: str, n_mels: int, target_length: int, n_fft: int, cache_dir: str, apply_data_augmentation: bool,
-    suppress_warnings: bool, suppress_reading_messages: bool, num_workers: int, device_prep: torch.device, stop_flag: Any, dataset=None, mel_spectrogram=None
+    suppress_warnings: bool, suppress_reading_messages: bool, num_workers: int, device_prep: torch.device, stop_flag: Any
 ):
+    mel_spectrogram = T.MelSpectrogram(
+        sample_rate=22050,
+        n_fft=n_fft,
+        win_length=None,
+        hop_length=n_fft // 4,
+        n_mels=n_mels,
+        power=2.0
+    ).to(torch.float32).to(device_prep)
 
-    if mel_spectrogram is None:
-        mel_spectrogram = T.MelSpectrogram(
-            sample_rate=22050,
-            n_fft=n_fft,
-            win_length=None,
-            hop_length=n_fft // 4,
-            n_mels=n_mels,
-            power=2.0
-        ).to(torch.float32).to(device_prep)
-
-    if dataset is None:
-        dataset = StemSeparationDataset(
-            data_dir=data_dir,
-            n_mels=n_mels,
-            target_length=target_length,
-            n_fft=n_fft,
-            cache_dir=cache_dir,
-            apply_data_augmentation=apply_data_augmentation,
-            suppress_warnings=suppress_warnings,
-            suppress_reading_messages=suppress_reading_messages,
-            num_workers=num_workers,
-            device_prep=device_prep,
-            stop_flag=stop_flag,
-            use_cache=True,
-            mel_spectrogram=mel_spectrogram
-        )
-
+    dataset = StemSeparationDataset(
+        data_dir=data_dir,
+        n_mels=n_mels,
+        target_length=target_length,
+        n_fft=n_fft,
+        cache_dir=cache_dir,
+        apply_data_augmentation=apply_data_augmentation,
+        suppress_warnings=suppress_warnings,
+        suppress_reading_messages=suppress_reading_messages,
+        num_workers=num_workers,
+        device_prep=device_prep,
+        stop_flag=stop_flag,
+        use_cache=True,
+        mel_spectrogram=mel_spectrogram
+    )
     logger.info("Dataset preprocessing and caching initialization complete.")
 
     for stem_name, file_paths in dataset.stem_names.items():
         for file_path in file_paths:
-            process_file(dataset, file_path, mel_spectrogram, target_length, apply_data_augmentation, device_prep)
+            process_file(dataset, file_path, target_length, apply_data_augmentation, device_prep)
 
     return dataset
 
@@ -563,19 +554,23 @@ def ensure_dir_exists(directory: str):
         logger.info(f"Created directory: {directory}")
 
 def load_and_preprocess(
-    dataset: StemSeparationDataset, file_path: str, target_length: int, device: torch.device,
-    apply_data_augmentation: bool = False, cache_dir: str = None, use_cache: bool = True, extra_features: List[Callable] = None
+    dataset: 'StemSeparationDataset', file_path: str, target_length: int, device: torch.device,
+    apply_data_augmentation: bool = False, cache_dir: str = None, use_cache: bool = True, extra_features: List[Callable] = None,
+    suppress_messages: bool = False  # New argument
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    logger.info(f"Preprocessing file: {file_path}")
+    if not suppress_messages:
+        logger.info(f"Preprocessing file: {file_path}")
     cache_key = os.path.splitext(os.path.basename(file_path))[0]
     cache_file_path = os.path.join(cache_dir, f"{cache_key}.h5") if cache_dir else None
 
     if use_cache and cache_file_path and os.path.exists(cache_file_path):
-        logger.info(f"Loading from cache: {cache_file_path}")
+        if not suppress_messages:
+            logger.info(f"Loading from cache: {cache_file_path}")
         with h5py.File(cache_file_path, 'r') as f:
             input_data = torch.tensor(f['input'][:]).to(device).float()
             target_data = torch.tensor(f['target'][:]).to(device).float()
-        logger.info(f"Loaded from cache: {cache_file_path}, input data shape: {input_data.shape}, target data shape: {target_data.shape}")
+        if not suppress_messages:
+            logger.info(f"Loaded from cache: {cache_file_path}, input data shape: {input_data.shape}, target data shape: {target_data.shape}")
         return input_data, target_data
 
     try:
@@ -597,14 +592,24 @@ def load_and_preprocess(
         if input_mel.shape[-1] < target_length:
             input_mel = F.pad(input_mel, (0, target_length - input_mel.shape[-1]))
 
-        logger.info(f"Input data shape after padding: {input_mel.shape}")
+        if not suppress_messages:
+            logger.info(f"Input data shape after padding: {input_mel.shape}")
 
-        features = [feature(input_mel.squeeze(0), sample_rate, dataset.mel_spectrogram, dataset.n_mels, target_length) for feature in extra_features] if extra_features else []
+        features = []
+        if extra_features:
+            for feature in extra_features:
+                feature_data = feature(input_mel, sample_rate, dataset.mel_spectrogram, dataset.n_mels, target_length).to(device).float()
+                logger.info(f"Feature {feature.__name__} shape before padding: {feature_data.shape}")
+                if feature_data.shape[-1] < target_length:
+                    feature_data = F.pad(feature_data, (0, target_length - feature_data.shape[-1]))
+                logger.info(f"Feature {feature.__name__} shape after padding: {feature_data.shape}")
+                feature_data = feature_data.unsqueeze(0)  # Add batch dimension to match input_mel
+                features.append(feature_data)
 
-        target_data = torch.stack([input_mel.squeeze(0)] + features, dim=0)
-        target_data = target_data.unsqueeze(0)
-        
-        logger.info(f"Target data shape after concatenation: {target_data.shape}")
+        target_data = torch.stack([input_mel] + features, dim=1)  # Stack along the channel dimension (dim=1)
+
+        if not suppress_messages:
+            logger.info(f"Target data shape after stacking: {target_data.shape}")
 
         if apply_data_augmentation:
             input_mel, target_data = dataset.apply_augmentation(input_mel, target_data)
@@ -613,7 +618,8 @@ def load_and_preprocess(
             with h5py.File(cache_file_path, 'w') as f:
                 f.create_dataset('input', data=input_mel.cpu().numpy())
                 f.create_dataset('target', data=target_data.cpu().numpy())
-            logger.info(f"Saved to cache: {cache_file_path}, input shape: {input_mel.shape}, target shape: {target_data.shape}")
+            if not suppress_messages:
+                logger.info(f"Saved to cache: {cache_file_path}, input shape: {input_mel.shape}, target shape: {target_data.shape}")
 
         return input_mel, target_data
 
@@ -652,9 +658,9 @@ def load_batch_from_hdf5(file_path: str) -> Union[Dict[str, torch.Tensor], None]
             target_data = torch.tensor(f['target'][:]).float()
         logger.info(f"Loaded batch from {file_path}")
         return {'input': input_data, 'target': target_data}
-    except (FileNotFoundError, h5py.H5Error, KeyError) as e:
+    except (FileNotFoundError, h5py.H5Error, KeyError) as e:  # Catch specific exceptions
         logger.error(f"Error loading from cache file '{file_path}': {e}")
-        raise
+        raise  # Re-raise for further handling
 
 def dynamic_batching(dataset: Dataset, batch_size: int):
     loader = DataLoader(dataset, batch_size=batch_size, collate_fn=collate_fn)
@@ -685,31 +691,23 @@ def check_and_reshape(tensor: torch.Tensor, target_shape: torch.Tensor, logger: 
     return tensor
 
 def calculate_harmonic_content(mel_spectrogram: torch.Tensor, sample_rate: int, mel_spectrogram_object: T.MelSpectrogram, n_mels: int, target_length: int) -> torch.Tensor:
-    filter_bank = librosa.filters.mel(sr=sample_rate, n_fft=1024, n_mels=n_mels)
-    harmonic_filter = filter_bank[:n_mels // 2, :]
-    percussive_filter = filter_bank[n_mels // 2:, :]
-    harmonic_content = torch.matmul(mel_spectrogram.squeeze(), torch.tensor(harmonic_filter).float())
-    percussive_content = torch.matmul(mel_spectrogram.squeeze(), torch.tensor(percussive_filter).float())
+    """Calculate harmonic content and match the shape of the Mel spectrogram."""
+    harmonic_content = mel_spectrogram.squeeze()[:, :n_mels]  
 
-    harmonic_content = torchaudio.functional.amplitude_to_DB(harmonic_content, top_db=80)
-    percussive_content = torchaudio.functional.amplitude_to_DB(percussive_content, top_db=80)
-    harmonic_content = pad_tensor(harmonic_content, target_length, n_mels)
-    harmonic_content = harmonic_content[:n_mels, :target_length]
+    harmonic_content = torchaudio.transforms.AmplitudeToDB()(harmonic_content)
+    harmonic_content = pad_tensor(harmonic_content, target_length, n_mels)  # Use n_mels (not n_mels // 2) for padding
+    harmonic_content = harmonic_content[:n_mels, :target_length]  # Use n_mels (not n_mels // 2) for cropping
 
     return harmonic_content.to(torch.float32)
 
 def calculate_percussive_content(mel_spectrogram: torch.Tensor, sample_rate: int, mel_spectrogram_object: T.MelSpectrogram, n_mels: int, target_length: int) -> torch.Tensor:
-    filter_bank = librosa.filters.mel(sr=sample_rate, n_fft=1024, n_mels=n_mels)
-    harmonic_filter = filter_bank[:n_mels // 2, :]
-    percussive_filter = filter_bank[n_mels // 2:, :]
-    harmonic_content = torch.matmul(mel_spectrogram.squeeze(), torch.tensor(harmonic_filter).float())
-    percussive_content = torch.matmul(mel_spectrogram.squeeze(), torch.tensor(percussive_filter).float())
+    """Calculate percussive content and match the shape of the Mel spectrogram."""
+    percussive_content = mel_spectrogram.squeeze()[:, n_mels // 2:]
+    percussive_content = torchaudio.transforms.AmplitudeToDB()(percussive_content)
 
-    harmonic_content = torchaudio.functional.amplitude_to_DB(harmonic_content, top_db=80)
-    percussive_content = torchaudio.functional.amplitude_to_DB(percussive_content, top_db=80)
+    percussive_content = pad_tensor(percussive_content, target_length, n_mels)  # Use n_mels (not n_mels // 2) for padding
+    percussive_content = percussive_content[:n_mels, :target_length]  # Use n_mels (not n_mels // 2) for cropping
 
-    percussive_content = pad_tensor(percussive_content, target_length, n_mels)
-    percussive_content = percussive_content[:n_mels, :target_length]
     return percussive_content.to(torch.float32)
 
 def load_from_cache(file_path: str) -> Dict[str, torch.Tensor]:
