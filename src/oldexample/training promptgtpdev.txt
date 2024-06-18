@@ -1,0 +1,19 @@
+the training should be taking on input file for example "input_117.h5" and then matching it with the chosen stem via the indetifier number, in this example 117,
+".\cache\target_vocals_117.h5"
+".\cache\target_other_117.h5"
+".\cache\target_noise_117.h5"
+".\cache\target_keys_117.h5"
+".\cache\target_guitar_117.h5"
+".\cache\target_drums_117.h5"
+".\cache\target_bass_117.h5"
+".\cache\input_117.h5"
+here are examples of filenames
+for a single stem training, the input is the test
+if the single stem we are training would be for example "vocals" we then use ".\cache\target_vocals_117.h5" to test against ".\cache\input_117.h5"
+with the other stems ".\cache\target_other_117.h5"
+".\cache\target_noise_117.h5"
+".\cache\target_keys_117.h5"
+".\cache\target_guitar_117.h5"
+".\cache\target_drums_117.h5"
+".\cache\target_bass_117.h5" being used as the learning how to differentiate and use the model to create the wanted vocal, so it can stem seperate,
+if the data isn't put in right or shuffled, testing will be messed up, so do it the way I describe

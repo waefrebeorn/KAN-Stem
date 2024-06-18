@@ -76,25 +76,23 @@ def train_single_stem(
         optimizer_g.zero_grad(set_to_none=True)
         optimizer_d.zero_grad(set_to_none=True)
 
-        for i, (inputs, targets, file_paths) in enumerate(dynamic_batching(dataset, training_params['batch_size'], stem_name)):
+        for i, batch in enumerate(dynamic_batching(dataset, training_params['batch_size'], stem_name)):
             if stop_flag.value == 1:
                 logger.info("Training stopped.")
                 return
 
-            if inputs is None or targets is None:
+            if batch is None or 'inputs' not in batch or 'targets' not in batch:
                 continue
 
-            logger.debug(f"Processing batch {i+1}/{len(dataset)}")
-
-            inputs = inputs.to(training_params['device_str']).float()
-            targets = targets.to(training_params['device_str']).float()
+            inputs = batch['inputs'].to(training_params['device_str']).float()
+            targets = batch['targets'].to(training_params['device_str']).float()
 
             input_segments = inputs.chunk(training_params.get('segments_per_track', 1), dim=-1)
             target_segments = targets.chunk(training_params.get('segments_per_track', 1), dim=-1)
 
             with autocast():
                 for input_seg, target_seg in zip(input_segments, target_segments):
-                    logger.info(f"Shape of input_seg before model: {input_seg.shape}")  # Log the shape of input_seg
+                    logger.info(f"Shape of input_seg before model: {input_seg.shape}")
 
                     if input_seg.dim() != 3 and input_seg.dim() != 4:
                         raise ValueError(f"Expected input tensor to have 3 or 4 dimensions, got {input_seg.dim()}")
@@ -176,25 +174,21 @@ def train_single_stem(
 
         with torch.no_grad():
             try:
-                for i, (inputs, targets, file_paths) in enumerate(dynamic_batching(val_dataset, training_params['batch_size'], stem_name)):
+                for i, batch in enumerate(dynamic_batching(val_dataset, training_params['batch_size'], stem_name)):
                     if stop_flag.value == 1:
                         logger.info("Training stopped.")
                         return
 
-                    if inputs is None or targets is None:
+                    if batch is None or 'inputs' not in batch or 'targets' not in batch:
                         continue
 
-                    logger.debug(f"Validating batch {i+1}/{len(val_dataset)}")
-
-                    inputs = inputs.to(training_params['device_str']).float()
-                    targets = targets.to(training_params['device_str']).float()
+                    inputs = batch['inputs'].to(training_params['device_str']).float()
+                    targets = batch['targets'].to(training_params['device_str']).float()
                     outputs = model(inputs)
 
                     if outputs is None:
                         logger.error(f"Model returned None for validation batch {i+1}. Skipping this batch.")
                         continue
-
-                    logger.debug(f"Validation output shape: {outputs.shape}")
 
                     loss = model_params['loss_function_g'](outputs, targets)
                     val_loss += loss.item()
@@ -309,27 +303,33 @@ def start_training(
 
     if use_cache:
         dataset = preprocess_and_cache_dataset(data_dir, n_mels, target_length, n_fft, training_params['cache_dir'], apply_data_augmentation, training_params['suppress_warnings'], training_params['suppress_reading_messages'], training_params['num_workers'], device, stop_flag)
-        if apply_data_augmentation:
-            val_dataset = preprocess_and_cache_dataset(val_dir, n_mels, target_length, n_fft, training_params['cache_dir'], apply_data_augmentation, training_params['suppress_warnings'], training_params['suppress_reading_messages'], training_params['num_workers'], device, stop_flag)
-        else:
-            val_dataset = dataset  # Use the same dataset for training and validation
+        val_dataset = preprocess_and_cache_dataset(val_dir, n_mels, target_length, n_fft, training_params['cache_dir'], apply_data_augmentation, training_params['suppress_warnings'], training_params['suppress_reading_messages'], training_params['num_workers'], device, stop_flag)
+
+        # Extract and iterate over stem names correctly
+        stem_names = list(dataset.stem_names.keys())
+        for stem_name in stem_names:
+            if stop_flag.value == 1:
+                logger.info("Training stopped.")
+                return
+
+            # Warm up cache only once per stem
+            warm_up_cache_batch(dataset, training_params['batch_size'], stem_name)
+            warm_up_cache_batch(val_dataset, training_params['batch_size'], stem_name)
+
+            # Create filtered datasets for the current stem
+            filtered_dataset = [item for item in dataset if os.path.basename(item['file_path']).split('_')[1] == stem_name]
+            filtered_val_dataset = [item for item in val_dataset if os.path.basename(item['file_path']).split('_')[1] == stem_name]
+
+            train_single_stem(stem_name, filtered_dataset, filtered_val_dataset, training_params, model_params, sample_rate, n_mels, n_fft, target_length, stop_flag)
     else:
         raise ValueError("use_cache must be True for this code.")
-
-    stem_names = ["vocals", "other", "noise", "keys", "guitar", "drums", "bass"]
-    for stem_name in stem_names:
-        if stop_flag.value == 1:
-            logger.info("Training stopped.")
-            return
-
-        train_single_stem(stem_name, dataset, val_dataset, training_params, model_params, sample_rate, n_mels, n_fft, target_length, stop_flag)
 
     logger.info("Training finished.")
 
 if __name__ == '__main__':
     import multiprocessing
     stop_flag = multiprocessing.Value('i', 0)
-    
+
     start_training(
         data_dir='path_to_data',
         val_dir='path_to_val_data',
