@@ -76,7 +76,7 @@ def train_single_stem(
         optimizer_g.zero_grad(set_to_none=True)
         optimizer_d.zero_grad(set_to_none=True)
 
-        for i, (inputs, targets, file_paths) in enumerate(dynamic_batching(dataset, training_params['batch_size'])):
+        for i, (inputs, targets, file_paths) in enumerate(dynamic_batching(dataset, training_params['batch_size'], stem_name)):
             if stop_flag.value == 1:
                 logger.info("Training stopped.")
                 return
@@ -94,6 +94,11 @@ def train_single_stem(
 
             with autocast():
                 for input_seg, target_seg in zip(input_segments, target_segments):
+                    logger.info(f"Shape of input_seg before model: {input_seg.shape}")  # Log the shape of input_seg
+
+                    if input_seg.dim() != 3 and input_seg.dim() != 4:
+                        raise ValueError(f"Expected input tensor to have 3 or 4 dimensions, got {input_seg.dim()}")
+
                     outputs = model(input_seg)
 
                     if outputs is None:
@@ -171,7 +176,7 @@ def train_single_stem(
 
         with torch.no_grad():
             try:
-                for i, (inputs, targets, file_paths) in enumerate(dynamic_batching(val_dataset, training_params['batch_size'])):
+                for i, (inputs, targets, file_paths) in enumerate(dynamic_batching(val_dataset, training_params['batch_size'], stem_name)):
                     if stop_flag.value == 1:
                         logger.info("Training stopped.")
                         return
@@ -243,7 +248,7 @@ def train_single_stem(
 
     if model_params['tensorboard_flag']:
         writer.close()
-        
+
 def start_training(
     data_dir: str, val_dir: str, batch_size: int, num_epochs: int, initial_lr_g: float, initial_lr_d: float, 
     use_cuda: bool, checkpoint_dir: str, save_interval: int, accumulation_steps: int, num_stems: int, 
@@ -303,15 +308,16 @@ def start_training(
     target_length = sample_rate // 2  # Assuming a 0.5-second target length
 
     if use_cache:
-        dataset, mel_spectrogram = preprocess_and_cache_dataset(data_dir, n_mels, target_length, n_fft, training_params['cache_dir'], False, training_params['suppress_warnings'], training_params['suppress_reading_messages'], training_params['num_workers'], device, stop_flag)
+        dataset = preprocess_and_cache_dataset(data_dir, n_mels, target_length, n_fft, training_params['cache_dir'], apply_data_augmentation, training_params['suppress_warnings'], training_params['suppress_reading_messages'], training_params['num_workers'], device, stop_flag)
         if apply_data_augmentation:
-            val_dataset, _ = preprocess_and_cache_dataset(val_dir, n_mels, target_length, n_fft, training_params['cache_dir'], False, training_params['suppress_warnings'], training_params['suppress_reading_messages'], training_params['num_workers'], device, stop_flag)
+            val_dataset = preprocess_and_cache_dataset(val_dir, n_mels, target_length, n_fft, training_params['cache_dir'], apply_data_augmentation, training_params['suppress_warnings'], training_params['suppress_reading_messages'], training_params['num_workers'], device, stop_flag)
         else:
             val_dataset = dataset  # Use the same dataset for training and validation
     else:
         raise ValueError("use_cache must be True for this code.")
 
-    for stem_name in dataset.stem_names.keys():
+    stem_names = ["vocals", "other", "noise", "keys", "guitar", "drums", "bass"]
+    for stem_name in stem_names:
         if stop_flag.value == 1:
             logger.info("Training stopped.")
             return

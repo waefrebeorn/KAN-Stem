@@ -298,6 +298,8 @@ def load_from_cache(cache_file_path):
         with h5py.File(cache_file_path, 'r') as f:
             input_data = torch.tensor(f['input'][:]).float()
             target_data = torch.tensor(f['target'][:]).float()
+            input_data = input_data.unsqueeze(0).unsqueeze(0) if input_data.dim() == 2 else input_data.unsqueeze(1)
+            target_data = target_data.unsqueeze(0).unsqueeze(0) if target_data.dim() == 2 else target_data.unsqueeze(1)
         return {'input': input_data, 'target': target_data}
     except Exception as e:
         logger.error(f"Error loading batch from HDF5: {e}")

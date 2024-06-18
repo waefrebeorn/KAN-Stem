@@ -16,8 +16,6 @@ import librosa
 from collections import defaultdict, OrderedDict
 from typing import List, Dict, Tuple, Any, Union, Callable
 
-import torchaudio  # Added import
-
 logger = logging.getLogger(__name__)
 
 def setup_logger(name: str) -> logging.Logger:
@@ -48,7 +46,7 @@ def detect_parameters(data_dir: str, default_n_mels: int = 64, default_n_fft: in
     if not sample_rates or not durations:
         raise ValueError("No valid audio files found in the dataset")
 
-    avg_sample_rate = sum(sample_rates) / len(sample_rates)  # Missing parenthesis closed here
+    avg_sample_rate = sum(sample_rates) / len(sample_rates)
     avg_duration = sum(durations) / len(durations)
 
     n_mels = min(default_n_mels, int(avg_sample_rate / 100))
@@ -157,6 +155,14 @@ def process_file(dataset: 'StemSeparationDataset', file_path: str, target_length
         log_system_resources()
         start_time = time.time()
 
+        # Check cache before processing
+        cache_key = dataset._get_cache_key(file_path, apply_data_augmentation)
+        cached_data = dataset._get_data(file_path, apply_data_augmentation)
+        
+        if cached_data is not None:
+            logger.info(f"Loaded from cache: {file_path}")
+            return
+
         input_mel, target_mel = load_and_preprocess(
             dataset, file_path, target_length, device, apply_data_augmentation=apply_data_augmentation,
             cache_dir=dataset.cache_dir, use_cache=dataset.use_cache, extra_features=[calculate_harmonic_content, calculate_percussive_content]
@@ -236,7 +242,7 @@ def get_optimizer(optimizer_name: str, model_parameters: Any, learning_rate: flo
         raise ValueError(f"Unknown optimizer: {optimizer_name}")
 
 def wasserstein_loss(real_output: torch.Tensor, fake_output: torch.Tensor) -> torch.Tensor:
-    return torch.mean(fake_output) - torch.mean(real_output)
+    return torch.mean(fake_output) - torch.mean(real_output)  # Closed the parenthesis here
 
 class LRUCache:
     def __init__(self, capacity: int):
@@ -301,7 +307,7 @@ class StemSeparationDataset(Dataset):
         for root, _, files in os.walk(self.data_dir):
             for file_name in files:
                 if file_name.endswith('.wav'):
-                    stem_name = file_name.split('_')[0]
+                    stem_name = file_name.split('_')[1]  # Using second part of the stem name
                     file_path = os.path.join(root, file_name)
                     stem_names[stem_name].append(file_path)
         return stem_names
@@ -347,10 +353,10 @@ class StemSeparationDataset(Dataset):
         try:
             data = self._get_data(file_name, apply_data_augmentation=self.apply_data_augmentation)
             if data is None:
-                data = self._process_and_cache(file_name, apply_data_augmentation=self.apply_data_augmentation)
-                if data is None:
-                    raise ValueError(f"Failed to process and cache data for {file_name}")
+                logger.error(f"Failed to load data for {file_name} from cache")
+                return None
 
+            data['file_path'] = file_name
             return data
 
         except Exception as e:
@@ -358,7 +364,7 @@ class StemSeparationDataset(Dataset):
             return None
 
     def _get_cache_key(self, file_name: str, apply_data_augmentation: bool) -> str:
-        return f"{file_name}_{apply_data_augmentation}_{self.n_mels}_{self.target_length}_{self.n_fft}"
+        return file_name  # Use the actual file name as the cache key
 
     def _get_data(self, file_name: str, apply_data_augmentation: bool) -> Union[Dict[str, torch.Tensor], None]:
         cache_key = self._get_cache_key(file_name, apply_data_augmentation)
@@ -439,7 +445,7 @@ class StemSeparationDataset(Dataset):
 
     def _save_individual_cache(self, file_name: str, data: Dict[str, torch.Tensor], apply_data_augmentation: bool) -> Union[str, None]:
         cache_key = self._get_cache_key(file_name, apply_data_augmentation)
-        stem_cache_path = os.path.join(self.cache_dir, f"{cache_key}.h5")
+        stem_cache_path = os.path.join(self.cache_dir, f"{os.path.basename(file_name).replace('.wav', '')}.h5")
         try:
             if not self.suppress_reading_messages:
                 logger.info(f"Saving stem cache: {stem_cache_path}")
@@ -470,7 +476,7 @@ class StemSeparationDataset(Dataset):
         input_shape = data['input'].shape
         target_shape = data['target'].shape
         expected_input_shape = (1, self.n_mels, self.target_length)
-        expected_target_shape = (1, 4, self.n_mels, self.target_length)
+        expected_target_shape = (1, 3, self.n_mels, self.target_length)
 
         if input_shape != expected_input_shape:
             if not self.suppress_reading_messages:
@@ -493,10 +499,10 @@ def pad_tensor(tensor: torch.Tensor, target_length: int, target_width: int) -> t
             tensor = torch.nn.functional.pad(tensor, padding)
     return tensor
 
-def collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
+def collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, Union[torch.Tensor, List[str]]]:
     batch = [item for item in batch if item is not None]
     if not batch:
-        return {'input': torch.empty(0), 'target': torch.empty(0)}
+        return {'input': torch.empty(0), 'target': torch.empty(0), 'file_paths': []}
 
     max_length = max(item['input'].size(-1) for item in batch)
     max_width = max(item['input'].size(-2) for item in batch)
@@ -510,12 +516,14 @@ def collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
     inputs = inputs.cpu()
     targets = targets.cpu()
 
-    return {'input': inputs, 'target': targets, 'file_paths': [item['file_paths'] for item in batch]}
+    file_paths = [item['file_path'] for item in batch]
 
+    return {'input': inputs, 'target': targets, 'file_paths': file_paths}
+    
 def preprocess_and_cache_dataset(
     data_dir: str, n_mels: int, target_length: int, n_fft: int, cache_dir: str, apply_data_augmentation: bool,
     suppress_warnings: bool, suppress_reading_messages: bool, num_workers: int, device_prep: torch.device, stop_flag: Any
-):
+) -> StemSeparationDataset:
     mel_spectrogram = T.MelSpectrogram(
         sample_rate=22050,
         n_fft=n_fft,
@@ -544,6 +552,10 @@ def preprocess_and_cache_dataset(
 
     for stem_name, file_paths in dataset.stem_names.items():
         for file_path in file_paths:
+            cache_key = dataset._get_cache_key(file_path, apply_data_augmentation)
+            if cache_key in dataset.cache_index:
+                logger.info(f"Skipping cached file: {file_path}")
+                continue
             process_file(dataset, file_path, target_length, apply_data_augmentation, device_prep)
 
     return dataset
@@ -561,7 +573,7 @@ def load_and_preprocess(
     if not suppress_messages:
         logger.info(f"Preprocessing file: {file_path}")
     cache_key = os.path.splitext(os.path.basename(file_path))[0]
-    cache_file_path = os.path.join(cache_dir, f"{cache_key}.h5") if cache_dir else None
+    cache_file_path = os.path.join(cache_dir, f"{os.path.basename(file_path).replace('.wav', '')}.h5") if cache_dir else None
 
     if use_cache and cache_file_path and os.path.exists(cache_file_path):
         if not suppress_messages:
@@ -662,15 +674,11 @@ def load_batch_from_hdf5(file_path: str) -> Union[Dict[str, torch.Tensor], None]
         logger.error(f"Error loading from cache file '{file_path}': {e}")
         raise  # Re-raise for further handling
 
-def dynamic_batching(dataset: Dataset, batch_size: int):
+def dynamic_batching(dataset: Dataset, batch_size: int, stem_name: str):
     loader = DataLoader(dataset, batch_size=batch_size, collate_fn=collate_fn)
-    file_paths = None
-
-    for batch_idx, batch in enumerate(loader):
-        if batch_idx == 0:
-            file_paths = batch.get("file_paths")
-        yield batch['input'], batch['target'], file_paths
-
+    for batch in loader:
+        yield batch['input'], batch['target'], batch['file_paths']
+        
 def check_and_reshape(tensor: torch.Tensor, target_shape: torch.Tensor, logger: logging.Logger) -> torch.Tensor:
     target_numel = target_shape.numel()
     output_numel = tensor.numel()
@@ -715,6 +723,7 @@ def load_from_cache(file_path: str) -> Dict[str, torch.Tensor]:
         with h5py.File(file_path, 'r') as f:
             input_data = torch.tensor(f['input'][:]).float()
             target_data = torch.tensor(f['target'][:]).float()
+        logger.info(f"Loaded from cache: {file_path}, input data shape: {input_data.shape}, target data shape: {target_data.shape}")
         return {'input': input_data, 'target': target_data}
     except (FileNotFoundError, h5py.H5Error, KeyError) as e:
         logger.error(f"Error loading from cache file '{file_path}': {e}")
