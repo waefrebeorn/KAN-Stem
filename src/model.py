@@ -55,9 +55,8 @@ class ContextAggregationNetwork(nn.Module):
         return x
 
 class KANWithDepthwiseConv(nn.Module):
-    def __init__(self, in_channels, out_channels, n_mels, target_length, num_stems, device, channel_multiplier=1.0):
+    def __init__(self, in_channels=3, out_channels=64, n_mels=127, target_length=44036, num_stems=4, device="cpu", channel_multiplier=1.0):
         super(KANWithDepthwiseConv, self).__init__()
-
         self.device = device
         self.num_stems = num_stems
         self.n_mels = n_mels
@@ -97,7 +96,7 @@ class KANWithDepthwiseConv(nn.Module):
         self.flatten = nn.Flatten()
 
         self.fc1 = nn.Linear(int(out_channels * 8 * 2 * 2 * channel_multiplier), 512)
-        self.fc2 = nn.Linear(512, n_mels * target_length)
+        self.fc2 = nn.Linear(512, 3 * n_mels * target_length)  # Adjusted to match 3-channel output
         nn.init.xavier_normal_(self.fc2.weight)
 
     def forward_impl(self, x, suppress_reading_messages=False):
@@ -132,8 +131,6 @@ class KANWithDepthwiseConv(nn.Module):
             x = x.unsqueeze(0).unsqueeze(0)
         elif x.dim() == 3:
             x = x.unsqueeze(1)
-        elif x.dim() == 4 and x.shape[1] == 1:
-            x = x.repeat(1, 3, 1, 1)  # Repeat channels if input has 1 channel
 
         if not suppress_reading_messages:
             logger.info(f"Shape after adding dimensions: {x.shape}")
@@ -142,14 +139,14 @@ class KANWithDepthwiseConv(nn.Module):
             x = self.forward_impl(x, suppress_reading_messages)
             return x
 
-        if x.shape[-1] > self.n_mels * self.target_length:
-            num_segments = (x.shape[-1] + self.n_mels * self.target_length - 1) // (self.n_mels * self.target_length)
-            segments = [x[:, :, :, i * self.n_mels * self.target_length:(i + 1) * self.n_mels * self.target_length] for i in range(num_segments)]
-            if segments[-1].shape[-1] < self.n_mels * self.target_length:
-                segments[-1] = F.pad(segments[-1], (0, self.n_mels * self.target_length - segments[-1].shape[-1]))
+        if x.shape[-1] > self.target_length:
+            num_segments = (x.shape[-1] + self.target_length - 1) // self.target_length
+            segments = [x[:, :, :, i * self.target_length:(i + 1) * self.target_length] for i in range(num_segments)]
+            if segments[-1].shape[-1] < self.target_length:
+                segments[-1] = F.pad(segments[-1], (0, self.target_length - segments[-1].shape[-1]))
         else:
-            if x.shape[-1] < self.n_mels * self.target_length:
-                x = F.pad(x, (0, self.n_mels * self.target_length - x.shape[-1]))
+            if x.shape[-1] < self.target_length:
+                x = F.pad(x, (0, self.target_length - x.shape[-1]))
             segments = [x]
 
         if not suppress_reading_messages:
@@ -178,7 +175,7 @@ class KANWithDepthwiseConv(nn.Module):
 
         # Adjust the shape here based on actual output
         try:
-            output_shape = (-1, 1, self.n_mels, self.target_length)
+            output_shape = (-1, 3, self.n_mels, self.target_length)  # Updated to 3 channels
             x = x.view(*output_shape)
             logger.info(f"Shape of final output: {x.shape}")
         except RuntimeError as e:
@@ -190,7 +187,7 @@ class KANWithDepthwiseConv(nn.Module):
         return x
 
 class KANDiscriminator(nn.Module):
-    def __init__(self, in_channels=3, out_channels=64, n_mels=128, target_length=256, device="cpu", channel_multiplier=1.0):
+    def __init__(self, in_channels=3, out_channels=64, n_mels=127, target_length=44036, device="cpu", channel_multiplier=1.0):
         super(KANDiscriminator, self).__init__()
 
         self.device = device
@@ -212,8 +209,8 @@ class KANDiscriminator(nn.Module):
 
     def forward(self, x):
         if x.dim() == 3:
-            x = x.unsqueeze(1)
-        x = x.to(self.device)
+            x = x.unsqueeze(1)  # Add channel dimension if needed
+        x = x.to(self.device)  # Ensure the data is on the correct device
         x = self._forward_conv_layers(x)
         x = x.view(x.size(0), -1)
 

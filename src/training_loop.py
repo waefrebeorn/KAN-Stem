@@ -317,8 +317,8 @@ def start_training(
             warm_up_cache_batch(val_dataset, training_params['batch_size'], stem_name)
 
             # Create filtered datasets for the current stem
-            filtered_dataset = [item for item in dataset if os.path.basename(item['file_path']).split('_')[1] == stem_name]
-            filtered_val_dataset = [item for item in val_dataset if os.path.basename(item['file_path']).split('_')[1] == stem_name]
+            filtered_dataset = [item for item in dataset if item and os.path.basename(item['file_path']).split('_')[1] == stem_name]
+            filtered_val_dataset = [item for item in val_dataset if item and os.path.basename(item['file_path']).split('_')[1] == stem_name]
 
             train_single_stem(stem_name, filtered_dataset, filtered_val_dataset, training_params, model_params, sample_rate, n_mels, n_fft, target_length, stop_flag)
     else:
