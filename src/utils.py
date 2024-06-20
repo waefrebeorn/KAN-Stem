@@ -284,15 +284,31 @@ def scan_cache_directory(cache_dir: str) -> Dict[str, str]:
                 cache_index[cache_key] = file_path
     return cache_index
 
-def load_from_cache(file_path, device, suppress_reading_messages=False):
-    if not os.path.exists(file_path):
-        raise FileNotFoundError(f"Cache file {file_path} does not exist.")
-    with h5py.File(file_path, 'r') as hf:
-        input_data = torch.from_numpy(hf['input'][:]).to(device, non_blocking=True).float()
-        target_data = torch.from_numpy(hf['target'][:]).to(device, non_blocking=True).float()
-    if not suppress_reading_messages:
-        logger.info(f"Loaded from cache: {file_path}, input data shape: {input_data.shape}, target data shape: {target_data.shape}")
-    return input_data, target_data
+@torch.cuda.amp.autocast()
+def load_from_cache(file_path: str, device: torch.device) -> Dict[str, torch.Tensor]:
+    try:
+        logger.info(f"Attempting to load cache file: {file_path}")
+        if not os.path.exists(file_path):
+            logger.error(f"Cache file does not exist: {file_path}")
+            raise FileNotFoundError(f"Cache file does not exist: {file_path}")
+        
+        with h5py.File(file_path, 'r') as f:
+            input_data = torch.from_numpy(f['input'][:]).to(device, non_blocking=True).float()
+            target_data = torch.from_numpy(f['target'][:]).to(device, non_blocking=True).float()
+        
+        logger.info(f"Successfully loaded cache file: {file_path}")
+        logger.info(f"Input shape: {input_data.shape}, Target shape: {target_data.shape}")
+        
+        return {
+            'input': input_data,
+            'target': target_data
+        }
+    except Exception as e:
+        logger.error(f"Error loading from cache file '{file_path}': {e}")
+        logger.error(f"File exists: {os.path.exists(file_path)}")
+        logger.error(f"File size: {os.path.getsize(file_path) if os.path.exists(file_path) else 'N/A'}")
+        logger.error(f"Current working directory: {os.getcwd()}")
+        raise
 
 def is_cache_warmed_up(cache_dir):
     required_files = ['input.h5', 'target.h5']
@@ -775,11 +791,6 @@ def load_and_preprocess(
         logger.error(f"Error processing file {file_path}: {e}")
         return None, None
 
-@torch.cuda.amp.autocast()
-def custom_stft(input: torch.Tensor, n_fft: int, hop_length: int, win_length: int, device: torch.device) -> torch.Tensor:
-    window = torch.hann_window(win_length).to(device)
-    return torch.stft(input, n_fft=n_fft, hop_length=hop_length, win_length=win_length, window=window, return_complex=True)
-
 def monitor_memory_usage():
     try:
         memory_info = psutil.virtual_memory()
@@ -823,6 +834,7 @@ def integrated_dynamic_batching(dataset: StemSeparationDataset, batch_size: int,
             input_cache_file_name = f"input_{identifier}.h5"
             target_cache_file_name = f"target_{stem_name}_{identifier}.h5"
             
+            # Use os.path.join to create the full path
             input_cache_file_path = os.path.join(dataset.cache_dir, input_cache_file_name)
             target_cache_file_path = os.path.join(dataset.cache_dir, target_cache_file_name)
 
@@ -884,18 +896,6 @@ def calculate_percussive_content(mel_spectrogram: torch.Tensor, sample_rate: int
     percussive_content = percussive_content[:n_mels, :target_length]
 
     return percussive_content.to(torch.float32)
-
-@torch.cuda.amp.autocast()
-def load_from_cache(file_path: str, device: torch.device) -> Dict[str, torch.Tensor]:
-    try:
-        with h5py.File(file_path, 'r') as f:
-            return {
-                'input': torch.from_numpy(f['input'][:]).to(device, non_blocking=True).float(),
-                'target': torch.from_numpy(f['target'][:]).to(device, non_blocking=True).float()
-            }
-    except Exception as e:
-        logger.error(f"Error loading from cache file '{file_path}': {e}")
-        raise
 
 def purge_vram():
     """

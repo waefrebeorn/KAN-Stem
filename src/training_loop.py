@@ -71,9 +71,19 @@ def train_single_stem(
                 return
 
             try:
-                inputs, targets = load_from_cache(batch['file_paths'][0], device, suppress_reading_messages)
+                # Use the first file path from the batch
+                file_path = os.path.join(dataset.cache_dir, batch['file_paths'][0])
+                data = load_from_cache(file_path, device)
+                inputs, targets = data['input'], data['target']
             except KeyError as e:
                 logger.error(f"Batch missing 'file_paths' key: {e}")
+                continue
+            except Exception as e:
+                logger.error(f"Error loading data for {file_path}: {e}")
+                continue
+
+            if not isinstance(inputs, torch.Tensor):
+                logger.error(f"Expected inputs to be a tensor, but got {type(inputs)} instead.")
                 continue
 
             with autocast():
@@ -121,9 +131,18 @@ def train_single_stem(
         with torch.no_grad():
             for batch in integrated_dynamic_batching(val_dataset, training_params['batch_size'], stem_name):
                 try:
-                    inputs, targets = load_from_cache(batch['file_paths'][0], device, suppress_reading_messages)
+                    file_path = os.path.join(val_dataset.cache_dir, batch['file_paths'][0])
+                    data = load_from_cache(file_path, device)
+                    inputs, targets = data['input'], data['target']
                 except KeyError as e:
                     logger.error(f"Batch missing 'file_paths' key: {e}")
+                    continue
+                except Exception as e:
+                    logger.error(f"Error loading data for {file_path}: {e}")
+                    continue
+
+                if not isinstance(inputs, torch.Tensor):
+                    logger.error(f"Expected inputs to be a tensor, but got {type(inputs)} instead.")
                     continue
 
                 with autocast():

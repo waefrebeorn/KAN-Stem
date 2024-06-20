@@ -48,13 +48,13 @@ class BSRBF_KANLayer(nn.Module):
 
     @torch.cuda.amp.autocast()
     def b_splines(self, x: torch.Tensor):
-        assert x.dim() == 2 and x.size(1) == self.input_dim
+        assert x.dim() == 3 and x.size(2) == self.input_dim
         grid: torch.Tensor = self.grid
         x = x.unsqueeze(-1)
         bases = ((x >= grid[:, :-1]) & (x < grid[:, 1:])).to(x.dtype)
         for k in range(1, self.spline_order + 1):
-            bases = ((x - grid[:, : -(k + 1)]) / (grid[:, k:-1] - grid[:, : -(k + 1)]) * bases[:, :, :-1]) + ((grid[:, k + 1:] - x) / (grid[:, k + 1:] - grid[:, 1:(-k)]) * bases[:, :, 1:])
-        assert bases.size() == (x.size(0), self.input_dim, self.grid_size + self.spline_order)
+            bases = ((x - grid[:, : -(k + 1)]) / (grid[:, k:-1] - grid[:, : -(k + 1)]) * bases[:, :, :, :-1]) + ((grid[:, k + 1:] - x) / (grid[:, k + 1:] - grid[:, 1:(-k)]) * bases[:, :, :, 1:])
+        assert bases.size() == (x.size(0), x.size(1), self.input_dim, self.grid_size + self.spline_order)
         return bases.contiguous()
 
     @torch.cuda.amp.autocast()
@@ -62,8 +62,8 @@ class BSRBF_KANLayer(nn.Module):
         x = self.layernorm(x)
         base_output = F.linear(self.base_activation(x), self.base_weight)
 
-        bs_output = self.b_splines(x).view(x.size(0), -1)
-        rbf_output = self.rbf(x).view(x.size(0), -1)
+        bs_output = self.b_splines(x).view(x.size(0), x.size(1), -1)
+        rbf_output = self.rbf(x).view(x.size(0), x.size(1), -1)
         bsrbf_output = bs_output + rbf_output
         bsrbf_output = F.linear(bsrbf_output, self.spline_weight)
 
@@ -122,7 +122,7 @@ class ContextAggregationNetwork(nn.Module):
         return x
 
 class KANWithBSRBF(nn.Module):
-    def __init__(self, in_channels=3, out_channels=64, n_mels=127, target_length=44036, num_stems=4, device="cuda", channel_multiplier=1.0, grid_size=5, spline_order=3):
+    def __init__(self, in_channels=1, out_channels=64, n_mels=127, target_length=44036, num_stems=4, device="cuda", channel_multiplier=1.0, grid_size=5, spline_order=3):
         super(KANWithBSRBF, self).__init__()
         self.device = device
         self.num_stems = num_stems
@@ -169,7 +169,7 @@ class KANWithBSRBF(nn.Module):
     def adjust_kan_layers(self, input_size):
         if self.kan1 is None or self.kan1.input_dim != input_size:
             self.kan1 = BSRBF_KANLayer(input_size, 512, grid_size=5, spline_order=3).cuda()
-            self.kan2 = BSRBF_KANLayer(512, 3 * self.n_mels * self.target_length, grid_size=5, spline_order=3).cuda()
+            self.kan2 = BSRBF_KANLayer(512, 1 * self.n_mels * self.target_length, grid_size=5, spline_order=3).cuda()
 
     @torch.cuda.amp.autocast()
     def forward_impl(self, x, suppress_reading_messages=False):
@@ -267,7 +267,7 @@ class KANWithBSRBF(nn.Module):
 
         # Adjust the shape here based on actual output
         try:
-            output_shape = (-1, 3, self.n_mels, self.target_length)  # Updated to 3 channels
+            output_shape = (-1, 1, self.n_mels, self.target_length)  # Updated to 1 channel
             x = x.view(*output_shape)
             logger.info(f"Shape of final output: {x.shape}")
         except RuntimeError as e:
@@ -279,7 +279,7 @@ class KANWithBSRBF(nn.Module):
         return x
 
 class KANDiscriminator(nn.Module):
-    def __init__(self, in_channels=3, out_channels=64, n_mels=127, target_length=44036, device="cuda", channel_multiplier=1.0):
+    def __init__(self, in_channels=1, out_channels=64, n_mels=127, target_length=44036, device="cuda", channel_multiplier=1.0):
         super(KANDiscriminator, self).__init__()
 
         self.device = device
