@@ -244,22 +244,35 @@ def get_optimizer(optimizer_name: str, model_parameters: Any, learning_rate: flo
 def wasserstein_loss(real_output: torch.Tensor, fake_output: torch.Tensor) -> torch.Tensor:
     return torch.mean(fake_output) - torch.mean(real_output)
 
-class LRUCache:
-    def __init__(self, capacity: int):
+class GPULRUCache:
+    def __init__(self, capacity: int, device: torch.device):
         self.cache = OrderedDict()
         self.capacity = capacity
+        self.device = device
 
-    def get(self, key: str):
+    def get(self, key: str) -> Any:
         if key not in self.cache:
             return None
         self.cache.move_to_end(key)
         return self.cache[key]
 
-    def put(self, key: str, value: Any):
-        self.cache[key] = value
-        self.cache.move_to_end(key)
-        if len(self.cache) > self.capacity:
-            self.cache.popitem(last=False)
+    def put(self, key: str, value: Any) -> None:
+        if key in self.cache:
+            self.cache.move_to_end(key)
+        else:
+            if len(self.cache) >= self.capacity:
+                _, evicted_value = self.cache.popitem(last=False)
+                if isinstance(evicted_value, torch.Tensor):
+                    del evicted_value  # Explicitly delete the tensor
+        self.cache[key] = value.to(self.device) if isinstance(value, torch.Tensor) else value
+        torch.cuda.empty_cache()  # Clear unused memory
+
+    def __contains__(self, key: str) -> bool:
+        return key in self.cache
+
+    def clear(self):
+        self.cache.clear()
+        torch.cuda.empty_cache()
 
 def scan_cache_directory(cache_dir: str) -> Dict[str, str]:
     cache_index = {}
@@ -314,7 +327,7 @@ class StemSeparationDataset(Dataset):
         os.makedirs(cache_dir, exist_ok=True)
         self.cache_index = self._load_cache_metadata()
 
-        self.cache = LRUCache(cache_capacity)
+        self.cache = GPULRUCache(cache_capacity, device_prep)
 
     def _load_stem_names(self) -> Dict[str, List[str]]:
         stem_names = defaultdict(list)
@@ -396,7 +409,7 @@ class StemSeparationDataset(Dataset):
 
         if self.use_cache and cached_data_path and os.path.exists(cached_data_path):
             try:
-                data = load_from_cache(cached_data_path)
+                data = load_from_cache(cached_data_path, self.device_prep)
                 if self._validate_data(data):
                     if not self.suppress_reading_messages:
                         logger.info(f"Loaded cached data for {file_name} (augmented={apply_data_augmentation}) from {cached_data_path}")
@@ -513,9 +526,9 @@ class StemSeparationDataset(Dataset):
         return True
 
     def apply_augmentation(self, input_mel: torch.Tensor, target_mel: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        # Implement your data augmentation logic here
-        augmented_input = input_mel + 0.1 * torch.randn_like(input_mel)
-        augmented_target = target_mel + 0.1 * torch.randn_like(target_mel)
+        noise = torch.randn_like(input_mel, device=self.device_prep) * 0.1
+        augmented_input = input_mel + noise
+        augmented_target = target_mel + noise
         return augmented_input, augmented_target
 
 def pad_tensor(tensor: torch.Tensor, target_length: int, target_width: int) -> torch.Tensor:
@@ -768,6 +781,7 @@ def load_and_preprocess(
         logger.error(f"Error processing file {file_path}: {e}")
         return None, None
 
+@torch.cuda.amp.autocast()
 def custom_stft(input: torch.Tensor, n_fft: int, hop_length: int, win_length: int, device: torch.device) -> torch.Tensor:
     window = torch.hann_window(win_length).to(device)
     return torch.stft(input, n_fft=n_fft, hop_length=hop_length, win_length=win_length, window=window, return_complex=True)
@@ -799,22 +813,46 @@ def load_batch_from_hdf5(file_path: str) -> Union[Dict[str, torch.Tensor], None]
         logger.error(f"Error loading from cache file '{file_path}': {e}")
         raise
 
-def dynamic_batching(dataset: Dataset, batch_size: int, stem_name: str, shuffle: bool = True) -> Iterator[Dict[str, Any]]:
+def integrated_dynamic_batching(dataset: StemSeparationDataset, batch_size: int, stem_name: str, shuffle: bool = True) -> Iterator[Dict[str, Any]]:
+    """
+    Integrates dynamic batching with cache warming for efficient data loading.
+    """
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, collate_fn=collate_fn)
+    
     for batch in dataloader:
-        stem_file_paths = [fp for fp in batch['file_paths'] if stem_name in fp]
+        warmed_inputs = []
+        warmed_targets = []
+        warmed_file_paths = []
 
-        if not stem_file_paths:
-            continue
+        for i, file_path in enumerate(batch['file_paths']):
+            identifier = file_path.split('_')[1].split('.')[0]
+            input_cache_file_name = f"input_{identifier}.h5"
+            target_cache_file_name = f"target_{stem_name}_{identifier}.h5"
+            
+            input_cache_file_path = os.path.join(dataset.cache_dir, input_cache_file_name)
+            target_cache_file_path = os.path.join(dataset.cache_dir, target_cache_file_name)
 
-        inputs = torch.stack([batch['input'][i] for i, fp in enumerate(batch['file_paths']) if fp in stem_file_paths])
-        targets = torch.stack([batch['target'][i] for i, fp in enumerate(batch['file_paths']) if fp in stem_file_paths])
+            if os.path.exists(input_cache_file_path) and os.path.exists(target_cache_file_path):
+                try:
+                    input_data = load_from_cache(input_cache_file_path, dataset.device_prep)
+                    target_data = load_from_cache(target_cache_file_path, dataset.device_prep)
+                    
+                    warmed_inputs.append(input_data['input'])
+                    warmed_targets.append(target_data['target'])
+                    warmed_file_paths.append(file_path)
+                    
+                    logger.info(f"Loaded and warmed up cache for {file_path}")
+                except Exception as e:
+                    logger.error(f"Error loading cache for {file_path}: {e}")
+            else:
+                logger.warning(f"Cache files not found for {file_path}. Skipping.")
 
-        yield {
-            'inputs': inputs,
-            'targets': targets,
-            'file_paths': stem_file_paths
-        }
+        if warmed_inputs and warmed_targets:
+            yield {
+                'inputs': torch.stack(warmed_inputs),
+                'targets': torch.stack(warmed_targets),
+                'file_paths': warmed_file_paths
+            }
 
 def check_and_reshape(tensor: torch.Tensor, target_shape: torch.Tensor, logger: logging.Logger) -> torch.Tensor:
     target_numel = target_shape.numel()
@@ -853,81 +891,19 @@ def calculate_percussive_content(mel_spectrogram: torch.Tensor, sample_rate: int
 
     return percussive_content.to(torch.float32)
 
-def load_from_cache(file_path: str) -> Dict[str, torch.Tensor]:
+@torch.cuda.amp.autocast()
+def load_from_cache(file_path: str, device: torch.device) -> Dict[str, torch.Tensor]:
     try:
         with h5py.File(file_path, 'r') as f:
-            input_data = torch.tensor(f['input'][:]).float()
-            target_data = torch.tensor(f['target'][:]).float()
-        logger.info(f"Loaded from cache: {file_path}, input data shape: {input_data.shape}, target data shape: {target_data.shape}")
-        return {'input': input_data, 'target': target_data}
-    except (FileNotFoundError, KeyError) as e:
+            return {
+                'input': torch.from_numpy(f['input'][:]).to(device, non_blocking=True).float(),
+                'target': torch.from_numpy(f['target'][:]).to(device, non_blocking=True).float()
+            }
+    except Exception as e:
         logger.error(f"Error loading from cache file '{file_path}': {e}")
         raise
 
-def warm_up_cache_batch(dataset: StemSeparationDataset, batch_size: int, stem_name: str, num_batches: int = 10) -> None:
-    """Warms up cache for a specific stem, considering data augmentation."""
-
-    logger.info(f"Warming up cache for stem: {stem_name}")
-
-    # Get unique identifiers from input files in the cache_dir
-    input_file_identifiers = set()
-    for file_name in os.listdir(dataset.cache_dir):
-        if file_name.startswith("input_") and file_name.endswith(".h5"):
-            identifier = file_name.split('_')[1].split('.')[0]
-            input_file_identifiers.add(identifier)
-
-    if not input_file_identifiers:
-        logger.warning("No input files found in the cache directory.")
-        return
-
-    input_file_identifiers = list(input_file_identifiers)
-    np.random.shuffle(input_file_identifiers)
-
-    # Limit the number of identifiers to be processed based on the number of batches and batch size
-    num_identifiers_to_process = min(len(input_file_identifiers), num_batches * batch_size)
-    input_file_identifiers = input_file_identifiers[:num_identifiers_to_process]
-
-    for identifier in input_file_identifiers:
-        # Process input files
-        input_cache_file_name = f"input_{identifier}.h5"
-        input_cache_file_path = os.path.join(dataset.cache_dir, input_cache_file_name)
-
-        if not os.path.exists(input_cache_file_path):
-            logger.warning(f"Input file not found: {input_cache_file_path}")
-            continue
-
-        # Process target file for the specific stem
-        target_cache_file_name = f"target_{stem_name}_{identifier}.h5"
-        target_cache_file_path = os.path.join(dataset.cache_dir, target_cache_file_name)
-
-        if not os.path.exists(target_cache_file_path):
-            logger.warning(f"Target file not found for stem {stem_name}: {target_cache_file_path}")
-            continue
-
-        try:
-            # Attempt to load from cache
-            input_data = load_from_cache(input_cache_file_path)
-            target_data = load_from_cache(target_cache_file_path)
-
-            if dataset._validate_data(input_data) and dataset._validate_data(target_data):
-                logger.info(f"Loaded from cache: {input_cache_file_path} and {target_cache_file_path}")
-            else:
-                logger.warning(f"Invalid cached data for {input_cache_file_path} or {target_cache_file_path}. Skipping.")
-                continue
-
-            # Verify that the input and target files match
-            if input_data['input'].shape[1:] != target_data['target'].shape[1:]:
-                logger.warning(f"Shape mismatch between input and target for identifier {identifier}. Skipping.")
-                continue
-
-            logger.info(f"Successfully validated input and target match for identifier {identifier}")
-
-        except Exception as e:
-            logger.error(f"Error processing files for identifier {identifier}: {e}")
-
-    logger.info(f"Cache warm-up completed for stem: {stem_name}")
-
-def purge_cache():
+def purge_vram():
     """
     Purge the GPU cache to free up memory.
     """
