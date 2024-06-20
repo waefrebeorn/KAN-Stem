@@ -19,7 +19,7 @@ from utils import (
     compute_sdr, compute_sir, compute_sar, convert_to_3_channels,
     gradient_penalty, PerceptualLoss, detect_parameters, preprocess_and_cache_dataset,
     StemSeparationDataset, collate_fn, log_training_parameters, ensure_dir_exists,
-    get_optimizer, warm_up_cache_batch, monitor_memory_usage, dynamic_batching, load_and_preprocess
+    get_optimizer, warm_up_cache_batch, monitor_memory_usage, dynamic_batching, load_and_preprocess, purge_cache
 )
 from model_setup import create_model_and_optimizer
 
@@ -172,6 +172,10 @@ def train_single_stem(
                     scheduler_d.step()
 
             torch.cuda.empty_cache()
+
+            # Purge the current batch data to free VRAM
+            purge_cache(inputs)
+            purge_cache(targets)
 
         if isinstance(scheduler_g, ReduceLROnPlateau):
             scheduler_g.step(running_loss_g / len(dataset))
@@ -326,7 +330,7 @@ def start_training(
         if stem_name == "input":
             continue 
 
-        # Warm up cache for ten testing sets
+        # Warm up cache for the specific stem
         warm_up_cache_batch(train_dataset, training_params['batch_size'], stem_name, num_batches=10)
 
         train_single_stem(
