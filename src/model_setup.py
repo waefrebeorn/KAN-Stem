@@ -1,6 +1,6 @@
 import torch
 import torch.optim as optim
-from model import KANWithDepthwiseConv, KANDiscriminator
+from model import KANWithBSRBF, KANDiscriminator  # Updated import for KANWithBSRBF
 from utils import get_optimizer  # Import your get_optimizer function
 import warnings
 
@@ -12,9 +12,9 @@ def create_model_and_optimizer(device, n_mels, target_length, initial_lr_g, init
                                 optimizer_name_g, optimizer_name_d, weight_decay, channel_multiplier):
 
     # Create the generator model (single-channel input for mel spectrograms)
-    model = KANWithDepthwiseConv(in_channels=3, out_channels=64, n_mels=n_mels, 
-                                 target_length=target_length, device=device, 
-                                 channel_multiplier=channel_multiplier).to(device)
+    model = KANWithBSRBF(in_channels=3, out_channels=64, n_mels=n_mels, 
+                         target_length=target_length, device=device, 
+                         channel_multiplier=channel_multiplier).to(device)
 
     # Create the discriminator model (multi-channel input for stacked features)
     discriminator = KANDiscriminator(in_channels=3, out_channels=64, n_mels=n_mels, 
@@ -27,14 +27,11 @@ def create_model_and_optimizer(device, n_mels, target_length, initial_lr_g, init
 
     return model, discriminator, optimizer_g, optimizer_d
 
-
-
 def initialize_model(device, n_mels, target_length):
     """Initializes the generator model only (no discriminator)."""
-    model = KANWithDepthwiseConv(in_channels=1, out_channels=64, n_mels=n_mels, 
-                                 target_length=target_length, device=device).to(device)
+    model = KANWithBSRBF(in_channels=1, out_channels=64, n_mels=n_mels, 
+                         target_length=target_length, device=device).to(device)
     return model
-
 
 if __name__ == "__main__":
     # Example usage (optional, for testing)

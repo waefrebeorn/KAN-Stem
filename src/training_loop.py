@@ -11,22 +11,32 @@ import logging
 from torchvision import models
 from torchvision.models import VGG16_Weights
 from torch.optim.lr_scheduler import CyclicLR, ReduceLROnPlateau
-from utils import (
-    compute_sdr, compute_sir, compute_sar, convert_to_3_channels,
-    gradient_penalty, PerceptualLoss, detect_parameters, preprocess_and_cache_dataset,
-    StemSeparationDataset, collate_fn, log_training_parameters, ensure_dir_exists,
-    get_optimizer, warm_up_cache_batch, monitor_memory_usage, dynamic_batching
-)
-from model_setup import create_model_and_optimizer
 import gc
 import numpy as np
 from typing import Any, List
 
+from utils import (
+    compute_sdr, compute_sir, compute_sar, convert_to_3_channels,
+    gradient_penalty, PerceptualLoss, detect_parameters, preprocess_and_cache_dataset,
+    StemSeparationDataset, collate_fn, log_training_parameters, ensure_dir_exists,
+    get_optimizer, warm_up_cache_batch, monitor_memory_usage, dynamic_batching, load_and_preprocess
+)
+from model_setup import create_model_and_optimizer
+
+# Set up logging
 logger = logging.getLogger(__name__)
 
 def train_single_stem(
-    stem_name: str, dataset: Dataset, val_dataset: Dataset, training_params: dict, model_params: dict,
-    sample_rate: int, n_mels: int, n_fft: int, target_length: int, stop_flag: Any,
+    stem_name: str, 
+    dataset: Dataset, 
+    val_dataset: Dataset, 
+    training_params: dict, 
+    model_params: dict,
+    sample_rate: int, 
+    n_mels: int, 
+    n_fft: int, 
+    target_length: int, 
+    stop_flag: Any,
     suppress_reading_messages: bool = False
 ):
     if stem_name == "input":
@@ -301,28 +311,28 @@ def start_training(
     sample_rate, n_mels, n_fft = detect_parameters(data_dir)
     target_length = sample_rate // 2  # Assuming a 0.5-second target length
 
-    if use_cache:
-        dataset = preprocess_and_cache_dataset(data_dir, n_mels, target_length, n_fft, training_params['cache_dir'], apply_data_augmentation, training_params['suppress_warnings'], training_params['suppress_reading_messages'], training_params['num_workers'], device, stop_flag)
-        val_dataset = preprocess_and_cache_dataset(val_dir, n_mels, target_length, n_fft, training_params['cache_dir'], apply_data_augmentation, training_params['suppress_warnings'], training_params['suppress_reading_messages'], training_params['num_workers'], device, stop_flag)
+    train_dataset, val_dataset = preprocess_and_cache_dataset(
+        data_dir, n_mels, target_length, n_fft, training_params['cache_dir'], apply_data_augmentation, training_params['suppress_warnings'], training_params['suppress_reading_messages'], training_params['num_workers'], device, stop_flag
+    )
 
-        # Extract and iterate over stem names correctly
-        stem_names = list(dataset.stem_names.keys())
-        for stem_name in stem_names:
-            if stop_flag.value == 1:
-                logger.info("Training stopped.")
-                return
+    # Extract stem names from the training dataset (it has all the stems)
+    stem_names = list(train_dataset.stem_names.keys())
 
-            # Warm up cache only once per stem
-            warm_up_cache_batch(dataset, training_params['batch_size'], stem_name)
-            warm_up_cache_batch(val_dataset, training_params['batch_size'], stem_name)
+    for stem_name in stem_names:
+        if stop_flag.value == 1:
+            logger.info("Training stopped.")
+            return
 
-            # Create filtered datasets for the current stem
-            filtered_dataset = [item for item in dataset if item and os.path.basename(item['file_path']).split('_')[1] == stem_name]
-            filtered_val_dataset = [item for item in val_dataset if item and os.path.basename(item['file_path']).split('_')[1] == stem_name]
+        if stem_name == "input":
+            continue 
 
-            train_single_stem(stem_name, filtered_dataset, filtered_val_dataset, training_params, model_params, sample_rate, n_mels, n_fft, target_length, stop_flag)
-    else:
-        raise ValueError("use_cache must be True for this code.")
+        # Warm up cache only once per stem
+        warm_up_cache_batch(train_dataset, training_params['batch_size'], stem_name)
+
+        train_single_stem(
+            stem_name, train_dataset, val_dataset, training_params, model_params, 
+            sample_rate, n_mels, n_fft, target_length, stop_flag, suppress_reading_messages
+        )
 
     logger.info("Training finished.")
 

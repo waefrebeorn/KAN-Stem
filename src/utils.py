@@ -275,7 +275,7 @@ class StemSeparationDataset(Dataset):
     def __init__(
         self, data_dir: str, n_mels: int, target_length: int, n_fft: int, cache_dir: str, apply_data_augmentation: bool,
         suppress_warnings: bool, suppress_reading_messages: bool, num_workers: int, device_prep: torch.device, stop_flag: Any,
-        use_cache: bool = True, cache_capacity: int = 100, mel_spectrogram: T.MelSpectrogram = None
+        use_cache: bool = True, cache_capacity: int = 100, mel_spectrogram: T.MelSpectrogram = None, stem_names: Dict[str, List[str]] = None
     ):
         self.data_dir = data_dir
         self.n_mels = n_mels
@@ -303,8 +303,11 @@ class StemSeparationDataset(Dataset):
         else:
             self.mel_spectrogram = mel_spectrogram
 
-        self.stem_names = self._load_stem_names()
-        print(f"Loaded stem names: {self.stem_names}")  # Debug print statement
+        if stem_names is None:
+            self.stem_names = self._load_stem_names()
+        else:
+            self.stem_names = stem_names
+
         if not self.stem_names:
             raise ValueError(f"No valid audio files found in {data_dir}")
 
@@ -357,21 +360,13 @@ class StemSeparationDataset(Dataset):
                 logger.error(f"Error saving cache metadata file: {e}")
 
     def __len__(self) -> int:
-        return sum(len(file_list) for file_list in self.stem_names.values())
+        return len(self.stem_names["input"])  # count all files in "input" stem
 
     def __getitem__(self, idx: int) -> Union[Dict[str, torch.Tensor], None]:
         if idx >= len(self):
             return None
 
-        count = 0
-        for stem_name, file_list in self.stem_names.items():
-            if idx < count + len(file_list):
-                file_name = file_list[idx - count]
-                break
-            count += len(file_list)
-        else:
-            return None
-
+        file_name = self.stem_names["input"][idx]  # Get input file name directly
         apply_augmentation = self.apply_data_augmentation if self.training else False 
         
         try:
@@ -379,28 +374,26 @@ class StemSeparationDataset(Dataset):
             if data is None:
                 logger.error(f"Failed to load data for {file_name} from cache (augmented={apply_augmentation})")
                 return None
-
-            data['file_path'] = file_name
+            data['file_path'] = file_name  # Add original file_path to data
             return data
-
         except Exception as e:
             logger.error(f"Error in __getitem__ for stem {file_name}: {e}")
             return None
 
-    def _get_cache_key(self, file_name: str, apply_data_augmentation: bool) -> str:
-        stem_name = file_name.split('_')[1]
-        identifier = file_name.split('_')[2].split('.')[0]
+    def _get_cache_key(self, stem_name: str, identifier: str, apply_data_augmentation: bool) -> str:
         return f"{stem_name}_{identifier}_{apply_data_augmentation}_{self.n_mels}_{self.target_length}_{self.n_fft}"
-        
+    
     def _get_data(self, file_name: str, apply_data_augmentation: bool) -> Union[Dict[str, torch.Tensor], None]:
-        cache_key = self._get_cache_key(file_name, apply_data_augmentation)
+        # Extract identifier from the input file name
+        identifier = file_name.split('_')[1].split('.')[0]
+
+        # Construct cache key using the identifier
+        cache_key = self._get_cache_key("input", identifier, apply_data_augmentation)
         data = self.cache.get(cache_key)
         if data is not None:
             return data
 
-        stem_name = file_name.split('_')[1]
-        identifier = file_name.split('_')[2].split('.')[0]
-        cached_data_path = os.path.join(self.cache_dir, f"{stem_name}_{identifier}_{apply_data_augmentation}_{self.n_mels}_{self.target_length}_{self.n_fft}.h5")
+        cached_data_path = os.path.join(self.cache_dir, f"input_{identifier}_{apply_data_augmentation}_{self.n_mels}_{self.target_length}_{self.n_fft}.h5")
 
         if self.use_cache and cached_data_path and os.path.exists(cached_data_path):
             try:
@@ -418,14 +411,30 @@ class StemSeparationDataset(Dataset):
             except (FileNotFoundError, h5py.H5Error, KeyError) as e:
                 if not self.suppress_reading_messages:
                     logger.warning(f"Error loading cached data for {file_name} (augmented={apply_data_augmentation}). Reprocessing. Error: {e}")
-        return None
+
+        # Process and cache the data if not found in cache
+        if file_name.startswith("input"):
+            # Get the original .wav file path
+            wav_file_path = self.stem_names["input"][int(identifier) - 1]
+        else:
+            wav_file_path = file_name  # Keep the filename as is for target stems (already in .h5 format)
+
+        data = self._process_and_cache(wav_file_path, apply_data_augmentation)
+        if data is not None:
+            self.cache.put(cache_key, data)
+        return data
 
     def _process_and_cache(self, file_name: str, apply_data_augmentation: bool) -> Dict[str, torch.Tensor]:
         if self.stop_flag.value == 1:
             return None
 
         try:
-            file_path = os.path.join(self.data_dir, file_name)
+            # Load the .wav file if it is an input file
+            if file_name.startswith("input"):
+                file_path = self.stem_names["input"][int(file_name.split('_')[1].split('.')[0]) - 1]
+            else:
+                file_path = os.path.join(self.cache_dir, file_name)
+                
             logger.info(f"Processing file: {file_path}")
 
             input_mel, target_mel = load_and_preprocess(
@@ -451,34 +460,20 @@ class StemSeparationDataset(Dataset):
                 input_mel = input_mel.unsqueeze(0)
             if target_mel.shape[0] != input_mel.shape[0]:
                 target_mel = target_mel.unsqueeze(0)
- 
+
             data = {"input": input_mel, "target": target_mel}
 
-            non_augmented_cache_key = self._get_cache_key(file_name, apply_data_augmentation=False)
-            if non_augmented_cache_key not in self.cache_index:
-                self._save_individual_cache(file_name, data, apply_data_augmentation=False)
-
-            if apply_data_augmentation:
-                augmented_cache_key = self._get_cache_key(file_name, apply_data_augmentation=True)
-                if augmented_cache_key not in self.cache_index:
-                    self.apply_augmentation(input_mel, target_mel)
-                    data = {"input": input_mel, "target": target_mel}
-                    self._save_individual_cache(file_name, data, apply_data_augmentation=True)
-
-            self.cache.put(self._get_cache_key(file_name, apply_data_augmentation), data)
+            self._save_individual_cache(file_name, data, apply_data_augmentation) 
 
             return data
-
         except Exception as e:
             if not self.suppress_reading_messages:
                 logger.error(f"Error processing stem {file_name}: {e}")
             return None
 
     def _save_individual_cache(self, file_name: str, data: Dict[str, torch.Tensor], apply_data_augmentation: bool) -> Union[str, None]:
-        cache_key = self._get_cache_key(file_name, apply_data_augmentation)
-        stem_name = file_name.split('_')[1]
-        identifier = file_name.split('_')[2].split('.')[0]
-        stem_cache_path = os.path.join(self.cache_dir, f"{stem_name}_{identifier}_{apply_data_augmentation}_{self.n_mels}_{self.target_length}_{self.n_fft}.h5")
+        identifier = file_name.split('_')[1].split('.')[0]
+        stem_cache_path = os.path.join(self.cache_dir, f"input_{identifier}_{apply_data_augmentation}_{self.n_mels}_{self.target_length}_{self.n_fft}.h5")
         try:
             if not self.suppress_reading_messages:
                 logger.info(f"Saving stem cache: {stem_cache_path}")
@@ -487,7 +482,7 @@ class StemSeparationDataset(Dataset):
                 f.create_dataset('target', data=data['target'].cpu().detach().numpy())
             if not self.suppress_reading_messages:
                 logger.info(f"Successfully saved stem cache: {stem_cache_path}")
-            self.cache_index[cache_key] = stem_cache_path
+            self.cache_index[stem_cache_path] = stem_cache_path
             self._save_cache_metadata()
             return stem_cache_path
         except Exception as e:
@@ -572,7 +567,7 @@ def preprocess_and_cache_dataset(
     device_prep: torch.device,
     stop_flag: Any,
     validation_split: float = 0.1,
-    random_seed=42  # Add this for reproducibility
+    random_seed=42
 ) -> Tuple[StemSeparationDataset, StemSeparationDataset]:
 
     # Load stem names
@@ -607,7 +602,7 @@ def preprocess_and_cache_dataset(
 
     # Load and split file names for train and validation
     np.random.seed(random_seed)
-    all_input_files = [f for f in os.listdir(data_dir) if f.endswith('.wav') and f.startswith('input')]
+    all_input_files = [f for f in os.listdir(cache_dir) if f.endswith('.h5') and f.startswith('input')]
     np.random.shuffle(all_input_files)
     split_idx = int(len(all_input_files) * validation_split)
     validation_input_files = all_input_files[:split_idx]
@@ -643,9 +638,9 @@ def preprocess_and_cache_dataset(
         device_prep=device_prep,
         stop_flag=stop_flag,
         use_cache=True,
-        mel_spectrogram=mel_spectrogram
+        mel_spectrogram=mel_spectrogram,
+        stem_names=train_stem_names
     )
-    train_dataset.stem_names = train_stem_names
     train_dataset.training = True  # Set training to True
 
     validation_dataset = StemSeparationDataset(
@@ -661,9 +656,9 @@ def preprocess_and_cache_dataset(
         device_prep=device_prep,
         stop_flag=stop_flag,
         use_cache=True,
-        mel_spectrogram=mel_spectrogram
+        mel_spectrogram=mel_spectrogram,
+        stem_names=validation_stem_names
     )
-    validation_dataset.stem_names = validation_stem_names
     validation_dataset.training = False  # Set training to False
 
     logger.info(f"Training dataset size: {len(train_dataset)}")
@@ -672,20 +667,16 @@ def preprocess_and_cache_dataset(
     # Cache train and validation datasets
     for dset in [train_dataset, validation_dataset]:
         for idx in range(len(dset)):
-            # Note: No need to process the input here since we're loading from cache
-            item = dset.__getitem__(idx)  # This will try to load and will preprocess if not found.
+            item = dset.__getitem__(idx)
             if item is None:
                 logger.error(f"Failed to load item {idx} from dataset")
                 continue
-            input_file_path = item['file_path']  # Get the original input file path
+            input_file_path = item['file_path']
 
-            stem_name = input_file_path.split('_')[1]  # Extract stem name
-            identifier = input_file_path.split('_')[2].split('.')[0]  # Extract identifier
+            identifier = input_file_path.split('_')[1].split('.')[0]
 
-            # Load or process the target stem files based on the identifier
             for target_stem in dset.stem_names:
-                if target_stem != "input":  # Skip input files
-                    # Check for both True and False augmentation versions of the target file
+                if target_stem != "input":
                     for aug in [True, False]:
                         target_file_path = os.path.join(
                             dset.cache_dir,
@@ -694,8 +685,8 @@ def preprocess_and_cache_dataset(
 
                         target_data = dset._get_data(target_file_path, apply_data_augmentation=aug)
                         if target_data is None:
-                            wav_file_name = f"target_{target_stem}_{identifier}.wav"
-                            target_data = dset._process_and_cache(wav_file_name, apply_data_augmentation=aug)
+                            h5_file_name = f"target_{target_stem}_{identifier}.h5"
+                            target_data = dset._process_and_cache(h5_file_name, apply_data_augmentation=aug)
 
                         if target_data is not None:
                             logger.info(f"Warmed up cache for: {target_file_path}")
@@ -794,68 +785,6 @@ def monitor_memory_usage():
     except Exception as e:
         logger.error(f"Error monitoring memory usage: {e}")
 
-def warm_up_cache_batch(dataset: Dataset, batch_size: int, stem_name: str, shuffle: bool = True) -> None:
-    """Warms up cache for a specific stem, considering data augmentation."""
-
-    logger.info(f"Warming up cache for stem: {stem_name}")
-
-    # Get all unique identifiers from input files in the cache directory
-    input_file_identifiers = set()
-    for file_name in os.listdir(dataset.cache_dir):
-        if file_name.startswith("input"):
-            identifier = file_name.split('_')[1].split('.')[0]
-            input_file_identifiers.add(identifier)
-
-    if not input_file_identifiers:
-        logger.warning("No input files found in the cache directory.")
-        return
-
-    # Convert to list and shuffle if needed
-    input_file_identifiers = list(input_file_identifiers)
-    if shuffle:
-        np.random.shuffle(input_file_identifiers)
-
-    # Process in batches
-    for i in range(0, len(input_file_identifiers), batch_size):
-        batch_identifiers = input_file_identifiers[i:i + batch_size]
-        batch_data = []
-
-        # Load input data from the batch 
-        for identifier in batch_identifiers:
-            for apply_augmentation in [True, False]:  # Check both augmented and non-augmented
-                input_file_name = f"input_{identifier}_{apply_augmentation}_{dataset.n_mels}_{dataset.target_length}_{dataset.n_fft}.h5"
-                input_data = dataset._get_data(input_file_name, apply_data_augmentation=apply_augmentation)
-                if input_data is not None:
-                    batch_data.append(input_data)
-
-        # Check if batch_data is empty, and if so, continue to the next batch
-        if not batch_data:
-            continue
-
-        collated_input = collate_fn(batch_data)
-        input_data_batch = collated_input['input']  
-
-        for j, identifier in enumerate(batch_identifiers):
-
-            # Ensure we're processing the target stem corresponding to the current input
-            target_stem_name = f"target_{stem_name}"
-
-            for apply_augmentation in [True, False]:
-                target_file_path = os.path.join(
-                    dataset.cache_dir,
-                    f"{target_stem_name}_{identifier}_{apply_augmentation}_{dataset.n_mels}_{dataset.target_length}_{dataset.n_fft}.h5"
-                )
-
-                target_data = dataset._get_data(target_file_path, apply_data_augmentation=apply_augmentation)
-                if target_data is None:
-                    wav_file_name = f"{target_stem_name}_{identifier}.wav"
-                    target_data = dataset._process_and_cache(wav_file_name, apply_data_augmentation=apply_augmentation)
-
-                if target_data is not None:
-                    logger.info(f"Warmed up cache for: {target_file_path}")
-                else:
-                    logger.error(f"Failed to load or process target file: {target_file_path}")
-
 def save_batch_to_hdf5(batch: Dict[str, torch.Tensor], file_path: str):
     try:
         with h5py.File(file_path, 'w') as f:
@@ -940,3 +869,46 @@ def load_from_cache(file_path: str) -> Dict[str, torch.Tensor]:
     except (FileNotFoundError, h5py.H5Error, KeyError) as e:
         logger.error(f"Error loading from cache file '{file_path}': {e}")
         raise
+
+def warm_up_cache_batch(dataset: StemSeparationDataset, batch_size: int, stem_name: str, shuffle: bool = True) -> None:
+    """Warms up cache for a specific stem, considering data augmentation."""
+
+    logger.info(f"Warming up cache for stem: {stem_name}")
+
+    # Get unique identifiers from input files in the data_dir (not cache_dir)
+    input_file_identifiers = set()
+    for root, _, files in os.walk(dataset.data_dir):
+        for file_name in files:
+            if file_name.endswith('.wav') and file_name.startswith("input"):  # Filter for WAV files only
+                identifier = file_name.split('_')[1].split('.')[0]
+                input_file_identifiers.add(identifier)
+
+    if not input_file_identifiers:
+        logger.warning("No input files found in the dataset directory.")
+        return
+
+    input_file_identifiers = list(input_file_identifiers)
+    if shuffle:
+        np.random.shuffle(input_file_identifiers)
+
+    for identifier in input_file_identifiers:
+        # Process and cache input file
+        input_file_name = f"input_{identifier}.wav"
+        input_file_path = os.path.join(dataset.data_dir, input_file_name)
+        if not os.path.exists(input_file_path):
+            logger.error(f"Input file does not exist: {input_file_path}")
+            continue
+
+        cache_file_path = os.path.join(dataset.cache_dir, f"input_{identifier}.h5")
+        if not os.path.exists(cache_file_path):
+            dataset._process_and_cache(input_file_path, apply_data_augmentation=False)
+            logger.info(f"Warmed up cache (processed) for: {input_file_path}")
+
+        # Process and cache target files
+        for apply_augmentation in [True, False]:  
+            target_file_name = f"target_{stem_name}_{identifier}_{apply_augmentation}_{dataset.n_mels}_{dataset.target_length}_{dataset.n_fft}.h5"
+            target_file_path = os.path.join(dataset.cache_dir, target_file_name)
+
+            if not os.path.exists(target_file_path):
+                dataset._process_and_cache(target_file_name, apply_data_augmentation=apply_augmentation)
+                logger.info(f"Warmed up cache (processed) for: {target_file_path}")

@@ -4,8 +4,63 @@ import torch.nn.functional as F
 import logging
 import h5py
 from torch.utils.checkpoint import checkpoint
+import math
 
 logger = logging.getLogger(__name__)
+
+class RadialBasisFunction(nn.Module):
+    def __init__(self, grid_min: float = -1.5, grid_max: float = 1.5, num_grids: int = 8, denominator: float = None):
+        super().__init__()
+        grid = torch.linspace(grid_min, grid_max, num_grids)
+        self.grid = torch.nn.Parameter(grid, requires_grad=False)
+        self.denominator = denominator or (grid_max - grid_min) / (num_grids - 1)
+
+    def forward(self, x):
+        return torch.exp(-((x[..., None] - self.grid) / self.denominator) ** 2)
+
+class BSRBF_KANLayer(nn.Module):
+    def __init__(self, input_dim: int, output_dim: int, grid_size=5, spline_order=3, base_activation=torch.nn.SiLU, grid_range=[-1.5, 1.5]):
+        super().__init__()
+        self.layernorm = nn.LayerNorm(input_dim)
+        self.spline_order = spline_order
+        self.grid_size = grid_size
+        self.output_dim = output_dim
+        self.base_activation = base_activation()
+        self.input_dim = input_dim
+
+        self.base_weight = torch.nn.Parameter(torch.Tensor(self.output_dim, self.input_dim))
+        torch.nn.init.kaiming_uniform_(self.base_weight, a=math.sqrt(5))
+
+        self.spline_weight = torch.nn.Parameter(torch.Tensor(self.output_dim, self.input_dim * (grid_size + spline_order)))
+        torch.nn.init.kaiming_uniform_(self.spline_weight, a=math.sqrt(5))
+
+        self.rbf = RadialBasisFunction(grid_range[0], grid_range[1], grid_size + spline_order)
+
+        h = (grid_range[1] - grid_range[0]) / grid_size
+        grid = (torch.arange(-spline_order, grid_size + spline_order + 1) * h + grid_range[0]).expand(self.input_dim, -1).contiguous()
+        self.register_buffer("grid", grid)
+
+    def b_splines(self, x: torch.Tensor):
+        assert x.dim() == 2 and x.size(1) == self.input_dim
+        grid: torch.Tensor = self.grid
+        x = x.unsqueeze(-1)
+        bases = ((x >= grid[:, :-1]) & (x < grid[:, 1:])).to(x.dtype)
+        for k in range(1, self.spline_order + 1):
+            bases = ((x - grid[:, : -(k + 1)]) / (grid[:, k:-1] - grid[:, : -(k + 1)]) * bases[:, :, :-1]) + ((grid[:, k + 1:] - x) / (grid[:, k + 1:] - grid[:, 1:(-k)]) * bases[:, :, 1:])
+        assert bases.size() == (x.size(0), self.input_dim, self.grid_size + self.spline_order)
+        return bases.contiguous()
+
+    def forward(self, x):
+        device = x.device
+        x = self.layernorm(x)
+        base_output = F.linear(self.base_activation(x), self.base_weight)
+
+        bs_output = self.b_splines(x).view(x.size(0), -1)
+        rbf_output = self.rbf(x).view(x.size(0), -1)
+        bsrbf_output = bs_output + rbf_output
+        bsrbf_output = F.linear(bsrbf_output, self.spline_weight)
+
+        return base_output + bsrbf_output
 
 class AttentionLayer(nn.Module):
     def __init__(self, channels, reduction=16):
@@ -25,7 +80,7 @@ class AttentionLayer(nn.Module):
         return x * y
 
 class ResidualBlock(nn.Module):
-    def __init__(self, channels, dilation_rate):
+    def __init__(self, channels, dilation_rate, grid_size=5, spline_order=3):
         super(ResidualBlock, self).__init__()
         self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=dilation_rate, dilation=dilation_rate, groups=channels, bias=False)
         self.bn1 = nn.InstanceNorm2d(channels)
@@ -33,12 +88,14 @@ class ResidualBlock(nn.Module):
         self.bn2 = nn.InstanceNorm2d(channels)
         self.dropout = nn.Dropout(p=0.1)
 
+        self.bsrbf_layer = BSRBF_KANLayer(channels, channels, grid_size, spline_order)
+
     def forward(self, x):
         residual = x
         x = F.relu(self.bn1(self.conv1(x)))
         x = self.bn2(self.conv2(x))
         x = self.dropout(x)
-        x += residual
+        x += self.bsrbf_layer(residual)
         return F.relu(x)
 
 class ContextAggregationNetwork(nn.Module):
@@ -54,9 +111,9 @@ class ContextAggregationNetwork(nn.Module):
         x = F.relu(self.bn2(self.conv2(x)))
         return x
 
-class KANWithDepthwiseConv(nn.Module):
-    def __init__(self, in_channels=3, out_channels=64, n_mels=127, target_length=44036, num_stems=4, device="cpu", channel_multiplier=1.0):
-        super(KANWithDepthwiseConv, self).__init__()
+class KANWithBSRBF(nn.Module):
+    def __init__(self, in_channels=3, out_channels=64, n_mels=127, target_length=44036, num_stems=4, device="cpu", channel_multiplier=1.0, grid_size=5, spline_order=3):
+        super(KANWithBSRBF, self).__init__()
         self.device = device
         self.num_stems = num_stems
         self.n_mels = n_mels
@@ -64,7 +121,7 @@ class KANWithDepthwiseConv(nn.Module):
 
         self.conv1 = nn.Conv2d(in_channels, int(out_channels * channel_multiplier), kernel_size=3, padding=1, bias=False)
         self.pool1 = nn.MaxPool2d(kernel_size=2, stride=2)
-        self.res_block1 = ResidualBlock(int(out_channels * channel_multiplier), dilation_rate=1)
+        self.res_block1 = ResidualBlock(int(out_channels * channel_multiplier), dilation_rate=1, grid_size=grid_size, spline_order=spline_order)
         self.attention1 = AttentionLayer(int(out_channels * channel_multiplier))
 
         self.conv2 = nn.Sequential(
@@ -73,7 +130,7 @@ class KANWithDepthwiseConv(nn.Module):
             nn.ReLU(inplace=True)
         )
         self.pool2 = nn.MaxPool2d(kernel_size=2, stride=2)
-        self.res_block2 = ResidualBlock(int(out_channels * 2 * channel_multiplier), dilation_rate=2)
+        self.res_block2 = ResidualBlock(int(out_channels * 2 * channel_multiplier), dilation_rate=2, grid_size=grid_size, spline_order=spline_order)
         self.attention2 = AttentionLayer(int(out_channels * 2 * channel_multiplier))
 
         self.conv3 = nn.Sequential(
@@ -95,8 +152,8 @@ class KANWithDepthwiseConv(nn.Module):
         self.context_aggregation = ContextAggregationNetwork(int(out_channels * 8 * channel_multiplier))
         self.flatten = nn.Flatten()
 
-        self.fc1 = nn.Linear(int(out_channels * 8 * 2 * 2 * channel_multiplier), 512)
-        self.fc2 = nn.Linear(512, 3 * n_mels * target_length)  # Adjusted to match 3-channel output
+        self.fc1 = None  # Initialize fc1 as None
+        self.fc2 = nn.Linear(512, 3 * n_mels * target_length)  # Initialized with default values for later modification
         nn.init.xavier_normal_(self.fc2.weight)
 
     def forward_impl(self, x, suppress_reading_messages=False):
@@ -172,6 +229,15 @@ class KANWithDepthwiseConv(nn.Module):
             return None
 
         x = torch.cat(outputs, dim=0)
+
+        # Dynamically adjust fc1 input size based on the actual input shape
+        x = x.view(x.size(0), -1)
+        if self.fc1 is None or self.fc1.in_features != x.shape[1]:
+            self.fc1 = nn.Linear(x.shape[1], 512).to(x.device)
+            nn.init.xavier_normal_(self.fc1.weight)
+
+        x = F.relu(self.fc1(x))
+        x = self.fc2(x)
 
         # Adjust the shape here based on actual output
         try:
@@ -257,7 +323,7 @@ def load_model(checkpoint_path, in_channels, out_channels, n_mels, target_length
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    model = KANWithDepthwiseConv(in_channels, out_channels, n_mels, target_length, num_stems, device, channel_multiplier)
+    model = KANWithBSRBF(in_channels, out_channels, n_mels, target_length, num_stems, device, channel_multiplier)
     model.load_state_dict(torch.load(checkpoint_path, map_location=device))
 
     model.train()
