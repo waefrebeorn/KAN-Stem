@@ -152,9 +152,8 @@ class KANWithBSRBF(nn.Module):
         self.context_aggregation = ContextAggregationNetwork(int(out_channels * 8 * channel_multiplier))
         self.flatten = nn.Flatten()
 
-        self.fc1 = None  # Initialize fc1 as None
-        self.fc2 = nn.Linear(512, 3 * n_mels * target_length)  # Initialized with default values for later modification
-        nn.init.xavier_normal_(self.fc2.weight)
+        self.kan1 = BSRBF_KANLayer(3 * n_mels * target_length, 512, grid_size, spline_order)  # First KAN layer
+        self.kan2 = BSRBF_KANLayer(512, 3 * n_mels * target_length, grid_size, spline_order)  # Second KAN layer
 
     def forward_impl(self, x, suppress_reading_messages=False):
         layers = [
@@ -230,14 +229,13 @@ class KANWithBSRBF(nn.Module):
 
         x = torch.cat(outputs, dim=0)
 
-        # Dynamically adjust fc1 input size based on the actual input shape
+        # Dynamically adjust kan1 input size based on the actual input shape
         x = x.view(x.size(0), -1)
-        if self.fc1 is None or self.fc1.in_features != x.shape[1]:
-            self.fc1 = nn.Linear(x.shape[1], 512).to(x.device)
-            nn.init.xavier_normal_(self.fc1.weight)
+        if self.kan1.input_dim != x.shape[1]:
+            self.kan1 = BSRBF_KANLayer(x.shape[1], 512, grid_size=self.kan1.grid_size, spline_order=self.kan1.spline_order).to(x.device)
 
-        x = F.relu(self.fc1(x))
-        x = self.fc2(x)
+        x = F.relu(self.kan1(x))
+        x = self.kan2(x)
 
         # Adjust the shape here based on actual output
         try:

@@ -160,7 +160,7 @@ def train_single_stem(
                 torch.nn.utils.clip_grad_norm_(model.parameters(), model_params['clip_value'])
                 scaler.step(optimizer_g)
                 scaler.update()
-                optimizer_g.zero_grad(set_to_none(True))
+                optimizer_g.zero_grad(set_to_none=True)
 
                 logger.info(f"Epoch [{epoch+1}/{training_params['num_epochs']}], Step [{i+1}/{len(dataset)}], Loss G: {running_loss_g:.4f}, Loss D: {running_loss_d:.4f}")
                 if model_params['tensorboard_flag']:
