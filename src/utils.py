@@ -284,6 +284,29 @@ def scan_cache_directory(cache_dir: str) -> Dict[str, str]:
                 cache_index[cache_key] = file_path
     return cache_index
 
+def load_from_cache(file_path, device, suppress_reading_messages=False):
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"Cache file {file_path} does not exist.")
+    with h5py.File(file_path, 'r') as hf:
+        input_data = torch.from_numpy(hf['input'][:]).to(device, non_blocking=True).float()
+        target_data = torch.from_numpy(hf['target'][:]).to(device, non_blocking=True).float()
+    if not suppress_reading_messages:
+        logger.info(f"Loaded from cache: {file_path}, input data shape: {input_data.shape}, target data shape: {target_data.shape}")
+    return input_data, target_data
+
+def is_cache_warmed_up(cache_dir):
+    required_files = ['input.h5', 'target.h5']
+    for file in required_files:
+        if not os.path.exists(os.path.join(cache_dir, file)):
+            return False
+    return True
+
+def warm_up_cache(cache_dir):
+    if not is_cache_warmed_up(cache_dir):
+        # Assume this function will generate the cache files required
+        generate_cache_files(cache_dir)
+    logger.info(f"Cache warmed up for: {cache_dir}")
+
 class StemSeparationDataset(Dataset):
     def __init__(
         self, data_dir: str, n_mels: int, target_length: int, n_fft: int, cache_dir: str, apply_data_augmentation: bool,
@@ -670,35 +693,6 @@ def preprocess_and_cache_dataset(
 
     logger.info(f"Training dataset size: {len(train_dataset)}")
     logger.info(f"Validation dataset size: {len(validation_dataset)}")
-
-    # Cache train and validation datasets
-    for dset in [train_dataset, validation_dataset]:
-        for idx in range(len(dset)):
-            item = dset.__getitem__(idx)
-            if item is None:
-                logger.error(f"Failed to load item {idx} from dataset")
-                continue
-            input_file_path = item['file_path']
-
-            identifier = input_file_path.split('_')[1].split('.')[0]
-
-            for target_stem in dset.stem_names:
-                if target_stem != "input":
-                    for aug in [True, False]:
-                        target_cache_file_path = os.path.join(
-                            dset.cache_dir,
-                            f"target_{target_stem}_{identifier}_{aug}_{dset.n_mels}_{dset.target_length}_{dset.n_fft}.h5"
-                        )
-
-                        target_data = dset._get_data(f"target_{target_stem}_{identifier}.wav", apply_data_augmentation=aug)
-                        if target_data is None:
-                            h5_file_name = f"target_{target_stem}_{identifier}.wav"
-                            target_data = dset._process_and_cache(h5_file_name, apply_data_augmentation=aug)
-
-                        if target_data is not None:
-                            logger.info(f"Warmed up cache for: {target_cache_file_path}")
-                        else:
-                            logger.error(f"Failed to load or process target file: {target_cache_file_path}")
 
     return train_dataset, validation_dataset
 

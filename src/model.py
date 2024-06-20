@@ -128,6 +128,7 @@ class KANWithBSRBF(nn.Module):
         self.num_stems = num_stems
         self.n_mels = n_mels
         self.target_length = target_length
+        self.channel_multiplier = channel_multiplier
 
         self.conv1 = nn.Conv2d(in_channels, int(out_channels * channel_multiplier), kernel_size=3, padding=1, bias=False).cuda()
         self.pool1 = nn.MaxPool2d(kernel_size=2, stride=2)
@@ -162,8 +163,13 @@ class KANWithBSRBF(nn.Module):
         self.context_aggregation = ContextAggregationNetwork(int(out_channels * 8 * channel_multiplier)).cuda()
         self.flatten = nn.Flatten()
 
-        self.kan1 = BSRBF_KANLayer(3 * n_mels * target_length, 512, grid_size, spline_order).cuda()
-        self.kan2 = BSRBF_KANLayer(512, 3 * n_mels * target_length, grid_size, spline_order).cuda()
+        self.kan1 = None
+        self.kan2 = None
+
+    def adjust_kan_layers(self, input_size):
+        if self.kan1 is None or self.kan1.input_dim != input_size:
+            self.kan1 = BSRBF_KANLayer(input_size, 512, grid_size=5, spline_order=3).cuda()
+            self.kan2 = BSRBF_KANLayer(512, 3 * self.n_mels * self.target_length, grid_size=5, spline_order=3).cuda()
 
     @torch.cuda.amp.autocast()
     def forward_impl(self, x, suppress_reading_messages=False):
@@ -254,8 +260,7 @@ class KANWithBSRBF(nn.Module):
 
         # Dynamically adjust kan1 input size based on the actual input shape
         x = x.view(x.size(0), -1)
-        if self.kan1.input_dim != x.shape[1]:
-            self.kan1 = BSRBF_KANLayer(x.shape[1], 512, grid_size=self.kan1.grid_size, spline_order=self.kan1.spline_order).cuda()
+        self.adjust_kan_layers(x.shape[1])
 
         x = F.relu(self.kan1(x))
         x = self.kan2(x)

@@ -1,24 +1,20 @@
 import torch
-import torch.optim as optim
-from torch.utils.tensorboard import SummaryWriter
 import torch.nn as nn
+from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
 import logging
-import gc
-from torchvision import models
-from torchvision.models import VGG16_Weights
-from torch.cuda.amp import GradScaler, autocast
-from torch.optim.lr_scheduler import CyclicLR, ReduceLROnPlateau
+import os
+from torch.cuda.amp import autocast, GradScaler
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from typing import Any
 from utils import (
     compute_sdr, compute_sir, compute_sar, convert_to_3_channels,
     gradient_penalty, PerceptualLoss, detect_parameters, preprocess_and_cache_dataset,
     StemSeparationDataset, collate_fn, log_training_parameters, ensure_dir_exists,
-    get_optimizer, integrated_dynamic_batching, purge_vram
+    get_optimizer, integrated_dynamic_batching, purge_vram, load_from_cache
 )
 from model_setup import create_model_and_optimizer
 
-# Set up logging
 logger = logging.getLogger(__name__)
 
 def train_single_stem(
@@ -43,30 +39,17 @@ def train_single_stem(
     device = torch.device(training_params['device_str'])
     writer = SummaryWriter(log_dir=os.path.join(training_params['checkpoint_dir'], 'runs', f'stem_{stem_name}_{datetime.now().strftime("%Y%m%d-%H%M%S")}')) if model_params['tensorboard_flag'] else None
 
-    model, discriminator, optimizer_g, optimizer_d = create_model_and_optimizer(
+    model, discriminator, optimizer_g, optimizer_d, scaler_g, scaler_d = create_model_and_optimizer(
         training_params['device_str'], n_mels, target_length,
         training_params['initial_lr_g'], training_params['initial_lr_d'], model_params['optimizer_name_g'],
-        model_params['optimizer_name_d'], training_params['weight_decay'], model_params['channel_multiplier']
+        model_params['optimizer_name_d'], training_params['weight_decay']
     )
 
-    feature_extractor = models.vgg16(weights=VGG16_Weights.IMAGENET1K_V1).features.to(device).eval()
-    for param in feature_extractor.parameters():
-        param.requires_grad = False
+    scheduler_g = ReduceLROnPlateau(optimizer_g, mode='min', factor=0.5, patience=10)
+    scheduler_d = ReduceLROnPlateau(optimizer_d, mode='min', factor=0.5, patience=10)
 
-    def choose_scheduler(optimizer, optimizer_name):
-        if optimizer_name in ['SGD', 'Momentum', 'RMSprop']:
-            return CyclicLR(optimizer, base_lr=1e-5, max_lr=1e-3, step_size_up=2000, mode='triangular2')
-        else:
-            return ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10)
-
-    scheduler_g = choose_scheduler(optimizer_g, model_params['optimizer_name_g'])
-    scheduler_d = choose_scheduler(optimizer_d, model_params['optimizer_name_d'])
-
-    scaler = GradScaler()
     early_stopping_counter = 0
     best_val_loss = float('inf')
-    perceptual_loss_frequency = 5  
-    accumulation_steps = training_params['accumulation_steps']
 
     for epoch in range(training_params['num_epochs']):
         if stop_flag.value == 1:
@@ -87,18 +70,21 @@ def train_single_stem(
                 logger.info("Training stopped.")
                 return
 
-            inputs = batch['inputs'].to(device, non_blocking=True).float()
-            targets = batch['targets'].to(device, non_blocking=True).float()
+            try:
+                inputs, targets = load_from_cache(batch['file_paths'][0], device, suppress_reading_messages)
+            except KeyError as e:
+                logger.error(f"Batch missing 'file_paths' key: {e}")
+                continue
 
             with autocast():
                 outputs = model(inputs)
                 loss_g = model_params['loss_function_g'](outputs, targets)
 
-                if model_params['perceptual_loss_flag'] and (i % perceptual_loss_frequency == 0):
+                if model_params['perceptual_loss_flag'] and (i % 5 == 0):  # Perceptual loss every 5 steps
                     perceptual_loss = model_params['perceptual_loss_weight'] * PerceptualLoss(feature_extractor)(outputs, targets)
                     loss_g += perceptual_loss
 
-            scaler.scale(loss_g).backward()
+            scaler_g.scale(loss_g).backward()
 
             if (i + 1) % training_params['discriminator_update_interval'] == 0:
                 with autocast():
@@ -114,12 +100,13 @@ def train_single_stem(
                     gp = gradient_penalty(discriminator, targets, outputs.detach(), device)
                     loss_d = (loss_d_real + loss_d_fake) / 2 + gp
 
-                scaler.scale(loss_d).backward()
+                scaler_d.scale(loss_d).backward()
 
-            if (i + 1) % accumulation_steps == 0:
-                scaler.step(optimizer_g)
-                scaler.step(optimizer_d)
-                scaler.update()
+            if (i + 1) % training_params['accumulation_steps'] == 0:
+                scaler_g.step(optimizer_g)
+                scaler_d.step(optimizer_d)
+                scaler_g.update()
+                scaler_d.update()
                 optimizer_g.zero_grad(set_to_none=True)
                 optimizer_d.zero_grad(set_to_none=True)
 
@@ -133,9 +120,12 @@ def train_single_stem(
         val_loss = 0.0
         with torch.no_grad():
             for batch in integrated_dynamic_batching(val_dataset, training_params['batch_size'], stem_name):
-                inputs = batch['inputs'].to(device, non_blocking=True).float()
-                targets = batch['targets'].to(device, non_blocking=True).float()
-                
+                try:
+                    inputs, targets = load_from_cache(batch['file_paths'][0], device, suppress_reading_messages)
+                except KeyError as e:
+                    logger.error(f"Batch missing 'file_paths' key: {e}")
+                    continue
+
                 with autocast():
                     outputs = model(inputs)
                     loss = model_params['loss_function_g'](outputs, targets)
@@ -249,8 +239,7 @@ def start_training(
     logger.info("Training finished.")
 
 if __name__ == '__main__':
-    import multiprocessing
-    stop_flag = multiprocessing.Value('i', 0)
+    stop_flag = torch.tensor(0, dtype=torch.int32)
 
     start_training(
         data_dir='path_to_data',
@@ -281,7 +270,7 @@ if __name__ == '__main__':
         noise_amount=0.1,
         early_stopping_patience=5,
         disable_early_stopping=False,
-        weight_decay=0,
+        weight_decay=1e-5,
         suppress_warnings=False,
         suppress_reading_messages=False,
         discriminator_update_interval=5,
