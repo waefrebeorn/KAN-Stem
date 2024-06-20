@@ -2,8 +2,8 @@ import os
 import torch
 import torch.optim as optim
 from multiprocessing import Value, Process
-from model_setup import create_model_and_optimizer
-from training_loop import train_single_stem, start_training
+from model_setup import create_model_and_optimizer, initialize_model
+from training_loop import start_training
 import logging
 from data_preprocessing import preprocess_and_cache_dataset
 from dataset import StemSeparationDataset
@@ -104,8 +104,8 @@ def resume_training(checkpoint_dir, device_str):
         return f"Error loading checkpoint: {e}"
 
     # Assuming the checkpoint contains model and optimizer state
-    model = initialize_model()
-    optimizer = initialize_optimizer()
+    model = initialize_model(device_str, checkpoint['n_mels'], checkpoint['target_length'])
+    optimizer = get_optimizer(checkpoint['optimizer_name_g'], model.parameters(), checkpoint['initial_lr_g'], checkpoint['weight_decay'])
 
     model.load_state_dict(checkpoint['model_state_dict'])
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -143,14 +143,10 @@ def resume_training(checkpoint_dir, device_str):
         weight_decay=checkpoint['weight_decay'],
         suppress_warnings=checkpoint['suppress_warnings'],
         suppress_reading_messages=checkpoint['suppress_reading_messages'],
-        use_cpu_for_prep=checkpoint['use_cpu_for_prep'],
-        discriminator_update_interval=checkpoint['discriminator_update_interval'],
-        label_smoothing_real=checkpoint['label_smoothing_real'],
-        label_smoothing_fake=checkpoint['label_smoothing_fake'],
-        stop_flag=stop_flag,  # Add stop_flag for consistency
-        use_cache=checkpoint['use_cache'],  # Add use_cache parameter
-        channel_multiplier=checkpoint['channel_multiplier'],  # Add channel_multiplier parameter
-        segments_per_track=checkpoint.get('segments_per_track', 10)  # Add segments_per_track parameter
+        use_cache=checkpoint['use_cache'],
+        channel_multiplier=checkpoint['channel_multiplier'],
+        segments_per_track=checkpoint.get('segments_per_track', 10),
+        stop_flag=stop_flag
     )
 
     return f"Resumed training from checkpoint: {latest_checkpoint}"
@@ -161,3 +157,58 @@ def resume_training_wrapper(checkpoint_dir):
     training_process = Process(target=resume_training, args=(checkpoint_dir, device_str))
     training_process.start()
     return f"Resuming training from checkpoint in {checkpoint_dir}"
+
+if __name__ == "__main__":
+    # Example usage (optional, for testing)
+    data_dir = "path/to/data"
+    val_dir = "path/to/validation_data"
+    batch_size = 16
+    num_epochs = 100
+    learning_rate_g = 1e-4
+    learning_rate_d = 1e-4
+    use_cuda = torch.cuda.is_available()
+    checkpoint_dir = "path/to/checkpoints"
+    save_interval = 10
+    accumulation_steps = 1
+    num_stems = 4
+    num_workers = 4
+    cache_dir = "path/to/cache"
+    loss_function_str_g = "MSELoss"
+    loss_function_str_d = "BCEWithLogitsLoss"
+    optimizer_name_g = "Adam"
+    optimizer_name_d = "RMSprop"
+    perceptual_loss_flag = True
+    perceptual_loss_weight = 0.1
+    clip_value = 0.01
+    scheduler_step_size = 10
+    scheduler_gamma = 0.1
+    tensorboard_flag = True
+    apply_data_augmentation = True
+    add_noise = True
+    noise_amount = 0.1
+    early_stopping_patience = 10
+    disable_early_stopping = False
+    weight_decay = 1e-5
+    suppress_warnings = True
+    suppress_reading_messages = False
+    discriminator_update_interval = 5
+    label_smoothing_real = 0.9
+    label_smoothing_fake = 0.1
+    suppress_detailed_logs = False
+    use_cache = True
+    channel_multiplier = 1.0
+    segments_per_track = 10
+
+    start_training_wrapper(
+        data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, 
+        accumulation_steps, num_stems, num_workers, cache_dir, loss_function_str_g, loss_function_str_d, optimizer_name_g, optimizer_name_d,
+        perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation,
+        add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages,
+        discriminator_update_interval, label_smoothing_real, label_smoothing_fake, suppress_detailed_logs, use_cache, channel_multiplier, segments_per_track
+    )
+
+    # Example for stopping training
+    # stop_training_wrapper()
+
+    # Example for resuming training
+    # resume_training_wrapper(checkpoint_dir)

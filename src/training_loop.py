@@ -160,7 +160,7 @@ def train_single_stem(
                 torch.nn.utils.clip_grad_norm_(model.parameters(), model_params['clip_value'])
                 scaler.step(optimizer_g)
                 scaler.update()
-                optimizer_g.zero_grad(set_to_none=True)
+                optimizer_g.zero_grad(set_to_none(True))
 
                 logger.info(f"Epoch [{epoch+1}/{training_params['num_epochs']}], Step [{i+1}/{len(dataset)}], Loss G: {running_loss_g:.4f}, Loss D: {running_loss_d:.4f}")
                 if model_params['tensorboard_flag']:
@@ -326,8 +326,8 @@ def start_training(
         if stem_name == "input":
             continue 
 
-        # Warm up cache only once per stem
-        warm_up_cache_batch(train_dataset, training_params['batch_size'], stem_name)
+        # Warm up cache for ten testing sets
+        warm_up_cache_batch(train_dataset, training_params['batch_size'], stem_name, num_batches=10)
 
         train_single_stem(
             stem_name, train_dataset, val_dataset, training_params, model_params, 
@@ -343,7 +343,7 @@ if __name__ == '__main__':
     start_training(
         data_dir='path_to_data',
         val_dir='path_to_val_data',
-        batch_size=32,
+        batch_size=1,  # Train with batch size of one
         num_epochs=10,
         initial_lr_g=1e-4,
         initial_lr_d=1e-4,
