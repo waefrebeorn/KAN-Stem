@@ -643,6 +643,10 @@ def preprocess_and_cache_dataset(
         mel_spectrogram=mel_spectrogram
     )
 
+    # Process files if cache doesn't exist
+    for file_name in dataset.stem_names['input']:
+        process_file(dataset, file_name, target_length, apply_data_augmentation, device_prep)
+
     # Get all stem names
     stem_names = dataset._load_stem_names()
 
@@ -756,27 +760,27 @@ def load_and_preprocess(
         if input_mel.shape[-1] < target_length:
             input_mel = F.pad(input_mel, (0, target_length - input_mel.shape[-1]))
 
+        # Ensure input_mel is 3D (channels, n_mels, target_length)
+        input_mel = input_mel.squeeze(0)  # Remove batch dimension if present
+
         if not suppress_messages:
-            logger.info(f"Input data shape after padding: {input_mel.shape}")
+            logger.info(f"Input data shape after processing: {input_mel.shape}")
 
         features = []
         if extra_features:
             for feature in extra_features:
                 feature_data = feature(input_mel, sample_rate, dataset.mel_spectrogram, dataset.n_mels, target_length).to(device).float()
-                logger.info(f"Feature {feature.__name__} shape before padding: {feature_data.shape}")
                 if feature_data.shape[-1] < target_length:
                     feature_data = F.pad(feature_data, (0, target_length - feature_data.shape[-1]))
-                logger.info(f"Feature {feature.__name__} shape after padding: {feature_data.shape}")
-                feature_data = feature_data.unsqueeze(0)
                 features.append(feature_data)
 
-        target_data = torch.stack([input_mel] + features, dim=1)
+        target_data = torch.stack([input_mel] + features, dim=0)
 
         if not suppress_messages:
             logger.info(f"Target data shape after stacking: {target_data.shape}")
 
         if apply_data_augmentation:
-            input_mel, target_data = dataset.apply_augmentation(input_mel, target_data)
+            _, target_data = dataset.apply_augmentation(input_mel, target_data)  # Only augment target
 
         if use_cache and cache_file_path:
             with h5py.File(cache_file_path, 'w') as f:
@@ -790,7 +794,7 @@ def load_and_preprocess(
     except Exception as e:
         logger.error(f"Error processing file {file_path}: {e}")
         return None, None
-
+        
 def monitor_memory_usage():
     try:
         memory_info = psutil.virtual_memory()

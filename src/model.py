@@ -121,160 +121,63 @@ class ContextAggregationNetwork(nn.Module):
         x = F.relu(self.bn2(self.conv2(x)))
         return x
 
-class KANWithBSRBF(nn.Module):
-    def __init__(self, in_channels=1, out_channels=64, n_mels=127, target_length=44036, num_stems=4, device="cuda", channel_multiplier=1.0, grid_size=5, spline_order=3):
-        super(KANWithBSRBF, self).__init__()
-        self.device = device
-        self.num_stems = num_stems
+class MemoryEfficientStemSeparationModel(nn.Module):
+    def __init__(self, in_channels=1, out_channels=1, n_mels=64, target_length=22050):
+        super(MemoryEfficientStemSeparationModel, self).__init__()
         self.n_mels = n_mels
         self.target_length = target_length
-        self.channel_multiplier = channel_multiplier
 
-        self.conv1 = nn.Conv2d(in_channels, int(out_channels * channel_multiplier), kernel_size=3, padding=1, bias=False).cuda()
-        self.pool1 = nn.MaxPool2d(kernel_size=2, stride=2)
-        self.res_block1 = ResidualBlock(int(out_channels * channel_multiplier), dilation_rate=1, grid_size=grid_size, spline_order=spline_order).cuda()
-        self.attention1 = AttentionLayer(int(out_channels * channel_multiplier)).cuda()
+        # Encoder
+        self.encoder = nn.ModuleList([
+            self.conv_block(in_channels, 16, kernel_size=3, stride=1, padding=1),
+            self.conv_block(16, 32, kernel_size=3, stride=2, padding=1),
+            self.conv_block(32, 64, kernel_size=3, stride=2, padding=1),
+            self.conv_block(64, 128, kernel_size=3, stride=2, padding=1)
+        ])
 
-        self.conv2 = nn.Sequential(
-            nn.Conv2d(int(out_channels * channel_multiplier), int(out_channels * 2 * channel_multiplier), kernel_size=3, padding=1, bias=False),
-            nn.InstanceNorm2d(int(out_channels * 2 * channel_multiplier)),
-            nn.ReLU(inplace=True)
-        ).cuda()
-        self.pool2 = nn.MaxPool2d(kernel_size=2, stride=2)
-        self.res_block2 = ResidualBlock(int(out_channels * 2 * channel_multiplier), dilation_rate=2, grid_size=grid_size, spline_order=spline_order).cuda()
-        self.attention2 = AttentionLayer(int(out_channels * 2 * channel_multiplier)).cuda()
+        # Decoder
+        self.decoder = nn.ModuleList([
+            self.conv_block(128, 64, kernel_size=3, stride=1, padding=1),
+            self.conv_block(64, 32, kernel_size=3, stride=1, padding=1),
+            self.conv_block(32, 16, kernel_size=3, stride=1, padding=1)
+        ])
+        self.final_conv = nn.Conv2d(16, out_channels, kernel_size=1)
 
-        self.conv3 = nn.Sequential(
-            nn.Conv2d(int(out_channels * 2 * channel_multiplier), int(out_channels * 4 * channel_multiplier), kernel_size=3, padding=2, dilation=2, bias=False),
-            nn.InstanceNorm2d(int(out_channels * 4 * channel_multiplier)),
-            nn.ReLU(inplace=True)
-        ).cuda()
-        self.pool3 = nn.MaxPool2d(kernel_size=2, stride=2)
-
-        self.conv4 = nn.Sequential(
-            nn.Conv2d(int(out_channels * 4 * channel_multiplier), int(out_channels * 8 * channel_multiplier), kernel_size=3, padding=2, dilation=2, bias=False),
-            nn.InstanceNorm2d(int(out_channels * 8 * channel_multiplier)),
-            nn.ReLU(inplace=True)
-        ).cuda()
-        self.pool4 = nn.MaxPool2d(kernel_size=2, stride=2)
-
-        self.pool5 = nn.MaxPool2d(kernel_size=2, stride=1, padding=1)
-
-        self.context_aggregation = ContextAggregationNetwork(int(out_channels * 8 * channel_multiplier)).cuda()
-        self.flatten = nn.Flatten()
-
-        self.kan1 = None
-        self.kan2 = None
-
-    def adjust_kan_layers(self, input_size):
-        if self.kan1 is None or self.kan1.input_dim != input_size:
-            self.kan1 = BSRBF_KANLayer(input_size, 512, grid_size=5, spline_order=3).cuda()
-            self.kan2 = BSRBF_KANLayer(512, 1 * self.n_mels * self.target_length, grid_size=5, spline_order=3).cuda()
+    def conv_block(self, in_channels, out_channels, kernel_size, stride, padding):
+        return nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding, bias=False),
+            nn.BatchNorm2d(out_channels),
+            nn.LeakyReLU(0.2, inplace=True)
+        )
 
     @torch.cuda.amp.autocast()
-    def forward_impl(self, x, suppress_reading_messages=False):
-        layers = [
-            self.conv1, self.pool1, self.res_block1, self.attention1, 
-            self.conv2, self.pool2, self.res_block2, self.attention2, 
-            self.conv3, self.pool3, self.conv4, self.pool4, 
-            self.pool5, self.context_aggregation, self.flatten
-        ]
-        for layer in layers:
-            try:
-                x = checkpoint(layer, x, use_reentrant=True)
-            except Exception as e:
-                logger.error(f"Error in layer {layer.__class__.__name__}: {e}")
-                raise
-
-            if not suppress_reading_messages:
-                logger.info(f"{layer.__class__.__name__}: {x.shape}")
-            
-            # Strategic VRAM purging
-            if layer in [self.pool2, self.pool4]:
-                purge_vram()
-
-        return x
-
-    @torch.cuda.amp.autocast()
-    def forward(self, x, suppress_reading_messages=True, is_initializing=False):
-        if not suppress_reading_messages:
-            logger.info(f"Input shape: {x.shape}")
-
-        # Input Validation
-        if x.dim() not in [2, 3, 4]:
-            raise ValueError(f"Expected input tensor to have 2, 3, or 4 dimensions, got {x.dim()}")
-
-        x = x.to(self.device)
-
-        if x.dim() == 2:
-            x = x.unsqueeze(0).unsqueeze(0)
-        elif x.dim() == 3:
+    def forward(self, x):
+        # Ensure input is 4D (batch_size, channels, n_mels, target_length)
+        if x.dim() == 3:
             x = x.unsqueeze(1)
+        elif x.dim() == 5:
+            x = x.squeeze(2)
 
-        if not suppress_reading_messages:
-            logger.info(f"Shape after adding dimensions: {x.shape}")
+        # Encoder
+        encoder_outputs = []
+        for encoder_layer in self.encoder:
+            x = checkpoint(encoder_layer, x)
+            encoder_outputs.append(x)
+            # Free up memory
+            if len(encoder_outputs) > 1:
+                del encoder_outputs[-2]
+            torch.cuda.empty_cache()
 
-        if is_initializing:
-            x = self.forward_impl(x, suppress_reading_messages)
-            return x
+        # Upsample
+        x = F.interpolate(x, size=(self.n_mels, self.target_length), mode='bilinear', align_corners=False)
 
-        if x.shape[-1] > self.target_length:
-            num_segments = (x.shape[-1] + self.target_length - 1) // self.target_length
-            segments = torch.split(x, self.target_length, dim=-1)
-            if segments[-1].shape[-1] < self.target_length:
-                segments = list(segments)
-                segments[-1] = F.pad(segments[-1], (0, self.target_length - segments[-1].shape[-1]))
-                segments = tuple(segments)
-        else:
-            if x.shape[-1] < self.target_length:
-                x = F.pad(x, (0, self.target_length - x.shape[-1]))
-            segments = (x,)
+        # Decoder
+        for decoder_layer in self.decoder:
+            x = checkpoint(decoder_layer, x)
+            torch.cuda.empty_cache()
 
-        if not suppress_reading_messages:
-            logger.info(f"Number of segments: {len(segments)}")
-
-        outputs = []
-        for i, segment in enumerate(segments):
-            if not suppress_reading_messages:
-                logger.info(f"Shape of segment {i + 1} before processing: {segment.shape}")
-
-            if segment.numel() == 0:
-                logger.error(f"Segment {i + 1} is empty and cannot be processed.")
-                continue
-            try:
-                segment_output = self.forward_impl(segment, suppress_reading_messages)
-                outputs.append(segment_output)
-            except Exception as e:
-                logger.error(f"Error processing segment {i + 1}: {e}")
-                raise
-
-            # Strategic VRAM purging
-            if i % 2 == 1:
-                purge_vram()
-
-        if not outputs:
-            logger.error("No segments were processed successfully.")
-            return None
-
-        x = torch.cat(outputs, dim=0)
-
-        # Dynamically adjust kan1 input size based on the actual input shape
-        x = x.view(x.size(0), -1)
-        self.adjust_kan_layers(x.shape[1])
-
-        x = F.relu(self.kan1(x))
-        x = self.kan2(x)
-
-        # Adjust the shape here based on actual output
-        try:
-            output_shape = (-1, 1, self.n_mels, self.target_length)  # Updated to 1 channel
-            x = x.view(*output_shape)
-            logger.info(f"Shape of final output: {x.shape}")
-        except RuntimeError as e:
-            logger.error(f"Error reshaping tensor: {e}")
-            logger.error(f"Input shape: {x.shape}")
-            logger.error(f"Expected shape: {output_shape}")
-            raise e
+        # Final convolution
+        x = self.final_conv(x)
 
         return x
 
@@ -304,6 +207,9 @@ class KANDiscriminator(nn.Module):
     def forward(self, x):
         if x.dim() == 3:
             x = x.unsqueeze(1)  # Add channel dimension if needed
+        if x.dim() == 5:
+            x = x.squeeze(2)  # Remove the singleton dimension if needed
+
         x = x.to(self.device)  # Ensure the data is on the correct device
         x = self._forward_conv_layers(x)
         x = x.view(x.size(0), -1)
@@ -353,7 +259,7 @@ def load_model(checkpoint_path, in_channels, out_channels, n_mels, target_length
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    model = KANWithBSRBF(in_channels, out_channels, n_mels, target_length, num_stems, device, channel_multiplier)
+    model = MemoryEfficientStemSeparationModel(in_channels, out_channels, n_mels, target_length).to(device)
     model.load_state_dict(torch.load(checkpoint_path, map_location=device))
 
     model.train()
