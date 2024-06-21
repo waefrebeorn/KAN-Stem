@@ -156,7 +156,7 @@ def process_file(dataset: 'StemSeparationDataset', file_path: str, target_length
         log_system_resources()
         start_time = time.time()
 
-        cache_key = dataset._get_cache_key(file_path, apply_data_augmentation)
+        cache_key = dataset._get_cache_key("input", file_path, apply_data_augmentation)  # Corrected method call
         cached_data = dataset._get_data(file_path, apply_data_augmentation)
         
         if cached_data is not None:
@@ -566,9 +566,8 @@ class StemSeparationDataset(Dataset):
 
     def apply_augmentation(self, input_mel: torch.Tensor, target_mel: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         noise = torch.randn_like(input_mel, device=self.device_prep) * 0.1
-        augmented_input = input_mel + noise
         augmented_target = target_mel + noise
-        return augmented_input, augmented_target
+        return input_mel, augmented_target
 
 def pad_tensor(tensor: torch.Tensor, target_length: int, target_width: int) -> torch.Tensor:
     if tensor.dim() >= 2:
@@ -643,16 +642,12 @@ def preprocess_and_cache_dataset(
         mel_spectrogram=mel_spectrogram
     )
 
-    # Process files if cache doesn't exist
-    for file_name in dataset.stem_names['input']:
-        process_file(dataset, file_name, target_length, apply_data_augmentation, device_prep)
-
     # Get all stem names
     stem_names = dataset._load_stem_names()
 
     # Load and split file names for train and validation
     np.random.seed(random_seed)
-    all_input_files = [f for f in os.listdir(cache_dir) if f.endswith('.h5') and f.startswith('input')]
+    all_input_files = [f for f in os.listdir(data_dir) if f.endswith('.wav') and f.startswith('input')]
     np.random.shuffle(all_input_files)
     split_idx = int(len(all_input_files) * validation_split)
     validation_input_files = all_input_files[:split_idx]
@@ -713,6 +708,10 @@ def preprocess_and_cache_dataset(
 
     logger.info(f"Training dataset size: {len(train_dataset)}")
     logger.info(f"Validation dataset size: {len(validation_dataset)}")
+
+    # Process files and cache data if needed
+    for file_name in all_input_files:
+        process_file(dataset, file_name, target_length, apply_data_augmentation, device_prep)
 
     return train_dataset, validation_dataset
 
@@ -780,7 +779,7 @@ def load_and_preprocess(
             logger.info(f"Target data shape after stacking: {target_data.shape}")
 
         if apply_data_augmentation:
-            _, target_data = dataset.apply_augmentation(input_mel, target_data)  # Only augment target
+            input_mel, target_data = dataset.apply_augmentation(input_mel, target_data)
 
         if use_cache and cache_file_path:
             with h5py.File(cache_file_path, 'w') as f:
