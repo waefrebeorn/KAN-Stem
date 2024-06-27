@@ -7,11 +7,12 @@ import os
 from torch.cuda.amp import autocast, GradScaler
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from typing import Any
+from torchvision.models import vgg16, VGG16_Weights
 from utils import (
-    compute_sdr, compute_sir, compute_sar, convert_to_3_channels,
+    compute_sdr, compute_sir, compute_sar, 
     gradient_penalty, PerceptualLoss, detect_parameters, preprocess_and_cache_dataset,
     StemSeparationDataset, collate_fn, log_training_parameters, ensure_dir_exists,
-    get_optimizer, integrated_dynamic_batching, purge_vram, load_from_cache
+    get_optimizer, integrated_dynamic_batching, purge_vram, load_from_cache, process_file
 )
 from model_setup import create_model_and_optimizer
 
@@ -27,7 +28,7 @@ def train_single_stem(
     n_mels: int, 
     n_fft: int, 
     target_length: int, 
-    stop_flag: Any,
+    stop_flag: torch.Tensor,
     suppress_reading_messages: bool = False
 ):
     if stem_name == "input":
@@ -51,6 +52,11 @@ def train_single_stem(
     early_stopping_counter = 0
     best_val_loss = float('inf')
 
+    # Define the feature extractor for perceptual loss
+    feature_extractor = vgg16(weights=VGG16_Weights.IMAGENET1K_V1).features.to(device).eval()
+    for param in feature_extractor.parameters():
+        param.requires_grad = False
+
     for epoch in range(training_params['num_epochs']):
         if stop_flag.value == 1:
             logger.info("Training stopped.")
@@ -65,21 +71,35 @@ def train_single_stem(
         optimizer_g.zero_grad(set_to_none=True)
         optimizer_d.zero_grad(set_to_none=True)
 
-        for i, batch in enumerate(integrated_dynamic_batching(dataset, training_params['batch_size'], stem_name)):
+        for i, batch in enumerate(integrated_dynamic_batching(dataset, training_params['batch_size'], stem_name, shuffle=False)):
             if stop_flag.value == 1:
                 logger.info("Training stopped.")
                 return
 
             try:
                 # Use the first file path from the batch
-                file_path = os.path.join(dataset.cache_dir, batch['file_paths'][0])
-                data = load_from_cache(file_path, device)
-                inputs, targets = data['input'], data['target']
+                identifier = batch['file_ids'][0]
+                input_cache_file_name = f"input_{identifier}_True_{dataset.n_mels}_{dataset.target_length}_{dataset.n_fft}.h5"
+                target_cache_file_name = f"target_{stem_name}_{identifier}_False_{dataset.n_mels}_{dataset.target_length}_{dataset.n_fft}.h5"
+                input_cache_file_path = os.path.join(dataset.cache_dir, input_cache_file_name)
+                target_cache_file_path = os.path.join(dataset.cache_dir, target_cache_file_name)
+
+                if not os.path.exists(input_cache_file_path) or not os.path.exists(target_cache_file_path):
+                    logger.warning(f"Cache files not found for {identifier}. Processing now.")
+                    input_file_path = os.path.join(dataset.data_dir, f'input_{identifier}.wav')
+                    process_file(dataset, input_file_path, dataset.target_length, apply_data_augmentation=False, device=dataset.device_prep)
+
+                    for stem in dataset.stem_names:
+                        target_file_path = os.path.join(dataset.data_dir, f'target_{stem}_{identifier}.wav')
+                        process_file(dataset, target_file_path, dataset.target_length, apply_data_augmentation=True, device=dataset.device_prep)
+
+                data = load_from_cache(input_cache_file_path, device)
+                inputs, targets = data['data'], load_from_cache(target_cache_file_path, device)['data']
             except KeyError as e:
-                logger.error(f"Batch missing 'file_paths' key: {e}")
+                logger.error(f"Batch missing 'file_ids' key: {e}")
                 continue
             except Exception as e:
-                logger.error(f"Error loading data for {file_path}: {e}")
+                logger.error(f"Error loading data for {identifier}: {e}")
                 continue
 
             if not isinstance(inputs, torch.Tensor):
@@ -129,16 +149,30 @@ def train_single_stem(
         model.eval()
         val_loss = 0.0
         with torch.no_grad():
-            for batch in integrated_dynamic_batching(val_dataset, training_params['batch_size'], stem_name):
+            for batch in integrated_dynamic_batching(val_dataset, training_params['batch_size'], stem_name, shuffle=False):
                 try:
-                    file_path = os.path.join(val_dataset.cache_dir, batch['file_paths'][0])
-                    data = load_from_cache(file_path, device)
-                    inputs, targets = data['input'], data['target']
+                    identifier = batch['file_ids'][0]
+                    input_cache_file_name = f"input_{identifier}_True_{dataset.n_mels}_{dataset.target_length}_{dataset.n_fft}.h5"
+                    target_cache_file_name = f"target_{stem_name}_{identifier}_False_{dataset.n_mels}_{dataset.target_length}_{dataset.n_fft}.h5"
+                    input_cache_file_path = os.path.join(dataset.cache_dir, input_cache_file_name)
+                    target_cache_file_path = os.path.join(dataset.cache_dir, target_cache_file_name)
+
+                    if not os.path.exists(input_cache_file_path) or not os.path.exists(target_cache_file_path):
+                        logger.warning(f"Cache files not found for {identifier}. Processing now.")
+                        input_file_path = os.path.join(dataset.data_dir, f'input_{identifier}.wav')
+                        process_file(dataset, input_file_path, dataset.target_length, apply_data_augmentation=False, device=dataset.device_prep)
+
+                        for stem in dataset.stem_names:
+                            target_file_path = os.path.join(dataset.data_dir, f'target_{stem}_{identifier}.wav')
+                            process_file(dataset, target_file_path, dataset.target_length, apply_data_augmentation=True, device=dataset.device_prep)
+
+                    data = load_from_cache(input_cache_file_path, device)
+                    inputs, targets = data['data'], load_from_cache(target_cache_file_path, device)['data']
                 except KeyError as e:
-                    logger.error(f"Batch missing 'file_paths' key: {e}")
+                    logger.error(f"Batch missing 'file_ids' key: {e}")
                     continue
                 except Exception as e:
-                    logger.error(f"Error loading data for {file_path}: {e}")
+                    logger.error(f"Error loading data for {identifier}: {e}")
                     continue
 
                 if not isinstance(inputs, torch.Tensor):
@@ -178,6 +212,37 @@ def train_single_stem(
     if model_params['tensorboard_flag']:
         writer.close()
 
+def process_and_cache_dataset(
+    data_dir: str, cache_dir: str, n_mels: int, n_fft: int, target_length: int,
+    apply_data_augmentation: bool, device: torch.device, suppress_reading_messages: bool
+):
+    dataset = StemSeparationDataset(
+        data_dir=data_dir,
+        n_mels=n_mels,
+        target_length=target_length,
+        n_fft=n_fft,
+        cache_dir=cache_dir,
+        apply_data_augmentation=apply_data_augmentation,
+        suppress_reading_messages=suppress_reading_messages,
+        device=device,
+        use_cache=False,  # Ensure preprocessing
+        segments_per_track=10
+    )
+
+    for i in range(len(dataset)):
+        item = dataset.file_ids[i]
+        if item is not None:
+            input_file_path = os.path.join(data_dir, item['input_file'])
+            process_file(dataset, input_file_path, target_length, apply_data_augmentation=False, device=device)
+
+            for stem_name in dataset.stem_names:
+                target_file_path = os.path.join(data_dir, item['target_files'][stem_name])
+                process_file(dataset, target_file_path, target_length, apply_data_augmentation=True, device=device)
+
+            logger.info(f"Processed and cached file {i+1}/{len(dataset)}")
+
+    logger.info("Dataset preprocessing and caching completed.")
+
 def start_training(
     data_dir: str, val_dir: str, batch_size: int, num_epochs: int, initial_lr_g: float, initial_lr_d: float, 
     use_cuda: bool, checkpoint_dir: str, save_interval: int, accumulation_steps: int, num_stems: int, 
@@ -187,7 +252,7 @@ def start_training(
     apply_data_augmentation: bool, add_noise: bool, noise_amount: float, early_stopping_patience: int, 
     disable_early_stopping: bool, weight_decay: float, suppress_warnings: bool, suppress_reading_messages: bool, 
     discriminator_update_interval: int, label_smoothing_real: float, label_smoothing_fake: float, 
-    suppress_detailed_logs: bool, stop_flag: Any, use_cache: bool, channel_multiplier: float, segments_per_track: int = 10
+    suppress_detailed_logs: bool, stop_flag: torch.Tensor, use_cache: bool, channel_multiplier: float, segments_per_track: int = 10
 ):
     device = torch.device('cuda' if use_cuda and torch.cuda.is_available() else 'cpu')
     training_params = {
@@ -236,11 +301,23 @@ def start_training(
     sample_rate, n_mels, n_fft = detect_parameters(data_dir)
     target_length = sample_rate // 2  # Assuming a 0.5-second target length
 
-    train_dataset, val_dataset = preprocess_and_cache_dataset(
-        data_dir, n_mels, target_length, n_fft, training_params['cache_dir'], apply_data_augmentation, training_params['suppress_warnings'], training_params['suppress_reading_messages'], training_params['num_workers'], device, stop_flag
+    # Process and cache the dataset if not already cached
+    process_and_cache_dataset(
+        data_dir=data_dir,
+        cache_dir=cache_dir,
+        n_mels=n_mels,
+        n_fft=n_fft,
+        target_length=target_length,
+        apply_data_augmentation=apply_data_augmentation,
+        device=device,
+        suppress_reading_messages=suppress_reading_messages
     )
 
-    stem_names = list(train_dataset.stem_names.keys())
+    train_dataset, val_dataset = preprocess_and_cache_dataset(
+        data_dir, n_mels, target_length, n_fft, training_params['cache_dir'], apply_data_augmentation, device, suppress_reading_messages
+    )
+
+    stem_names = train_dataset.stem_names
 
     for stem_name in stem_names:
         if stop_flag.value == 1:
@@ -257,8 +334,8 @@ def start_training(
 
     logger.info("Training finished.")
 
-if __name__ == '__main__':
-    stop_flag = torch.tensor(0, dtype=torch.int32)
+if __name__ == '__name__':
+    stop_flag = torch.multiprocessing.Value('i', 0)
 
     start_training(
         data_dir='path_to_data',
@@ -272,7 +349,7 @@ if __name__ == '__main__':
         save_interval=1,
         accumulation_steps=1,
         num_stems=4,
-        num_workers=4,
+        num_workers=1,
         cache_dir='./cache',
         loss_function_g=torch.nn.L1Loss(),
         loss_function_d=torch.nn.BCELoss(),
@@ -291,13 +368,13 @@ if __name__ == '__main__':
         disable_early_stopping=False,
         weight_decay=1e-5,
         suppress_warnings=False,
-        suppress_reading_messages=False,
-        discriminator_update_interval=5,
+        suppress_reading_messages=True,
+        discriminator_update_interval=1,
         label_smoothing_real=0.9,
         label_smoothing_fake=0.1,
         suppress_detailed_logs=False,
         stop_flag=stop_flag,
         use_cache=True,
-        channel_multiplier=0.5,
-        segments_per_track=10  # Adjust this value as needed
+        channel_multiplier=2,
+        segments_per_track=10
     )

@@ -1,11 +1,13 @@
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 import logging
 import h5py
-from torch.utils.checkpoint import checkpoint
 import math
 import gc
+from typing import Dict
 
 logger = logging.getLogger(__name__)
 
@@ -20,12 +22,12 @@ class RadialBasisFunction(nn.Module):
         self.register_buffer("grid", grid)
         self.denominator = denominator or (grid_max - grid_min) / (num_grids - 1)
 
-    @torch.cuda.amp.autocast()
-    def forward(self, x):
+    @torch.jit.script_method
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.exp(-((x[..., None] - self.grid) / self.denominator) ** 2)
 
 class BSRBF_KANLayer(nn.Module):
-    def __init__(self, input_dim: int, output_dim: int, grid_size=5, spline_order=3, base_activation=torch.nn.SiLU, grid_range=[-1.5, 1.5]):
+    def __init__(self, input_dim: int, output_dim: int, grid_size=5, spline_order=3, base_activation=torch.nn.ReLU, grid_range=[-1.5, 1.5]):
         super().__init__()
         self.layernorm = nn.LayerNorm(input_dim).cuda()
         self.spline_order = spline_order
@@ -46,19 +48,20 @@ class BSRBF_KANLayer(nn.Module):
         grid = (torch.arange(-spline_order, grid_size + spline_order + 1, device='cuda') * h + grid_range[0]).expand(self.input_dim, -1).contiguous()
         self.register_buffer("grid", grid)
 
-    @torch.cuda.amp.autocast()
-    def b_splines(self, x: torch.Tensor):
+    @torch.jit.script_method
+    def b_splines(self, x: torch.Tensor) -> torch.Tensor:
         assert x.dim() == 3 and x.size(2) == self.input_dim
         grid: torch.Tensor = self.grid
         x = x.unsqueeze(-1)
         bases = ((x >= grid[:, :-1]) & (x < grid[:, 1:])).to(x.dtype)
         for k in range(1, self.spline_order + 1):
-            bases = ((x - grid[:, : -(k + 1)]) / (grid[:, k:-1] - grid[:, : -(k + 1)]) * bases[:, :, :, :-1]) + ((grid[:, k + 1:] - x) / (grid[:, k + 1:] - grid[:, 1:(-k)]) * bases[:, :, :, 1:])
+            bases = ((x - grid[:, : -(k + 1)]) / (grid[:, k:-1] - grid[:, : -(k + 1)]) * bases[:, :, :, :-1]) + \
+                    ((grid[:, k + 1:] - x) / (grid[:, k + 1:] - grid[:, 1:(-k)]) * bases[:, :, :, 1:])
         assert bases.size() == (x.size(0), x.size(1), self.input_dim, self.grid_size + self.spline_order)
         return bases.contiguous()
 
-    @torch.cuda.amp.autocast()
-    def forward(self, x):
+    @torch.jit.script_method
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.layernorm(x)
         base_output = F.linear(self.base_activation(x), self.base_weight)
 
@@ -80,8 +83,8 @@ class AttentionLayer(nn.Module):
             nn.Sigmoid()
         ).cuda()
 
-    @torch.cuda.amp.autocast()
-    def forward(self, x):
+    @torch.jit.script_method
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         b, c, _, _ = x.size()
         y = self.avg_pool(x).view(b, c)
         y = self.fc(y).view(b, c, 1, 1)
@@ -98,8 +101,8 @@ class ResidualBlock(nn.Module):
 
         self.bsrbf_layer = BSRBF_KANLayer(channels, channels, grid_size, spline_order).cuda()
 
-    @torch.cuda.amp.autocast()
-    def forward(self, x):
+    @torch.jit.script_method
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         residual = x
         x = F.relu(self.bn1(self.conv1(x)))
         x = self.bn2(self.conv2(x))
@@ -115,8 +118,8 @@ class ContextAggregationNetwork(nn.Module):
         self.conv2 = nn.Conv2d(channels, channels, kernel_size=1, bias=False).cuda()
         self.bn2 = nn.InstanceNorm2d(channels).cuda()
 
-    @torch.cuda.amp.autocast()
-    def forward(self, x):
+    @torch.jit.script_method
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = F.relu(self.bn1(self.conv1(x)))
         x = F.relu(self.bn2(self.conv2(x)))
         return x
@@ -143,40 +146,38 @@ class MemoryEfficientStemSeparationModel(nn.Module):
         ])
         self.final_conv = nn.Conv2d(16, out_channels, kernel_size=1)
 
-    def conv_block(self, in_channels, out_channels, kernel_size, stride, padding):
+    @staticmethod
+    def conv_block(in_channels, out_channels, kernel_size, stride, padding):
         return nn.Sequential(
             nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding, bias=False),
             nn.BatchNorm2d(out_channels),
             nn.LeakyReLU(0.2, inplace=True)
         )
 
-    @torch.cuda.amp.autocast()
+    @torch.jit.script_method
+    def _forward_encoder(self, x: torch.Tensor) -> torch.Tensor:
+        for encoder_layer in self.encoder:
+            x = checkpoint(encoder_layer, x)
+        return x
+
+    @torch.jit.script_method
+    def _forward_decoder(self, x: torch.Tensor) -> torch.Tensor:
+        for decoder_layer in self.decoder:
+            x = checkpoint(decoder_layer, x)
+        return x
+
     def forward(self, x):
-        # Ensure input is 4D (batch_size, channels, n_mels, target_length)
         if x.dim() == 3:
             x = x.unsqueeze(1)
         elif x.dim() == 5:
             x = x.squeeze(2)
 
-        # Encoder
-        encoder_outputs = []
-        for encoder_layer in self.encoder:
-            x = checkpoint(encoder_layer, x)
-            encoder_outputs.append(x)
-            # Free up memory
-            if len(encoder_outputs) > 1:
-                del encoder_outputs[-2]
-            torch.cuda.empty_cache()
-
-        # Upsample
+        x = self._forward_encoder(x)
+        
         x = F.interpolate(x, size=(self.n_mels, self.target_length), mode='bilinear', align_corners=False)
 
-        # Decoder
-        for decoder_layer in self.decoder:
-            x = checkpoint(decoder_layer, x)
-            torch.cuda.empty_cache()
+        x = self._forward_decoder(x)
 
-        # Final convolution
         x = self.final_conv(x)
 
         return x
@@ -196,15 +197,15 @@ class KANDiscriminator(nn.Module):
 
         self.fc1 = None
 
-    @torch.cuda.amp.autocast()
-    def _forward_conv_layers(self, x):
+    @torch.jit.script_method
+    def _forward_conv_layers(self, x: torch.Tensor) -> torch.Tensor:
         x = F.relu(self.bn1(self.conv1(x)))
         x = F.relu(self.bn2(self.conv2(x)))
         x = F.relu(self.bn3(self.conv3(x)))
         return x
 
-    @torch.cuda.amp.autocast()
-    def forward(self, x):
+    @torch.jit.script_method
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.dim() == 3:
             x = x.unsqueeze(1)  # Add channel dimension if needed
         if x.dim() == 5:
@@ -227,33 +228,38 @@ class PerceptualLoss(nn.Module):
         self.feature_extractor = feature_extractor.cuda()
         self.criterion = nn.MSELoss().cuda()
 
-    @torch.cuda.amp.autocast()
-    def forward(self, x, target):
+    @torch.jit.script_method
+    def forward(self, x: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         x_features = self.feature_extractor(x)
         target_features = self.feature_extractor(target)
         loss = self.criterion(x_features, target_features)
         return loss
 
-@torch.cuda.amp.autocast()
-def gradient_penalty(discriminator, real_data, fake_data, device):
-    batch_size = real_data.size(0)
-    alpha = torch.rand(batch_size, 1, 1, 1, device=device)
-    interpolated = alpha * real_data + ((1 - alpha) * fake_data)
-    interpolated.requires_grad_(True)
+class GradientPenalty(nn.Module):
+    def __init__(self, discriminator):
+        super(GradientPenalty, self).__init__()
+        self.discriminator = discriminator
 
-    d_interpolated = discriminator(interpolated)
-    gradients = torch.autograd.grad(
-        outputs=d_interpolated,
-        inputs=interpolated,
-        grad_outputs=torch.ones_like(d_interpolated, device=device),
-        create_graph=True,
-        retain_graph=True
-    )[0]
+    @torch.jit.script_method
+    def forward(self, real_data: torch.Tensor, fake_data: torch.Tensor, device: torch.device) -> torch.Tensor:
+        batch_size = real_data.size(0)
+        alpha = torch.rand(batch_size, 1, 1, 1, device=device)
+        interpolated = alpha * real_data + ((1 - alpha) * fake_data)
+        interpolated.requires_grad_(True)
 
-    gradients = gradients.view(batch_size, -1)
-    gradient_norm = gradients.norm(2, dim=1)
-    penalty = ((gradient_norm - 1) ** 2).mean()
-    return penalty
+        d_interpolated = self.discriminator(interpolated)
+        gradients = torch.autograd.grad(
+            outputs=d_interpolated,
+            inputs=interpolated,
+            grad_outputs=torch.ones_like(d_interpolated, device=device),
+            create_graph=True,
+            retain_graph=True
+        )[0]
+
+        gradients = gradients.view(batch_size, -1)
+        gradient_norm = gradients.norm(2, dim=1)
+        penalty = ((gradient_norm - 1) ** 2).mean()
+        return penalty
 
 def load_model(checkpoint_path, in_channels, out_channels, n_mels, target_length, num_stems, device=None, freeze_fc_layers=False, channel_multiplier=1.0):
     if device is None:
@@ -273,14 +279,12 @@ def load_model(checkpoint_path, in_channels, out_channels, n_mels, target_length
     model.to(device)
     return model
 
-@torch.cuda.amp.autocast()
-def check_and_reshape(outputs, targets, logger):
+@torch.jit.script
+def check_and_reshape(outputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
     target_numel = targets.numel()
     output_numel = outputs.numel()
 
     if output_numel != target_numel:
-        logger.warning(f"Output size ({output_numel}) does not match the expected size ({target_numel}). Attempting to reshape.")
-        
         outputs = outputs.view(-1)
         
         if output_numel > target_numel:
@@ -293,18 +297,13 @@ def check_and_reshape(outputs, targets, logger):
 
     return outputs
 
-@torch.cuda.amp.autocast()
-def load_from_cache(cache_file_path, device='cuda'):
-    try:
-        with h5py.File(cache_file_path, 'r') as f:
-            input_data = torch.tensor(f['input'][:], device=device).float()
-            target_data = torch.tensor(f['target'][:], device=device).float()
-            input_data = input_data.unsqueeze(0).unsqueeze(0) if input_data.dim() == 2 else input_data.unsqueeze(1)
-            target_data = target_data.unsqueeze(0).unsqueeze(0) if target_data.dim() == 2 else target_data.unsqueeze(1)
-        return {'input': input_data, 'target': target_data}
-    except Exception as e:
-        logger.error(f"Error loading batch from HDF5: {e}")
-        raise
+def load_from_cache(cache_file_path: str, device: torch.device) -> Dict[str, torch.Tensor]:
+    with h5py.File(cache_file_path, 'r') as f:
+        input_data = torch.tensor(f['input'][:], device=device).float()
+        target_data = torch.tensor(f['target'][:], device=device).float()
+        input_data = input_data.unsqueeze(0).unsqueeze(0) if input_data.dim() == 2 else input_data.unsqueeze(1)
+        target_data = target_data.unsqueeze(0).unsqueeze(0) if target_data.dim() == 2 else target_data.unsqueeze(1)
+    return {'input': input_data, 'target': target_data}
 
 if __name__ == "__main__":
     logger.info("Model script executed directly.")
