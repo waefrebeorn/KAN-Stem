@@ -43,7 +43,6 @@ def detect_parameters(data_dir: str, default_n_mels: int = 64, default_n_fft: in
     return avg_sample_rate, n_mels, n_fft
 
 def resize_tensor(tensor: torch.Tensor, target_freq: int, target_length: int) -> torch.Tensor:
-    # Ensure tensor has 4 dimensions (batch, channel, freq, time)
     if tensor.dim() == 1:
         tensor = tensor.unsqueeze(0).unsqueeze(0).unsqueeze(0)
     elif tensor.dim() == 2:
@@ -51,11 +50,9 @@ def resize_tensor(tensor: torch.Tensor, target_freq: int, target_length: int) ->
     elif tensor.dim() == 3:
         tensor = tensor.unsqueeze(0)
 
-    # Adjust frequency dimension if necessary
     if tensor.shape[-2] != target_freq:
         tensor = F.interpolate(tensor, size=(target_freq, tensor.shape[-1]), mode='nearest')
 
-    # Adjust time dimension
     if tensor.shape[-1] < target_length:
         tensor = F.pad(tensor, (0, target_length - tensor.shape[-1]))
     elif tensor.shape[-1] > target_length:
@@ -132,7 +129,7 @@ class StemSeparationDataset(Dataset):
         return file_ids
 
     def _get_cache_path(self, stem_name: str, identifier: str, augmented: bool) -> str:
-        return os.path.join(self.cache_dir, f"{stem_name}_{identifier}_{augmented}_{self.n_mels}_{self.target_length}_{self.n_fft}.h5")
+        return os.path.join(self.cache_dir, f"{stem_name}_{identifier}_{str(augmented)}_{self.n_mels}_{self.target_length}_{self.n_fft}.h5")
 
     def _load_or_process_file(self, file_path: str, stem_name: str, augmented: bool) -> torch.Tensor:
         identifier = os.path.splitext(os.path.basename(file_path))[0].split('_')[1]
@@ -182,8 +179,8 @@ class StemSeparationDataset(Dataset):
         
         target_data = {}
         for stem in self.stem_names:
-            target_cache_true = self._get_cache_path(f'target_{stem}', identifier, False)
-            target_cache_false = self._get_cache_path(f'target_{stem}', identifier, True)
+            target_cache_true = self._get_cache_path(stem, identifier, False)
+            target_cache_false = self._get_cache_path(stem, identifier, True)
             target_data[stem] = {
                 'true': self._load_or_process_if_needed(target_cache_true, file_id['target_files'][stem], stem, False),
                 'false': self._load_or_process_if_needed(target_cache_false, file_id['target_files'][stem], stem, True)
@@ -203,30 +200,40 @@ class StemSeparationDataset(Dataset):
 
 def collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, Union[torch.Tensor, List[str]]]:
     inputs = torch.cat([item['input'] for item in batch], dim=0)
-    targets = torch.cat([torch.stack(list(item['target'].values())) for item in batch], dim=0)
+    
+    targets = {}
+    for item in batch:
+        for stem, target_dict in item['target'].items():
+            if stem not in targets:
+                targets[stem] = {'true': [], 'false': []}
+            targets[stem]['true'].append(target_dict['true'])
+            targets[stem]['false'].append(target_dict['false'])
+    
+    for stem in targets:
+        targets[stem]['true'] = torch.cat(targets[stem]['true'], dim=0)
+        targets[stem]['false'] = torch.cat(targets[stem]['false'], dim=0)
+    
     file_ids = [item['file_id'] for item in batch]
+    
     return {'input': inputs, 'target': targets, 'file_ids': file_ids}
 
 def create_dataloader(dataset: StemSeparationDataset, batch_size: int, shuffle: bool = True) -> DataLoader:
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, collate_fn=collate_fn, num_workers=4, pin_memory=True)
 
 def process_file(dataset: StemSeparationDataset, file_path: str, target_length: int, apply_data_augmentation: bool, device: torch.device):
-    """Process a single file and save the processed result to cache."""
     identifier = os.path.splitext(os.path.basename(file_path))[0].split('_')[1]
     
-    # Process input file
     input_cache_path = dataset._get_cache_path('input', identifier, True)
     if not os.path.exists(input_cache_path):
         dataset._load_or_process_file(file_path, 'input', True)
 
-    # Process target stems
     for stem in dataset.stem_names:
-        target_cache_path_true = dataset._get_cache_path(f'target_{stem}', identifier, True)
-        target_cache_path_false = dataset._get_cache_path(f'target_{stem}', identifier, False)
+        target_cache_path_true = dataset._get_cache_path(stem, identifier, True)
+        target_cache_path_false = dataset._get_cache_path(stem, identifier, False)
         if not os.path.exists(target_cache_path_true):
-            dataset._load_or_process_file(file_path, stem, False)  # No augmentation for True
+            dataset._load_or_process_file(file_path, stem, False)
         if not os.path.exists(target_cache_path_false):
-            dataset._load_or_process_file(file_path, stem, True)  # Augmentation for False
+            dataset._load_or_process_file(file_path, stem, True)
 
 def preprocess_and_cache_dataset(
     data_dir: str,
@@ -390,7 +397,7 @@ def integrated_dynamic_batching(dataset: StemSeparationDataset, batch_size: int,
         for i, file_path in enumerate(batch['file_ids']):
             identifier = file_path
             input_cache_file_name = f"input_{identifier}_True_{dataset.n_mels}_{dataset.target_length}_{dataset.n_fft}.h5"
-            target_cache_file_name = f"target_{stem_name}_{identifier}_False_{dataset.n_mels}_{dataset.target_length}_{dataset.n_fft}.h5"
+            target_cache_file_name = f"{stem_name}_{identifier}_False_{dataset.n_mels}_{dataset.target_length}_{dataset.n_fft}.h5"
             
             input_cache_file_path = os.path.join(dataset.cache_dir, input_cache_file_name)
             target_cache_file_path = os.path.join(dataset.cache_dir, target_cache_file_name)

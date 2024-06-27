@@ -52,7 +52,6 @@ def train_single_stem(
     early_stopping_counter = 0
     best_val_loss = float('inf')
 
-    # Define the feature extractor for perceptual loss
     feature_extractor = vgg16(weights=VGG16_Weights.IMAGENET1K_V1).features.to(device).eval()
     for param in feature_extractor.parameters():
         param.requires_grad = False
@@ -77,10 +76,9 @@ def train_single_stem(
                 return
 
             try:
-                # Use the first file path from the batch
-                identifier = batch['file_ids'][0]
+                identifier = batch['file_paths'][0]
                 input_cache_file_name = f"input_{identifier}_True_{dataset.n_mels}_{dataset.target_length}_{dataset.n_fft}.h5"
-                target_cache_file_name = f"target_{stem_name}_{identifier}_False_{dataset.n_mels}_{dataset.target_length}_{dataset.n_fft}.h5"
+                target_cache_file_name = f"{stem_name}_{identifier}_False_{dataset.n_mels}_{dataset.target_length}_{dataset.n_fft}.h5"
                 input_cache_file_path = os.path.join(dataset.cache_dir, input_cache_file_name)
                 target_cache_file_path = os.path.join(dataset.cache_dir, target_cache_file_name)
 
@@ -89,14 +87,13 @@ def train_single_stem(
                     input_file_path = os.path.join(dataset.data_dir, f'input_{identifier}.wav')
                     process_file(dataset, input_file_path, dataset.target_length, apply_data_augmentation=False, device=dataset.device_prep)
 
-                    for stem in dataset.stem_names:
-                        target_file_path = os.path.join(dataset.data_dir, f'target_{stem}_{identifier}.wav')
-                        process_file(dataset, target_file_path, dataset.target_length, apply_data_augmentation=True, device=dataset.device_prep)
+                    target_file_path = os.path.join(dataset.data_dir, f'{stem_name}_{identifier}.wav')
+                    process_file(dataset, target_file_path, dataset.target_length, apply_data_augmentation=True, device=dataset.device_prep)
 
                 data = load_from_cache(input_cache_file_path, device)
                 inputs, targets = data['data'], load_from_cache(target_cache_file_path, device)['data']
             except KeyError as e:
-                logger.error(f"Batch missing 'file_ids' key: {e}")
+                logger.error(f"Batch missing 'file_paths' key: {e}")
                 continue
             except Exception as e:
                 logger.error(f"Error loading data for {identifier}: {e}")
@@ -110,7 +107,7 @@ def train_single_stem(
                 outputs = model(inputs)
                 loss_g = model_params['loss_function_g'](outputs, targets)
 
-                if model_params['perceptual_loss_flag'] and (i % 5 == 0):  # Perceptual loss every 5 steps
+                if model_params['perceptual_loss_flag'] and (i % 5 == 0):
                     perceptual_loss = model_params['perceptual_loss_weight'] * PerceptualLoss(feature_extractor)(outputs, targets)
                     loss_g += perceptual_loss
 
@@ -151,9 +148,9 @@ def train_single_stem(
         with torch.no_grad():
             for batch in integrated_dynamic_batching(val_dataset, training_params['batch_size'], stem_name, shuffle=False):
                 try:
-                    identifier = batch['file_ids'][0]
+                    identifier = batch['file_paths'][0]
                     input_cache_file_name = f"input_{identifier}_True_{dataset.n_mels}_{dataset.target_length}_{dataset.n_fft}.h5"
-                    target_cache_file_name = f"target_{stem_name}_{identifier}_False_{dataset.n_mels}_{dataset.target_length}_{dataset.n_fft}.h5"
+                    target_cache_file_name = f"{stem_name}_{identifier}_False_{dataset.n_mels}_{dataset.target_length}_{dataset.n_fft}.h5"
                     input_cache_file_path = os.path.join(dataset.cache_dir, input_cache_file_name)
                     target_cache_file_path = os.path.join(dataset.cache_dir, target_cache_file_name)
 
@@ -162,14 +159,13 @@ def train_single_stem(
                         input_file_path = os.path.join(dataset.data_dir, f'input_{identifier}.wav')
                         process_file(dataset, input_file_path, dataset.target_length, apply_data_augmentation=False, device=dataset.device_prep)
 
-                        for stem in dataset.stem_names:
-                            target_file_path = os.path.join(dataset.data_dir, f'target_{stem}_{identifier}.wav')
-                            process_file(dataset, target_file_path, dataset.target_length, apply_data_augmentation=True, device=dataset.device_prep)
+                        target_file_path = os.path.join(dataset.data_dir, f'{stem_name}_{identifier}.wav')
+                        process_file(dataset, target_file_path, dataset.target_length, apply_data_augmentation=True, device=dataset.device_prep)
 
                     data = load_from_cache(input_cache_file_path, device)
                     inputs, targets = data['data'], load_from_cache(target_cache_file_path, device)['data']
                 except KeyError as e:
-                    logger.error(f"Batch missing 'file_ids' key: {e}")
+                    logger.error(f"Batch missing 'file_paths' key: {e}")
                     continue
                 except Exception as e:
                     logger.error(f"Error loading data for {identifier}: {e}")
@@ -225,18 +221,26 @@ def process_and_cache_dataset(
         apply_data_augmentation=apply_data_augmentation,
         suppress_reading_messages=suppress_reading_messages,
         device=device,
-        use_cache=False,  # Ensure preprocessing
+        use_cache=False,
         segments_per_track=10
     )
 
     for i in range(len(dataset)):
-        item = dataset.file_ids[i]
-        if item is not None:
-            input_file_path = os.path.join(data_dir, item['input_file'])
+        file_id = dataset.file_ids[i]
+        if file_id is not None:
+            identifier = file_id['identifier']
+            input_cache_file_path = dataset._get_cache_path('input', identifier, True)
+            target_cache_file_paths = [dataset._get_cache_path(stem, identifier, aug) for stem in dataset.stem_names for aug in [True, False]]
+
+            if os.path.exists(input_cache_file_path) and all(os.path.exists(p) for p in target_cache_file_paths):
+                logger.info(f"Skipping processing for {identifier} as cache files already exist.")
+                continue
+
+            input_file_path = os.path.join(data_dir, file_id['input_file'])
             process_file(dataset, input_file_path, target_length, apply_data_augmentation=False, device=device)
 
             for stem_name in dataset.stem_names:
-                target_file_path = os.path.join(data_dir, item['target_files'][stem_name])
+                target_file_path = os.path.join(data_dir, file_id['target_files'][stem_name])
                 process_file(dataset, target_file_path, target_length, apply_data_augmentation=True, device=device)
 
             logger.info(f"Processed and cached file {i+1}/{len(dataset)}")
@@ -299,9 +303,8 @@ def start_training(
     log_training_parameters(training_params)
 
     sample_rate, n_mels, n_fft = detect_parameters(data_dir)
-    target_length = sample_rate // 2  # Assuming a 0.5-second target length
+    target_length = sample_rate // 2
 
-    # Process and cache the dataset if not already cached
     process_and_cache_dataset(
         data_dir=data_dir,
         cache_dir=cache_dir,
@@ -334,13 +337,13 @@ def start_training(
 
     logger.info("Training finished.")
 
-if __name__ == '__name__':
+if __name__ == '__main__':
     stop_flag = torch.multiprocessing.Value('i', 0)
 
     start_training(
         data_dir='path_to_data',
         val_dir='path_to_val_data',
-        batch_size=1,  # Train with batch size of one
+        batch_size=1,
         num_epochs=10,
         initial_lr_g=1e-4,
         initial_lr_d=1e-4,
