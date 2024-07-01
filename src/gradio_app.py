@@ -117,7 +117,6 @@ with gr.Blocks() as demo:
         scheduler_step_size = gr.Number(label="Scheduler Step Size", value=10)
         scheduler_gamma = gr.Number(label="Scheduler Gamma", value=0.9)
         tensorboard_flag = gr.Checkbox(label="Enable TensorBoard Logging", value=True)
-        apply_data_augmentation = gr.Checkbox(label="Apply Data Augmentation", value=True)
         add_noise = gr.Checkbox(label="Add Noise", value=True)
         noise_amount = gr.Number(label="Noise Amount", value=0.1)
         early_stopping_patience = gr.Number(label="Early Stopping Patience", value=3)
@@ -141,7 +140,7 @@ with gr.Blocks() as demo:
 
         def start_training_and_log_params(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval,
                                           accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
-                                          perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation,
+                                          perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, 
                                           add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages,
                                           discriminator_update_interval, label_smoothing_real, label_smoothing_fake, perceptual_loss_weight, suppress_detailed_logs,
                                           optimization_method, optuna_trials, use_cache, channel_multiplier):
@@ -168,7 +167,6 @@ with gr.Blocks() as demo:
                 "scheduler_step_size": scheduler_step_size,
                 "scheduler_gamma": scheduler_gamma,
                 "tensorboard_flag": tensorboard_flag,
-                "apply_data_augmentation": apply_data_augmentation,
                 "add_noise": add_noise,
                 "noise_amount": noise_amount,
                 "early_stopping_patience": early_stopping_patience,
@@ -190,7 +188,7 @@ with gr.Blocks() as demo:
             else:
                 return start_training_wrapper(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval,
                                               accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
-                                              perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation, add_noise,
+                                              perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, add_noise,
                                               noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages,
                                               discriminator_update_interval, label_smoothing_real, label_smoothing_fake, perceptual_loss_weight, suppress_detailed_logs,
                                               use_cache, channel_multiplier)
@@ -200,10 +198,9 @@ with gr.Blocks() as demo:
             inputs=[
                 data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval,
                 accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
-                perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, apply_data_augmentation,
-                add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages,
-                discriminator_update_interval, label_smoothing_real, label_smoothing_fake, perceptual_loss_weight, suppress_detailed_logs, optimization_method,
-                optuna_trials, use_cache, channel_multiplier
+                perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, add_noise, noise_amount, early_stopping_patience,
+                disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages, discriminator_update_interval, label_smoothing_real, 
+                label_smoothing_fake, perceptual_loss_weight, suppress_detailed_logs, optimization_method, optuna_trials, use_cache, channel_multiplier
             ],
             outputs=output
         )

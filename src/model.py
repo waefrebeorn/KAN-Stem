@@ -22,7 +22,6 @@ class RadialBasisFunction(nn.Module):
         self.register_buffer("grid", grid)
         self.denominator = denominator or (grid_max - grid_min) / (num_grids - 1)
 
-    @torch.jit.script_method
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.exp(-((x[..., None] - self.grid) / self.denominator) ** 2)
 
@@ -48,7 +47,6 @@ class BSRBF_KANLayer(nn.Module):
         grid = (torch.arange(-spline_order, grid_size + spline_order + 1, device='cuda') * h + grid_range[0]).expand(self.input_dim, -1).contiguous()
         self.register_buffer("grid", grid)
 
-    @torch.jit.script_method
     def b_splines(self, x: torch.Tensor) -> torch.Tensor:
         assert x.dim() == 3 and x.size(2) == self.input_dim
         grid: torch.Tensor = self.grid
@@ -60,7 +58,6 @@ class BSRBF_KANLayer(nn.Module):
         assert bases.size() == (x.size(0), x.size(1), self.input_dim, self.grid_size + self.spline_order)
         return bases.contiguous()
 
-    @torch.jit.script_method
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.layernorm(x)
         base_output = F.linear(self.base_activation(x), self.base_weight)
@@ -83,7 +80,6 @@ class AttentionLayer(nn.Module):
             nn.Sigmoid()
         ).cuda()
 
-    @torch.jit.script_method
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         b, c, _, _ = x.size()
         y = self.avg_pool(x).view(b, c)
@@ -101,7 +97,6 @@ class ResidualBlock(nn.Module):
 
         self.bsrbf_layer = BSRBF_KANLayer(channels, channels, grid_size, spline_order).cuda()
 
-    @torch.jit.script_method
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         residual = x
         x = F.relu(self.bn1(self.conv1(x)))
@@ -118,33 +113,32 @@ class ContextAggregationNetwork(nn.Module):
         self.conv2 = nn.Conv2d(channels, channels, kernel_size=1, bias=False).cuda()
         self.bn2 = nn.InstanceNorm2d(channels).cuda()
 
-    @torch.jit.script_method
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = F.relu(self.bn1(self.conv1(x)))
         x = F.relu(self.bn2(self.conv2(x)))
         return x
 
 class MemoryEfficientStemSeparationModel(nn.Module):
-    def __init__(self, in_channels=1, out_channels=1, n_mels=64, target_length=22050):
+    def __init__(self, in_channels=3, out_channels=3, n_mels=64, target_length=22050):
         super(MemoryEfficientStemSeparationModel, self).__init__()
         self.n_mels = n_mels
         self.target_length = target_length
 
         # Encoder
         self.encoder = nn.ModuleList([
-            self.conv_block(in_channels, 16, kernel_size=3, stride=1, padding=1),
-            self.conv_block(16, 32, kernel_size=3, stride=2, padding=1),
+            self.conv_block(in_channels, 32, kernel_size=3, stride=1, padding=1),
             self.conv_block(32, 64, kernel_size=3, stride=2, padding=1),
-            self.conv_block(64, 128, kernel_size=3, stride=2, padding=1)
+            self.conv_block(64, 128, kernel_size=3, stride=2, padding=1),
+            self.conv_block(128, 256, kernel_size=3, stride=2, padding=1)
         ])
 
-        # Decoder
+        # Decoder 
         self.decoder = nn.ModuleList([
+            self.conv_block(256, 128, kernel_size=3, stride=1, padding=1),
             self.conv_block(128, 64, kernel_size=3, stride=1, padding=1),
-            self.conv_block(64, 32, kernel_size=3, stride=1, padding=1),
-            self.conv_block(32, 16, kernel_size=3, stride=1, padding=1)
+            self.conv_block(64, 32, kernel_size=3, stride=1, padding=1)
         ])
-        self.final_conv = nn.Conv2d(16, out_channels, kernel_size=1)
+        self.final_conv = nn.Conv2d(32, out_channels, kernel_size=1)
 
     @staticmethod
     def conv_block(in_channels, out_channels, kernel_size, stride, padding):
@@ -154,40 +148,35 @@ class MemoryEfficientStemSeparationModel(nn.Module):
             nn.LeakyReLU(0.2, inplace=True)
         )
 
-    @torch.jit.script_method
     def _forward_encoder(self, x: torch.Tensor) -> torch.Tensor:
         for encoder_layer in self.encoder:
-            x = checkpoint(encoder_layer, x)
+            x = checkpoint(encoder_layer, x, use_reentrant=False)
         return x
 
-    @torch.jit.script_method
     def _forward_decoder(self, x: torch.Tensor) -> torch.Tensor:
         for decoder_layer in self.decoder:
-            x = checkpoint(decoder_layer, x)
+            x = checkpoint(decoder_layer, x, use_reentrant=False)
         return x
 
     def forward(self, x):
         if x.dim() == 3:
             x = x.unsqueeze(1)
-        elif x.dim() == 5:
-            x = x.squeeze(2)
+        elif x.dim() == 4 and x.size(1) != 3:
+            raise ValueError(f"Expected input with 3 channels but got {x.size(1)} channels")
 
         x = self._forward_encoder(x)
-        
         x = F.interpolate(x, size=(self.n_mels, self.target_length), mode='bilinear', align_corners=False)
-
         x = self._forward_decoder(x)
-
         x = self.final_conv(x)
 
         return x
 
 class KANDiscriminator(nn.Module):
-    def __init__(self, in_channels=1, out_channels=64, n_mels=127, target_length=44036, device="cuda", channel_multiplier=1.0):
+    def __init__(self, in_channels=3, out_channels=64, n_mels=127, target_length=44036, device="cuda", channel_multiplier=1.0):
         super(KANDiscriminator, self).__init__()
 
         self.device = device
-
+        
         self.conv1 = nn.Conv2d(in_channels, int(out_channels * channel_multiplier), kernel_size=3, padding=1, bias=False).cuda()
         self.bn1 = nn.InstanceNorm2d(int(out_channels * channel_multiplier)).cuda()
         self.conv2 = nn.Conv2d(int(out_channels * channel_multiplier), int(out_channels * 2 * channel_multiplier), kernel_size=3, padding=1, bias=False).cuda()
@@ -197,19 +186,17 @@ class KANDiscriminator(nn.Module):
 
         self.fc1 = None
 
-    @torch.jit.script_method
     def _forward_conv_layers(self, x: torch.Tensor) -> torch.Tensor:
-        x = F.relu(self.bn1(self.conv1(x)))
+        x = F.relu(self.bn1(self.conv1(x))) 
         x = F.relu(self.bn2(self.conv2(x)))
         x = F.relu(self.bn3(self.conv3(x)))
         return x
 
-    @torch.jit.script_method
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.dim() == 3:
             x = x.unsqueeze(1)  # Add channel dimension if needed
-        if x.dim() == 5:
-            x = x.squeeze(2)  # Remove the singleton dimension if needed
+        if x.dim() > 4:
+            raise ValueError(f"Invalid input shape. Expected 3 or 4 dimensions but got {x.dim()}")
 
         x = x.to(self.device)  # Ensure the data is on the correct device
         x = self._forward_conv_layers(x)
@@ -222,88 +209,38 @@ class KANDiscriminator(nn.Module):
         x = torch.sigmoid(self.fc1(x))
         return x
 
-class PerceptualLoss(nn.Module):
-    def __init__(self, feature_extractor):
-        super(PerceptualLoss, self).__init__()
-        self.feature_extractor = feature_extractor.cuda()
-        self.criterion = nn.MSELoss().cuda()
+def load_from_cache(cache_file_path: str, device: torch.device) -> Dict[str, torch.Tensor]:
+    try:
+        with h5py.File(cache_file_path, 'r') as f:
+            input_data = torch.tensor(f['input'][:], device=device).float()
+            target_data = torch.tensor(f['target'][:], device=device).float()
+            zero_durations = torch.tensor(f['zero_durations'][:], device=device).float()
+            input_data = input_data.unsqueeze(0) if input_data.dim() == 3 else input_data
+            target_data = target_data.unsqueeze(0) if target_data.dim() == 3 else target_data
+        return {'input': input_data, 'target': target_data, 'zero_durations': zero_durations}
+    except Exception as e:
+        logger.error(f"Error loading from cache file '{cache_file_path}': {e}")
+        raise
 
-    @torch.jit.script_method
-    def forward(self, x: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-        x_features = self.feature_extractor(x)
-        target_features = self.feature_extractor(target)
-        loss = self.criterion(x_features, target_features)
-        return loss
+def reassemble_with_zero_gaps(data: torch.Tensor, zero_durations: torch.Tensor, segment_length: int = 87) -> torch.Tensor:
+    """
+    Reassemble the audio tensor with zero gaps as per the zero_durations information.
+    """
+    reassembled = []
+    current_index = 0
+    for duration in zero_durations:
+        if duration > 0:
+            zero_tensor = torch.zeros((1, 3, 32, segment_length * duration), device=data.device)
+            reassembled.append(zero_tensor)
+        reassembled.append(data[:, :, :, current_index:current_index + segment_length])
+        current_index += segment_length
+    return torch.cat(reassembled, dim=-1)
 
-class GradientPenalty(nn.Module):
-    def __init__(self, discriminator):
-        super(GradientPenalty, self).__init__()
-        self.discriminator = discriminator
-
-    @torch.jit.script_method
-    def forward(self, real_data: torch.Tensor, fake_data: torch.Tensor, device: torch.device) -> torch.Tensor:
-        batch_size = real_data.size(0)
-        alpha = torch.rand(batch_size, 1, 1, 1, device=device)
-        interpolated = alpha * real_data + ((1 - alpha) * fake_data)
-        interpolated.requires_grad_(True)
-
-        d_interpolated = self.discriminator(interpolated)
-        gradients = torch.autograd.grad(
-            outputs=d_interpolated,
-            inputs=interpolated,
-            grad_outputs=torch.ones_like(d_interpolated, device=device),
-            create_graph=True,
-            retain_graph=True
-        )[0]
-
-        gradients = gradients.view(batch_size, -1)
-        gradient_norm = gradients.norm(2, dim=1)
-        penalty = ((gradient_norm - 1) ** 2).mean()
-        return penalty
-
-def load_model(checkpoint_path, in_channels, out_channels, n_mels, target_length, num_stems, device=None, freeze_fc_layers=False, channel_multiplier=1.0):
-    if device is None:
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
+def load_model(checkpoint_path: str, in_channels: int, out_channels: int, n_mels: int, target_length: int, device: str = "cuda") -> nn.Module:
     model = MemoryEfficientStemSeparationModel(in_channels, out_channels, n_mels, target_length).to(device)
     model.load_state_dict(torch.load(checkpoint_path, map_location=device))
-
-    model.train()
-
-    if freeze_fc_layers:
-        for param in model.fc1.parameters():
-            param.requires_grad = False
-        for param in model.fc2.parameters():
-            param.requires_grad = False
-
-    model.to(device)
+    model.eval()
     return model
-
-@torch.jit.script
-def check_and_reshape(outputs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
-    target_numel = targets.numel()
-    output_numel = outputs.numel()
-
-    if output_numel != target_numel:
-        outputs = outputs.view(-1)
-        
-        if output_numel > target_numel:
-            outputs = outputs[:target_numel]
-        else:
-            padding_size = target_numel - output_numel
-            outputs = F.pad(outputs, (0, padding_size))
-        
-        outputs = outputs.view(targets.shape)
-
-    return outputs
-
-def load_from_cache(cache_file_path: str, device: torch.device) -> Dict[str, torch.Tensor]:
-    with h5py.File(cache_file_path, 'r') as f:
-        input_data = torch.tensor(f['input'][:], device=device).float()
-        target_data = torch.tensor(f['target'][:], device=device).float()
-        input_data = input_data.unsqueeze(0).unsqueeze(0) if input_data.dim() == 2 else input_data.unsqueeze(1)
-        target_data = target_data.unsqueeze(0).unsqueeze(0) if target_data.dim() == 2 else target_data.unsqueeze(1)
-    return {'input': input_data, 'target': target_data}
 
 if __name__ == "__main__":
     logger.info("Model script executed directly.")
