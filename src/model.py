@@ -119,7 +119,7 @@ class ContextAggregationNetwork(nn.Module):
         return x
 
 class MemoryEfficientStemSeparationModel(nn.Module):
-    def __init__(self, in_channels=3, out_channels=3, n_mels=64, target_length=22050):
+    def __init__(self, in_channels=3, out_channels=3, n_mels=32, target_length=87):
         super(MemoryEfficientStemSeparationModel, self).__init__()
         self.n_mels = n_mels
         self.target_length = target_length
@@ -170,7 +170,7 @@ class MemoryEfficientStemSeparationModel(nn.Module):
         x = self.final_conv(x)
 
         return x
-
+        
 class KANDiscriminator(nn.Module):
     def __init__(self, in_channels=3, out_channels=64, n_mels=127, target_length=44036, device="cuda", channel_multiplier=1.0):
         super(KANDiscriminator, self).__init__()

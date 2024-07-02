@@ -95,7 +95,7 @@ def log_training_parameters(params):
 with gr.Blocks() as demo:
     with gr.Tab("Training"):
         gr.Markdown("### Train the Model")
-        data_dir = gr.Textbox(label="Data Directory", value="K:/KAN-Stem DataSet/ProcessedDataset")
+        data_dir = gr.Textbox(label="Data Directory", value="K:/KAN-Stem DataSet/prepared dataset")
         val_dir = gr.Textbox(label="Validation Directory", value="K:/KAN-Stem DataSet/Chunk_0_Sample")
         batch_size = gr.Number(label="Batch Size", value=1)
         num_epochs = gr.Number(label="Number of Epochs", value=1000)

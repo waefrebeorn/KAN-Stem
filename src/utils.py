@@ -12,6 +12,7 @@ import torchaudio
 import torchaudio.transforms as T
 import torch.optim as optim
 import torch.nn as nn
+from pydub import AudioSegment
 
 logger = logging.getLogger(__name__)
 
@@ -20,23 +21,42 @@ def setup_logger(name: str) -> logging.Logger:
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     return logger
 
-def detect_parameters(data_dir: str, default_n_mels: int = 32, default_n_fft: int = 1024) -> Tuple[int, int, int]:
-    sample_rates, durations = [], []
+def detect_parameters_from_cache(cache_dir: str, default_n_mels: int = 32, default_n_fft: int = 1024) -> Tuple[int, int, int]:
+    sample_rates = []
+    for file_name in os.listdir(cache_dir):
+        if file_name.endswith('.h5'):
+            file_path = os.path.join(cache_dir, file_name)
+            try:
+                with h5py.File(file_path, 'r') as f:
+                    sample_rates.append(f.attrs.get('sample_rate', 44100))
+            except Exception as e:
+                logger.error(f"Error analyzing cache file {file_path}: {e}")
+    
+    if not sample_rates:
+        raise ValueError("No valid cache files found in the specified directory")
+
+    logger.info(f"Found {len(sample_rates)} valid cache files")
+    avg_sample_rate = int(np.mean(sample_rates))
+    n_mels = min(default_n_mels, int(avg_sample_rate / 100))
+    n_fft = min(default_n_fft, int(avg_sample_rate * 0.025))
+    return avg_sample_rate, n_mels, n_fft
+
+def detect_parameters_from_raw_data(data_dir: str, default_n_mels: int = 32, default_n_fft: int = 1024) -> Tuple[int, int, int]:
+    sample_rates = []
     for root, _, files in os.walk(data_dir):
         for file_name in files:
-            if file_name.endswith('.wav'):
+            if file_name.endswith('.ogg'):
                 file_path = os.path.join(root, file_name)
                 try:
                     info = sf.info(file_path)
                     sample_rates.append(info.samplerate)
-                    durations.append(info.duration)
                 except Exception as e:
                     logger.error(f"Error analyzing audio file {file_path}: {e}")
 
-    if not sample_rates or not durations:
-        raise ValueError("No valid audio files found in the dataset")
+    if not sample_rates:
+        raise ValueError("No valid raw audio files found in the specified directory")
 
-    logger.info(f"Found {len(sample_rates)} valid audio files")
+    logger.info(f"Found {len(sample_rates)} valid raw audio files")
     avg_sample_rate = int(np.mean(sample_rates))
     n_mels = min(default_n_mels, int(avg_sample_rate / 100))
     n_fft = min(default_n_fft, int(avg_sample_rate * 0.025))
@@ -83,24 +103,29 @@ class StemSeparationDataset(Dataset):
         self.training = True
         self.device_prep = device_prep or device
         self.segments_per_track = segments_per_track
-        self.sample_rate, _, _ = detect_parameters(data_dir)
+        
+        try:
+            self.sample_rate, _, _ = detect_parameters_from_cache(cache_dir)
+        except ValueError:
+            self.sample_rate, _, _ = detect_parameters_from_raw_data(data_dir)
+
         self.mel_spectrogram = T.MelSpectrogram(
             sample_rate=self.sample_rate, n_fft=n_fft, n_mels=n_mels,
             win_length=None, hop_length=n_fft // 4, power=2.0
         ).to(self.device_prep)
         self.amplitude_to_db = T.AmplitudeToDB().to(self.device_prep)
 
-        self.stem_names = stem_names or ["vocals", "other", "noise", "keys", "guitar", "drums", "bass"]
+        self.stem_names = stem_names or ["vocals", "kick", "keys", "guitar", "drums", "bass"]
         self.file_ids = self._get_file_ids()
         os.makedirs(cache_dir, exist_ok=True)
 
     def _get_file_ids(self):
         file_ids = []
         for input_file in os.listdir(self.data_dir):
-            if input_file.startswith('input_') and input_file.endswith('.wav'):
+            if input_file.startswith('example_') and input_file.endswith('.ogg'):
                 identifier = input_file.split('_')[1].split('.')[0]
                 target_files = {
-                    stem: f"target_{stem}_{identifier}.wav" for stem in self.stem_names
+                    stem: f"{stem}_{identifier}.ogg" for stem in self.stem_names
                 }
                 file_ids.append({
                     'identifier': identifier,
@@ -186,6 +211,7 @@ class StemSeparationDataset(Dataset):
         with h5py.File(cache_path, 'w') as f:
             f.create_dataset('audio', data=combined_spec.cpu().numpy(), compression="gzip")
             f.create_dataset('zero_durations', data=np.array(zero_durations), compression="gzip")
+            f.attrs['sample_rate'] = self.sample_rate
 
         logger.info(f"Successfully processed and cached file: {file_path}")
 
@@ -277,7 +303,7 @@ def process_and_cache_dataset(
     val_file_ids = dataset.file_ids[split_index:]
     return train_file_ids, val_file_ids
 
-def integrated_dynamic_batching(data_dir: str, cache_dir: str, n_mels: int, n_fft: int, target_length: int, batch_size: int, device: torch.device, stem_name: str, file_ids: List[Dict[str, Any]], mel_spectrogram: Any, amplitude_to_db: Any, shuffle: bool = False):
+def integrated_dynamic_batching(data_dir: str, cache_dir: str, n_mels: int, n_fft: int, target_length: int, batch_size: int, device: torch.device, stem_name: str, file_ids: List[Dict[str, Any]], shuffle: bool = False):
     if shuffle:
         random.shuffle(file_ids)
 
@@ -290,17 +316,20 @@ def integrated_dynamic_batching(data_dir: str, cache_dir: str, n_mels: int, n_ff
 
         for file_id in batch_file_ids:
             identifier = file_id['identifier']
-            input_cache_file_name = f"input_{identifier}.h5"
-            target_cache_file_name = f"{stem_name}_{identifier}.h5"
+            input_cache_file_name = f"input_{identifier}_{n_mels}_{target_length}_{n_fft}.h5"
+            target_cache_file_name = f"{stem_name}_{identifier}_{n_mels}_{target_length}_{n_fft}.h5"
             input_cache_file_path = os.path.join(cache_dir, input_cache_file_name)
             target_cache_file_path = os.path.join(cache_dir, target_cache_file_name)
 
-            if not os.path.exists(input_cache_file_path) or not os.path.exists(target_cache_file_path):
-                input_file_path = os.path.join(data_dir, f'input_{identifier}.wav')
-                dataset.process_and_cache_file(input_file_path, identifier, "input")
+            if os.path.exists(input_cache_file_path) and os.path.exists(target_cache_file_path):
+                logger.info(f"Cache files found for {identifier}. Skipping processing.")
+            else:
+                logger.warning(f"Cache files not found for {identifier}. Processing now.")
+                input_file_path = os.path.join(data_dir, f'example_{identifier}.ogg')
+                process_and_cache_file(input_file_path, identifier, "input")
 
-                target_file_path = os.path.join(data_dir, f'{stem_name}_{identifier}.wav')
-                dataset.process_and_cache_file(target_file_path, identifier, stem_name)
+                target_file_path = os.path.join(data_dir, f'{stem_name}_{identifier}.ogg')
+                process_and_cache_file(target_file_path, identifier, stem_name)
 
             data = load_from_cache(input_cache_file_path, device)
             warmed_inputs.append(data['input'])

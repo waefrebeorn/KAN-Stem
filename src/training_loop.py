@@ -10,15 +10,26 @@ from typing import Any
 from torchvision.models import vgg16, VGG16_Weights
 from utils import (
     compute_sdr, compute_sir, compute_sar,
-    gradient_penalty, PerceptualLoss, detect_parameters, 
+    gradient_penalty, PerceptualLoss, detect_parameters_from_cache, detect_parameters_from_raw_data, 
     StemSeparationDataset, collate_fn, log_training_parameters, 
     ensure_dir_exists, get_optimizer, integrated_dynamic_batching, purge_vram, load_from_cache,
-    process_and_cache_dataset  
+    process_and_cache_dataset
 )
 from model_setup import create_model_and_optimizer
 import time
 
 logger = logging.getLogger(__name__)
+
+def reassemble_with_zero_gaps(tensor, zero_durations, segment_length):
+    reassembled = []
+    start_idx = 0
+    for (start, duration) in zero_durations:
+        end_idx = start_idx + (start * segment_length)
+        reassembled.append(tensor[start_idx:end_idx])
+        reassembled.append(torch.zeros((duration * segment_length, tensor.shape[1]), device=tensor.device))
+        start_idx = end_idx
+    reassembled.append(tensor[start_idx:])
+    return torch.cat(reassembled, dim=0)
 
 def train_single_stem(
     stem_name: str, 
@@ -84,16 +95,24 @@ def train_single_stem(
                 input_cache_file_path = os.path.join(dataset.cache_dir, input_cache_file_name)
                 target_cache_file_path = os.path.join(dataset.cache_dir, target_cache_file_name)
 
-                if not os.path.exists(input_cache_file_path) or not os.path.exists(target_cache_file_path):
+                if os.path.exists(input_cache_file_path) and os.path.exists(target_cache_file_path):
+                    logger.info(f"Cache files found for {identifier}. Skipping processing.")
+                else:
                     logger.warning(f"Cache files not found for {identifier}. Processing now.")
-                    input_file_path = os.path.join(dataset.data_dir, f'input_{identifier}.wav')
+                    input_file_path = os.path.join(dataset.data_dir, f'example_{identifier}.ogg')
                     dataset.process_and_cache_file(input_file_path, identifier, "input")
 
-                    target_file_path = os.path.join(dataset.data_dir, f'{stem_name}_{identifier}.wav')
+                    target_file_path = os.path.join(dataset.data_dir, f'{stem_name}_{identifier}.ogg')
                     dataset.process_and_cache_file(target_file_path, identifier, stem_name)
 
                 data = load_from_cache(input_cache_file_path, device)
-                inputs, targets = data['input'], load_from_cache(target_cache_file_path, device)['input']
+                inputs, zero_durations = data['input'], data['zero_durations']
+                targets = load_from_cache(target_cache_file_path, device)['input']
+
+                # Reassemble the data with zero gaps
+                inputs = reassemble_with_zero_gaps(inputs, zero_durations, segment_length=87)
+                targets = reassemble_with_zero_gaps(targets, zero_durations, segment_length=87)
+
             except KeyError as e:
                 logger.error(f"Batch missing 'file_paths' key: {e}")
                 continue
@@ -124,8 +143,8 @@ def train_single_stem(
                     real_out = discriminator(targets)
                     fake_out = discriminator(outputs.detach())
 
-                    loss_d_real = model_params['loss_function_d'](real_out, torch.ones_like(real_out))
-                    loss_d_fake = model_params['loss_function_d'](fake_out, torch.zeros_like(fake_out))
+                    loss_d_real = model_params['loss_function_d'](real_out, torch.ones_like(real_out) * training_params['label_smoothing_real'])
+                    loss_d_fake = model_params['loss_function_d'](fake_out, torch.zeros_like(fake_out) * training_params['label_smoothing_fake'])
                     gp = gradient_penalty(discriminator, targets, outputs.detach(), device)
                     loss_d = (loss_d_real + loss_d_fake) / 2 + gp
 
@@ -156,16 +175,24 @@ def train_single_stem(
                     input_cache_file_path = os.path.join(dataset.cache_dir, input_cache_file_name)
                     target_cache_file_path = os.path.join(dataset.cache_dir, target_cache_file_name)
 
-                    if not os.path.exists(input_cache_file_path) or not os.path.exists(target_cache_file_path):
+                    if os.path.exists(input_cache_file_path) and os.path.exists(target_cache_file_path):
+                        logger.info(f"Cache files found for {identifier}. Skipping processing.")
+                    else:
                         logger.warning(f"Cache files not found for {identifier}. Processing now.")
-                        input_file_path = os.path.join(dataset.data_dir, f'input_{identifier}.wav')
+                        input_file_path = os.path.join(dataset.data_dir, f'example_{identifier}.ogg')
                         dataset.process_and_cache_file(input_file_path, identifier, "input")
 
-                        target_file_path = os.path.join(dataset.data_dir, f'{stem_name}_{identifier}.wav')
+                        target_file_path = os.path.join(dataset.data_dir, f'{stem_name}_{identifier}.ogg')
                         dataset.process_and_cache_file(target_file_path, identifier, stem_name)
 
                     data = load_from_cache(input_cache_file_path, device)
-                    inputs, targets = data['input'], load_from_cache(target_cache_file_path, device)['input']
+                    inputs, zero_durations = data['input'], data['zero_durations']
+                    targets = load_from_cache(target_cache_file_path, device)['input']
+
+                    # Reassemble the data with zero gaps
+                    inputs = reassemble_with_zero_gaps(inputs, zero_durations, segment_length=87)
+                    targets = reassemble_with_zero_gaps(targets, zero_durations, segment_length=87)
+
                 except KeyError as e:
                     logger.error(f"Batch missing 'file_paths' key: {e}")
                     continue
@@ -264,17 +291,21 @@ def start_training(
 
     log_training_parameters(training_params)
 
-    sample_rate, n_mels, n_fft = detect_parameters(data_dir)
-    target_length = sample_rate // 2
+    try:
+        sample_rate, n_mels, n_fft = detect_parameters_from_cache(cache_dir)
+    except ValueError:
+        sample_rate, n_mels, n_fft = detect_parameters_from_raw_data(data_dir)
+        process_and_cache_dataset(
+            data_dir=data_dir,
+            cache_dir=cache_dir,
+            n_mels=n_mels,
+            n_fft=n_fft,
+            device=device,
+            suppress_reading_messages=suppress_reading_messages
+        )
+        sample_rate, n_mels, n_fft = detect_parameters_from_cache(cache_dir)
 
-    train_file_ids, val_file_ids = process_and_cache_dataset(
-        data_dir=data_dir,
-        cache_dir=cache_dir,
-        n_mels=n_mels,
-        n_fft=n_fft,
-        device=device,
-        suppress_reading_messages=suppress_reading_messages
-    )
+    target_length = sample_rate // 2
 
     train_dataset = StemSeparationDataset(
         data_dir=data_dir,
@@ -299,7 +330,7 @@ def start_training(
         segments_per_track=segments_per_track
     )
 
-    for stem_name in ['vocals', 'drums', 'bass', 'other']:
+    for stem_name in ['vocals', 'drums', 'bass', 'kick', 'keys', 'guitar']:
         if stop_flag.value == 1:
             logger.info("Training stopped.")
             return
@@ -334,7 +365,7 @@ if __name__ == '__main__':
         checkpoint_dir='./checkpoints',
         save_interval=1,
         accumulation_steps=1,
-        num_stems=4,
+        num_stems=6,
         num_workers=1,
         cache_dir='./cache',
         loss_function_g=torch.nn.L1Loss(),

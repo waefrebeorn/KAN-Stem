@@ -7,7 +7,7 @@ from training_loop import start_training
 import logging
 from data_preprocessing import preprocess_and_cache_dataset
 from dataset import StemSeparationDataset
-from utils import log_training_parameters, detect_parameters
+from utils import log_training_parameters, detect_parameters_from_cache, detect_parameters_from_raw_data
 from loss_functions import wasserstein_loss
 import torch.nn as nn
 
@@ -203,9 +203,3 @@ if __name__ == "__main__":
         add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages,
         discriminator_update_interval, label_smoothing_real, label_smoothing_fake, suppress_detailed_logs, use_cache, channel_multiplier, segments_per_track
     )
-
-    # Example for stopping training
-    # stop_training_wrapper()
-
-    # Example for resuming training
-    # resume_training_wrapper(checkpoint_dir)
