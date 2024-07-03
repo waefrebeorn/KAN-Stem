@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 stop_flag = Value('i', 0)
 training_process = None
 
-def start_training_wrapper(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_str_g, loss_function_str_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages, discriminator_update_interval, label_smoothing_real, label_smoothing_fake, suppress_detailed_logs, use_cache, channel_multiplier, segments_per_track=10):
+def start_training_wrapper(data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_str_g, loss_function_str_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages, discriminator_update_interval, label_smoothing_real, label_smoothing_fake, suppress_detailed_logs, use_cache, channel_multiplier, segments_per_track=10):
     global training_process, stop_flag
     stop_flag.value = 0  # Reset stop flag
     loss_function_map = {
@@ -32,7 +32,6 @@ def start_training_wrapper(data_dir, val_dir, batch_size, num_epochs, learning_r
 
     training_params = {
         'data_dir': data_dir,
-        'val_dir': val_dir,
         'batch_size': batch_size,
         'num_epochs': num_epochs,
         'use_cuda': use_cuda,
@@ -70,11 +69,11 @@ def start_training_wrapper(data_dir, val_dir, batch_size, num_epochs, learning_r
     }
 
     training_process = Process(target=start_training, args=(
-        data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval,
+        data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval,
         accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
         perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag,
         add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages,
-        discriminator_update_interval, label_smoothing_real, label_smoothing_fake, suppress_detailed_logs, stop_flag, use_cache, channel_multiplier, segments_per_track))
+        discriminator_update_interval, label_smoothing_real, label_smoothing_fake, suppress_detailed_logs, stop_flag, channel_multiplier, segments_per_track))
     training_process.start()
     return f"Training Started with {loss_function_str_g} for Generator and {loss_function_str_d} for Discriminator, using {optimizer_name_g} for Generator Optimizer and {optimizer_name_d} for Discriminator Optimizer"
 
@@ -112,7 +111,6 @@ def resume_training(checkpoint_dir, device_str):
 
     start_training(
         data_dir=checkpoint['data_dir'],
-        val_dir=checkpoint['val_dir'],
         batch_size=checkpoint['batch_size'],
         num_epochs=checkpoint['num_epochs'] - epoch,
         initial_lr_g=checkpoint['initial_lr_g'],
@@ -141,7 +139,6 @@ def resume_training(checkpoint_dir, device_str):
         weight_decay=checkpoint['weight_decay'],
         suppress_warnings=checkpoint['suppress_warnings'],
         suppress_reading_messages=checkpoint['suppress_reading_messages'],
-        use_cache=checkpoint['use_cache'],
         channel_multiplier=checkpoint['channel_multiplier'],
         segments_per_track=checkpoint.get('segments_per_track', 10),
         stop_flag=stop_flag
@@ -159,7 +156,6 @@ def resume_training_wrapper(checkpoint_dir):
 if __name__ == "__main__":
     # Example usage (optional, for testing)
     data_dir = "path/to/data"
-    val_dir = "path/to/validation_data"
     batch_size = 16
     num_epochs = 100
     learning_rate_g = 1e-4
@@ -197,7 +193,7 @@ if __name__ == "__main__":
     segments_per_track = 10
 
     start_training_wrapper(
-        data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, 
+        data_dir,  batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, 
         accumulation_steps, num_stems, num_workers, cache_dir, loss_function_str_g, loss_function_str_d, optimizer_name_g, optimizer_name_d,
         perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag,
         add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages,

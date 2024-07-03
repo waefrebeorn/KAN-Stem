@@ -39,7 +39,6 @@ def objective_optuna(trial, gradio_params):
 
     start_training(
         data_dir=gradio_params["data_dir"],
-        val_dir=gradio_params["val_dir"],
         batch_size=effective_batch_size,  # Actual batch size from gradio_params
         num_epochs=5,  # Test with only 5 epochs
         initial_lr_g=learning_rate_g,

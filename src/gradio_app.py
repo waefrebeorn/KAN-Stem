@@ -96,7 +96,6 @@ with gr.Blocks() as demo:
     with gr.Tab("Training"):
         gr.Markdown("### Train the Model")
         data_dir = gr.Textbox(label="Data Directory", value="K:/KAN-Stem DataSet/prepared dataset")
-        val_dir = gr.Textbox(label="Validation Directory", value="K:/KAN-Stem DataSet/Chunk_0_Sample")
         batch_size = gr.Number(label="Batch Size", value=1)
         num_epochs = gr.Number(label="Number of Epochs", value=1000)
         learning_rate_g = gr.Number(label="Generator Learning Rate", value=0.03)
@@ -138,7 +137,7 @@ with gr.Blocks() as demo:
         resume_training_button = gr.Button("Resume Training")
         output = gr.Textbox(label="Output")
 
-        def start_training_and_log_params(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval,
+        def start_training_and_log_params(data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval,
                                           accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
                                           perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, 
                                           add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages,
@@ -146,7 +145,6 @@ with gr.Blocks() as demo:
                                           optimization_method, optuna_trials, use_cache, channel_multiplier):
             gradio_params = {
                 "data_dir": data_dir,
-                "val_dir": val_dir,
                 "batch_size": batch_size,
                 "num_epochs": num_epochs,
                 "learning_rate_g": learning_rate_g,
@@ -186,7 +184,7 @@ with gr.Blocks() as demo:
             if optimization_method == "Optuna":
                 return start_optuna_optimization(optuna_trials, gradio_params)
             else:
-                return start_training_wrapper(data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval,
+                return start_training_wrapper(data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval,
                                               accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
                                               perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, add_noise,
                                               noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages,
@@ -196,7 +194,7 @@ with gr.Blocks() as demo:
         start_training_button.click(
             start_training_and_log_params,
             inputs=[
-                data_dir, val_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval,
+                data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval,
                 accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
                 perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, add_noise, noise_amount, early_stopping_patience,
                 disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages, discriminator_update_interval, label_smoothing_real, 

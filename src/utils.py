@@ -11,7 +11,7 @@ from torch.utils.data import Dataset, DataLoader
 import torchaudio
 import torchaudio.transforms as T
 import torch.optim as optim
-import torch.nn as nn
+import torch.nn as nn  # Make sure this is imported
 from pydub import AudioSegment
 
 logger = logging.getLogger(__name__)
@@ -63,31 +63,19 @@ def detect_parameters_from_raw_data(data_dir: str, default_n_mels: int = 32, def
     return avg_sample_rate, n_mels, n_fft
 
 def segment_audio(audio: np.ndarray, chunk_size: int = 22050) -> List[np.ndarray]:
-    num_chunks = len(audio) // chunk_size
+    num_chunks = (len(audio) + chunk_size - 1) // chunk_size
     chunks = [audio[i * chunk_size:(i + 1) * chunk_size] for i in range(num_chunks)]
+    if len(chunks[-1]) < chunk_size:
+        chunks[-1] = np.pad(chunks[-1], (0, chunk_size - len(chunks[-1])), 'constant')
     return chunks
-
-def detect_silent_segments(audio: np.ndarray, threshold: float = 1e-3) -> List[Tuple[int, int]]:
-    silent_segments = []
-    start_idx = None
-    for i, sample in enumerate(audio):
-        if abs(sample) < threshold:
-            if start_idx is None:
-                start_idx = i
-        else:
-            if start_idx is not None:
-                silent_segments.append((start_idx, i))
-                start_idx = None
-    if start_idx is not None:
-        silent_segments.append((start_idx, len(audio)))
-    return silent_segments
 
 class StemSeparationDataset(Dataset):
     def __init__(
         self, data_dir: str, n_mels: int, target_length: int, n_fft: int, cache_dir: str,
         device: torch.device, suppress_warnings: bool = False,
         suppress_reading_messages: bool = False, num_workers: int = 1, stem_names: List[str] = None,
-        stop_flag: Any = None, use_cache: bool = True, device_prep: torch.device = None, segments_per_track: int = 10
+        stop_flag: Any = None, device_prep: torch.device = None, segments_per_track: int = 10,
+        file_ids: List[Dict[str, Any]] = None
     ):
         self.data_dir = data_dir
         self.n_mels = n_mels
@@ -99,15 +87,13 @@ class StemSeparationDataset(Dataset):
         self.suppress_reading_messages = suppress_reading_messages
         self.num_workers = num_workers
         self.stop_flag = stop_flag
-        self.use_cache = use_cache
-        self.training = True
         self.device_prep = device_prep or device
         self.segments_per_track = segments_per_track
-        
-        try:
-            self.sample_rate, _, _ = detect_parameters_from_cache(cache_dir)
-        except ValueError:
-            self.sample_rate, _, _ = detect_parameters_from_raw_data(data_dir)
+
+        self.sample_rate, _, _ = self._detect_parameters()
+        self.stem_names = stem_names or self._infer_stem_names()
+        self.file_ids = file_ids if file_ids is not None else self._get_file_ids()
+        os.makedirs(cache_dir, exist_ok=True)
 
         self.mel_spectrogram = T.MelSpectrogram(
             sample_rate=self.sample_rate, n_fft=n_fft, n_mels=n_mels,
@@ -115,9 +101,21 @@ class StemSeparationDataset(Dataset):
         ).to(self.device_prep)
         self.amplitude_to_db = T.AmplitudeToDB().to(self.device_prep)
 
-        self.stem_names = stem_names or ["vocals", "kick", "keys", "guitar", "drums", "bass"]
-        self.file_ids = self._get_file_ids()
-        os.makedirs(cache_dir, exist_ok=True)
+    def _detect_parameters(self):
+        try:
+            return detect_parameters_from_cache(self.cache_dir)
+        except ValueError:
+            return detect_parameters_from_raw_data(self.data_dir)
+
+    def _infer_stem_names(self) -> List[str]:
+        stem_files = os.listdir(self.data_dir)
+        stems = set()
+        for file in stem_files:
+            if file.startswith('example_') and file.endswith('.ogg'):
+                continue
+            stem = file.split('_')[0]
+            stems.add(stem)
+        return list(stems)
 
     def _get_file_ids(self):
         file_ids = []
@@ -152,22 +150,10 @@ class StemSeparationDataset(Dataset):
         if sr != self.sample_rate:
             data = librosa.resample(data, orig_sr=sr, target_sr=self.sample_rate)
 
-        segments = segment_audio(data, chunk_size=22050)
-        silent_segments = detect_silent_segments(data)
-
+        segments = segment_audio(data, chunk_size=self.target_length)
         processed_segments = []
-        zero_durations = []
-        current_zero_duration = 0
 
         for i, segment in enumerate(segments):
-            if (i * 22050, (i + 1) * 22050) in silent_segments or np.all(segment == 0):
-                current_zero_duration += 1
-                continue
-            else:
-                if current_zero_duration > 0:
-                    zero_durations.append((i - current_zero_duration, current_zero_duration))
-                    current_zero_duration = 0
-
             segment_tensor = torch.tensor(segment).float().to(self.device).unsqueeze(0).unsqueeze(0)
             mel_spec = self.mel_spectrogram(segment_tensor)
             mel_spec = self.amplitude_to_db(mel_spec)
@@ -187,34 +173,21 @@ class StemSeparationDataset(Dataset):
             percussive_spec = self.amplitude_to_db(percussive_spec)
 
             combined_spec = torch.cat([mel_spec, harmonic_spec, percussive_spec], dim=1)
+            combined_spec = F.pad(combined_spec, (0, self.target_length - combined_spec.size(-1)))
             processed_segments.append(combined_spec)
-
-        if current_zero_duration > 0:
-            zero_durations.append((len(segments) - current_zero_duration, current_zero_duration))
 
         if len(processed_segments) == 0:
             logger.warning(f"No valid segments found for processing in {file_path}. Skipping file.")
             return torch.tensor([]).to(self.device)
 
-        valid_segments = [seg for seg in processed_segments if seg.size(2) > 0]
-
-        if not valid_segments:
-            logger.warning(f"No valid segments left after filtering for {file_path}. Skipping file.")
-            return torch.tensor([]).to(self.device)
-
-        for idx, seg in enumerate(valid_segments):
-            logger.info(f"Segment {idx} size after processing: {seg.size()}")
-
-        combined_spec = torch.cat(valid_segments, dim=-1)
+        combined_spec = torch.stack(processed_segments)
         logger.info(f"Final combined_spec size for {file_path}: {combined_spec.size()}")
 
         with h5py.File(cache_path, 'w') as f:
             f.create_dataset('audio', data=combined_spec.cpu().numpy(), compression="gzip")
-            f.create_dataset('zero_durations', data=np.array(zero_durations), compression="gzip")
             f.attrs['sample_rate'] = self.sample_rate
 
         logger.info(f"Successfully processed and cached file: {file_path}")
-
         return combined_spec
 
     def __len__(self) -> int:
@@ -223,34 +196,33 @@ class StemSeparationDataset(Dataset):
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         file_id = self.file_ids[idx]
         identifier = file_id['identifier']
-        
+
         input_cache = self._get_cache_path('input', identifier)
         input_data = self.process_and_cache_file(file_id['input_file'], identifier, 'input')
-        
+
         target_data = {}
         for stem in self.stem_names:
             target_cache = self._get_cache_path(stem, identifier)
             target_data[stem] = self.process_and_cache_file(file_id['target_files'][stem], identifier, stem)
-        
+
         return {"input": input_data, "target": target_data, "file_id": identifier}
 
-def collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, Union[torch.Tensor, List[str]]]:
+def collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, Union[torch.Tensor, Dict[str, torch.Tensor], List[str]]]:
     inputs = torch.cat([item['input'] for item in batch if item['input'].numel() > 0], dim=0)
-    
-    targets = {}
+
+    targets = {stem: [] for stem in batch[0]['target'].keys()}
     for item in batch:
         for stem, target in item['target'].items():
-            if stem not in targets:
-                targets[stem] = []
             if target.numel() > 0:
                 targets[stem].append(target)
-    
+
     for stem in targets:
         if targets[stem]:
             targets[stem] = torch.cat(targets[stem], dim=0)
-    
+        else:
+            targets[stem] = torch.tensor([])  # Ensuring it's always a tensor
+
     file_ids = [item['file_id'] for item in batch]
-    
     return {'input': inputs, 'target': targets, 'file_paths': file_ids}
 
 def create_dataloader(dataset: StemSeparationDataset, batch_size: int, shuffle: bool = True) -> DataLoader:
@@ -266,12 +238,11 @@ def process_and_cache_dataset(
     dataset = StemSeparationDataset(
         data_dir=data_dir,
         n_mels=n_mels,
-        target_length=22050,  # Set target_length to 22050 since it's used in process_file
+        target_length=22050,
         n_fft=n_fft,
         cache_dir=cache_dir,
         suppress_reading_messages=suppress_reading_messages,
         device=device,
-        use_cache=True,
         segments_per_track=10
     )
 
@@ -304,11 +275,21 @@ def process_and_cache_dataset(
     return train_file_ids, val_file_ids
 
 def integrated_dynamic_batching(data_dir: str, cache_dir: str, n_mels: int, n_fft: int, target_length: int, batch_size: int, device: torch.device, stem_name: str, file_ids: List[Dict[str, Any]], shuffle: bool = False):
+    dataset = StemSeparationDataset(
+        data_dir=data_dir,
+        n_mels=n_mels,
+        target_length=target_length,
+        n_fft=n_fft,
+        cache_dir=cache_dir,
+        device=device,
+        file_ids=file_ids
+    )
+    
     if shuffle:
         random.shuffle(file_ids)
 
     for i in range(0, len(file_ids), batch_size):
-        batch_file_ids = file_ids[i:i+batch_size]
+        batch_file_ids = file_ids[i:i + batch_size]
 
         warmed_inputs = []
         warmed_targets = []
@@ -326,10 +307,10 @@ def integrated_dynamic_batching(data_dir: str, cache_dir: str, n_mels: int, n_ff
             else:
                 logger.warning(f"Cache files not found for {identifier}. Processing now.")
                 input_file_path = os.path.join(data_dir, f'example_{identifier}.ogg')
-                process_and_cache_file(input_file_path, identifier, "input")
+                dataset.process_and_cache_file(input_file_path, identifier, "input")
 
                 target_file_path = os.path.join(data_dir, f'{stem_name}_{identifier}.ogg')
-                process_and_cache_file(target_file_path, identifier, stem_name)
+                dataset.process_and_cache_file(target_file_path, identifier, stem_name)
 
             data = load_from_cache(input_cache_file_path, device)
             warmed_inputs.append(data['input'])
@@ -338,7 +319,7 @@ def integrated_dynamic_batching(data_dir: str, cache_dir: str, n_mels: int, n_ff
 
         yield {
             'input': torch.stack(warmed_inputs),
-            'target': torch.stack(warmed_targets),
+            'target': {stem_name: torch.stack(warmed_targets)},
             'file_paths': warmed_file_paths
         }
 
@@ -431,9 +412,10 @@ def load_from_cache(cache_file_path: str, device: torch.device) -> Dict[str, tor
             keys = list(f.keys())
             logger.info(f"Keys in cache file {cache_file_path}: {keys}")
             input_data = torch.tensor(f['audio'][:], device=device).float()
-            zero_durations = torch.tensor(f['zero_durations'][:], device=device).float()
 
-        return {'input': input_data, 'zero_durations': zero_durations}
+        logger.info(f"Loaded input data shape: {input_data.shape}")
+
+        return {'input': input_data}
     except Exception as e:
         logger.error(f"Error loading from cache file '{cache_file_path}': {e}")
         raise
@@ -442,3 +424,6 @@ def ensure_dir_exists(directory: str):
     if not os.path.exists(directory):
         os.makedirs(directory)
         logger.info(f"Created directory: {directory}")
+
+# Ensure the logging configuration is properly set up
+setup_logger(__name__)

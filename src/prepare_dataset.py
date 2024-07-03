@@ -93,7 +93,7 @@ def combine_and_shuffle_stems(input_dir, output_dir, num_examples=100, target_le
             save_as_ogg(example, sample_rate, file_path)
 
     print(f"Saved data and targets to {output_dir}")
-    
+
 def organize_and_prepare_dataset(input_dir, output_dir, num_examples):
     combine_and_shuffle_stems(input_dir, output_dir, num_examples)
     return f"Dataset prepared with {num_examples} examples in {output_dir}"

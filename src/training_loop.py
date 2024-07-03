@@ -1,9 +1,9 @@
+import os
 import torch
 import torch.nn as nn
 from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
 import logging
-import os
 from torch.cuda.amp import autocast, GradScaler
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from typing import Any
@@ -12,24 +12,14 @@ from utils import (
     compute_sdr, compute_sir, compute_sar,
     gradient_penalty, PerceptualLoss, detect_parameters_from_cache, detect_parameters_from_raw_data, 
     StemSeparationDataset, collate_fn, log_training_parameters, 
-    ensure_dir_exists, get_optimizer, integrated_dynamic_batching, purge_vram, load_from_cache,
+    ensure_dir_exists, get_optimizer, integrated_dynamic_batching, purge_vram,
     process_and_cache_dataset
 )
 from model_setup import create_model_and_optimizer
+from model import save_to_cache, load_from_cache, clear_cache
 import time
 
 logger = logging.getLogger(__name__)
-
-def reassemble_with_zero_gaps(tensor, zero_durations, segment_length):
-    reassembled = []
-    start_idx = 0
-    for (start, duration) in zero_durations:
-        end_idx = start_idx + (start * segment_length)
-        reassembled.append(tensor[start_idx:end_idx])
-        reassembled.append(torch.zeros((duration * segment_length, tensor.shape[1]), device=tensor.device))
-        start_idx = end_idx
-    reassembled.append(tensor[start_idx:])
-    return torch.cat(reassembled, dim=0)
 
 def train_single_stem(
     stem_name: str, 
@@ -40,7 +30,7 @@ def train_single_stem(
     sample_rate: int, 
     n_mels: int, 
     n_fft: int, 
-    target_length: int, 
+    segment_length: int, 
     stop_flag: torch.Tensor,
     suppress_reading_messages: bool = False
 ):
@@ -51,10 +41,13 @@ def train_single_stem(
     logger.info(f"Starting training for single stem: {stem_name}")
     
     device = torch.device(training_params['device_str'])
+    model_cache_dir = os.path.join(training_params['cache_dir'], 'model_cache')
+    os.makedirs(model_cache_dir, exist_ok=True)
+
     writer = SummaryWriter(log_dir=os.path.join(training_params['checkpoint_dir'], 'runs', f'stem_{stem_name}_{datetime.now().strftime("%Y%m%d-%H%M%S")}')) if model_params['tensorboard_flag'] else None
 
     model, discriminator, optimizer_g, optimizer_d, scaler_g, scaler_d = create_model_and_optimizer(
-        training_params['device_str'], n_mels, target_length,
+        training_params['device_str'], n_mels, segment_length,
         training_params['initial_lr_g'], training_params['initial_lr_d'], model_params['optimizer_name_g'],
         model_params['optimizer_name_d'], training_params['weight_decay']
     )
@@ -83,49 +76,33 @@ def train_single_stem(
         optimizer_g.zero_grad(set_to_none=True)
         optimizer_d.zero_grad(set_to_none=True)
 
-        for i, batch in enumerate(integrated_dynamic_batching(dataset.data_dir, dataset.cache_dir, dataset.n_mels, dataset.n_fft, dataset.target_length, training_params['batch_size'], device, stem_name, dataset.file_ids, shuffle=False)):
+        for i, batch in enumerate(integrated_dynamic_batching(
+                dataset.data_dir, dataset.cache_dir, dataset.n_mels, dataset.n_fft, segment_length, 
+                training_params['batch_size'], device, stem_name, dataset.file_ids, shuffle=False)):
             if stop_flag.value == 1:
                 logger.info("Training stopped.")
                 return
 
-            try:
-                identifier = batch['file_paths'][0]
-                input_cache_file_name = f"input_{identifier}_{dataset.n_mels}_{dataset.target_length}_{dataset.n_fft}.h5"
-                target_cache_file_name = f"{stem_name}_{identifier}_{dataset.n_mels}_{dataset.target_length}_{dataset.n_fft}.h5"
-                input_cache_file_path = os.path.join(dataset.cache_dir, input_cache_file_name)
-                target_cache_file_path = os.path.join(dataset.cache_dir, target_cache_file_name)
+            inputs, targets = batch['input'], batch['target'][stem_name]
+            file_paths = batch['file_paths']
 
-                if os.path.exists(input_cache_file_path) and os.path.exists(target_cache_file_path):
-                    logger.info(f"Cache files found for {identifier}. Skipping processing.")
-                else:
-                    logger.warning(f"Cache files not found for {identifier}. Processing now.")
-                    input_file_path = os.path.join(dataset.data_dir, f'example_{identifier}.ogg')
-                    dataset.process_and_cache_file(input_file_path, identifier, "input")
-
-                    target_file_path = os.path.join(dataset.data_dir, f'{stem_name}_{identifier}.ogg')
-                    dataset.process_and_cache_file(target_file_path, identifier, stem_name)
-
-                data = load_from_cache(input_cache_file_path, device)
-                inputs, zero_durations = data['input'], data['zero_durations']
-                targets = load_from_cache(target_cache_file_path, device)['input']
-
-                # Reassemble the data with zero gaps
-                inputs = reassemble_with_zero_gaps(inputs, zero_durations, segment_length=87)
-                targets = reassemble_with_zero_gaps(targets, zero_durations, segment_length=87)
-
-            except KeyError as e:
-                logger.error(f"Batch missing 'file_paths' key: {e}")
-                continue
-            except Exception as e:
-                logger.error(f"Error loading data for {identifier}: {e}")
-                continue
-
-            if not isinstance(inputs, torch.Tensor):
-                logger.error(f"Expected inputs to be a tensor, but got {type(inputs)} instead.")
-                continue
+            logger.debug(f"Batch target keys: {batch['target'].keys()}")
 
             with autocast():
-                outputs = model(inputs)
+                outputs = []
+                for idx, segment in enumerate(inputs):
+                    cache_prefix = f'{stem_name}_{epoch}_{i}_{idx}'
+                    output = model(segment, model_cache_dir, cache_prefix)
+                    outputs.append(output)
+                outputs = torch.cat(outputs, dim=0)
+                
+                # Ensure the target shape matches the output shape by padding if necessary
+                if targets.size(0) < outputs.size(0):
+                    padding_segments = outputs.size(0) - targets.size(0)
+                    pad_shape = (padding_segments,) + targets.shape[1:]
+                    padding = torch.zeros(pad_shape, device=targets.device)
+                    targets = torch.cat([targets, padding], dim=0)
+
                 loss_g = model_params['loss_function_g'](outputs, targets)
 
                 if model_params['perceptual_loss_flag'] and (i % 5 == 0):
@@ -140,8 +117,8 @@ def train_single_stem(
                         noise = torch.randn_like(targets, device=device) * training_params['noise_amount']
                         targets = targets + noise
 
-                    real_out = discriminator(targets)
-                    fake_out = discriminator(outputs.detach())
+                    real_out = discriminator(targets, model_cache_dir, f'{stem_name}_real_{epoch}_{i}')
+                    fake_out = discriminator(outputs.detach(), model_cache_dir, f'{stem_name}_fake_{epoch}_{i}')
 
                     loss_d_real = model_params['loss_function_d'](real_out, torch.ones_like(real_out) * training_params['label_smoothing_real'])
                     loss_d_fake = model_params['loss_function_d'](fake_out, torch.zeros_like(fake_out) * training_params['label_smoothing_fake'])
@@ -167,45 +144,25 @@ def train_single_stem(
         model.eval()
         val_loss = 0.0
         with torch.no_grad():
-            for batch in integrated_dynamic_batching(val_dataset.data_dir, val_dataset.cache_dir, val_dataset.n_mels, val_dataset.n_fft, val_dataset.target_length, training_params['batch_size'], device, stem_name, val_dataset.file_ids, shuffle=False):
-                try:
-                    identifier = batch['file_paths'][0]
-                    input_cache_file_name = f"input_{identifier}_{dataset.n_mels}_{dataset.target_length}_{dataset.n_fft}.h5"
-                    target_cache_file_name = f"{stem_name}_{identifier}_{dataset.n_mels}_{dataset.target_length}_{dataset.n_fft}.h5"
-                    input_cache_file_path = os.path.join(dataset.cache_dir, input_cache_file_name)
-                    target_cache_file_path = os.path.join(dataset.cache_dir, target_cache_file_name)
-
-                    if os.path.exists(input_cache_file_path) and os.path.exists(target_cache_file_path):
-                        logger.info(f"Cache files found for {identifier}. Skipping processing.")
-                    else:
-                        logger.warning(f"Cache files not found for {identifier}. Processing now.")
-                        input_file_path = os.path.join(dataset.data_dir, f'example_{identifier}.ogg')
-                        dataset.process_and_cache_file(input_file_path, identifier, "input")
-
-                        target_file_path = os.path.join(dataset.data_dir, f'{stem_name}_{identifier}.ogg')
-                        dataset.process_and_cache_file(target_file_path, identifier, stem_name)
-
-                    data = load_from_cache(input_cache_file_path, device)
-                    inputs, zero_durations = data['input'], data['zero_durations']
-                    targets = load_from_cache(target_cache_file_path, device)['input']
-
-                    # Reassemble the data with zero gaps
-                    inputs = reassemble_with_zero_gaps(inputs, zero_durations, segment_length=87)
-                    targets = reassemble_with_zero_gaps(targets, zero_durations, segment_length=87)
-
-                except KeyError as e:
-                    logger.error(f"Batch missing 'file_paths' key: {e}")
-                    continue
-                except Exception as e:
-                    logger.error(f"Error loading data for {identifier}: {e}")
-                    continue
-
-                if not isinstance(inputs, torch.Tensor):
-                    logger.error(f"Expected inputs to be a tensor, but got {type(inputs)} instead.")
-                    continue
+            for batch in integrated_dynamic_batching(
+                    val_dataset.data_dir, val_dataset.cache_dir, val_dataset.n_mels, val_dataset.n_fft, segment_length, 
+                    training_params['batch_size'], device, stem_name, val_dataset.file_ids, shuffle=False):
+                inputs, targets = batch['input'], batch['target'][stem_name]
 
                 with autocast():
-                    outputs = model(inputs)
+                    outputs = []
+                    for idx, segment in enumerate(inputs):
+                        cache_prefix = f'val_{stem_name}_{epoch}_{i}_{idx}'
+                        output = model(segment, model_cache_dir, cache_prefix)
+                        outputs.append(output)
+                    outputs = torch.cat(outputs, dim=0)
+                    
+                    if targets.size(0) < outputs.size(0):
+                        padding_segments = outputs.size(0) - targets.size(0)
+                        pad_shape = (padding_segments,) + targets.shape[1:]
+                        padding = torch.zeros(pad_shape, device=targets.device)
+                        targets = torch.cat([targets, padding], dim=0)
+
                     loss = model_params['loss_function_g'](outputs, targets)
                 
                 val_loss += loss.item()
@@ -223,22 +180,24 @@ def train_single_stem(
             logger.info('Early stopping triggered.')
             break
 
-        if (epoch + 1) % training_params['save_interval'] == 0:
-            checkpoint_path = os.path.join(training_params['checkpoint_dir'], f'checkpoint_stem_{stem_name}_epoch_{epoch+1}.pt')
+        if (epoch + 1) % training_params['checkpoint_interval'] == 0:
+            checkpoint_path = os.path.join(training_params['checkpoint_dir'], f'stem_{stem_name}_epoch_{epoch+1}.pt')
             torch.save(model.state_dict(), checkpoint_path)
-            logger.info(f'Saved checkpoint: {checkpoint_path}')
+            logger.info(f"Checkpoint saved: {checkpoint_path}")
 
-        purge_vram()
+        scheduler_g.step(val_loss)
+        scheduler_d.step(val_loss)
 
-    final_model_path = f"{training_params['checkpoint_dir']}/model_final_stem_{stem_name}.pt"
-    torch.save(model.state_dict(), final_model_path)
-    logger.info(f"Training completed for stem {stem_name}. Final model saved at {final_model_path}")
+        # Clear cache to save disk space
+        clear_cache(model_cache_dir)
 
     if model_params['tensorboard_flag']:
         writer.close()
 
+    logger.info(f"Training completed for stem: {stem_name}")
+
 def start_training(
-    data_dir: str, val_dir: str, batch_size: int, num_epochs: int, initial_lr_g: float, initial_lr_d: float, 
+    data_dir: str, batch_size: int, num_epochs: int, initial_lr_g: float, initial_lr_d: float, 
     use_cuda: bool, checkpoint_dir: str, save_interval: int, accumulation_steps: int, num_stems: int, 
     num_workers: int, cache_dir: str, loss_function_g: nn.Module, loss_function_d: nn.Module, 
     optimizer_name_g: str, optimizer_name_d: str, perceptual_loss_flag: bool, perceptual_loss_weight: float, 
@@ -246,7 +205,7 @@ def start_training(
     add_noise: bool, noise_amount: float, early_stopping_patience: int, 
     disable_early_stopping: bool, weight_decay: float, suppress_warnings: bool, suppress_reading_messages: bool, 
     discriminator_update_interval: int, label_smoothing_real: float, label_smoothing_fake: float, 
-    suppress_detailed_logs: bool, stop_flag: torch.Tensor, use_cache: bool, channel_multiplier: float, segments_per_track: int = 10
+    suppress_detailed_logs: bool, stop_flag: torch.Tensor, channel_multiplier: float, segments_per_track: int = 10
 ):
     device = torch.device('cuda' if use_cuda and torch.cuda.is_available() else 'cpu')
     training_params = {
@@ -274,8 +233,7 @@ def start_training(
         'label_smoothing_real': label_smoothing_real,
         'label_smoothing_fake': label_smoothing_fake,
         'suppress_detailed_logs': suppress_detailed_logs,
-        'segments_per_track': segments_per_track,
-        'use_cache': use_cache
+        'segments_per_track': segments_per_track
     }
     model_params = {
         'optimizer_name_g': optimizer_name_g,
@@ -305,29 +263,45 @@ def start_training(
         )
         sample_rate, n_mels, n_fft = detect_parameters_from_cache(cache_dir)
 
-    target_length = sample_rate // 2
+    segment_length = 22050  # Adjusted to segment length
+
+    dataset = StemSeparationDataset(
+        data_dir=data_dir,
+        n_mels=n_mels,
+        target_length=segment_length,
+        n_fft=n_fft,
+        cache_dir=cache_dir,
+        suppress_reading_messages=suppress_reading_messages,
+        device=device,
+        segments_per_track=segments_per_track
+    )
+
+    num_files = len(dataset.file_ids)
+    split_index = int(num_files * 0.8)
+    train_file_ids = dataset.file_ids[:split_index]
+    val_file_ids = dataset.file_ids[split_index:]
 
     train_dataset = StemSeparationDataset(
         data_dir=data_dir,
         n_mels=n_mels,
-        target_length=target_length,
+        target_length=segment_length,
         n_fft=n_fft,
         cache_dir=cache_dir,
         suppress_reading_messages=suppress_reading_messages,
         device=device,
-        use_cache=True,
-        segments_per_track=segments_per_track
+        segments_per_track=segments_per_track,
+        file_ids=train_file_ids
     )
     val_dataset = StemSeparationDataset(
-        data_dir=val_dir,
+        data_dir=data_dir,
         n_mels=n_mels,
-        target_length=target_length,
+        target_length=segment_length,
         n_fft=n_fft,
         cache_dir=cache_dir,
         suppress_reading_messages=suppress_reading_messages,
         device=device,
-        use_cache=True,
-        segments_per_track=segments_per_track
+        segments_per_track=segments_per_track,
+        file_ids=val_file_ids
     )
 
     for stem_name in ['vocals', 'drums', 'bass', 'kick', 'keys', 'guitar']:
@@ -342,7 +316,7 @@ def start_training(
 
         train_single_stem(
             stem_name, train_dataset, val_dataset, training_params, model_params, 
-            sample_rate, n_mels, n_fft, target_length, stop_flag, suppress_reading_messages
+            sample_rate, n_mels, n_fft, segment_length, stop_flag, suppress_reading_messages
         )
 
         end_time = time.time()
@@ -356,7 +330,6 @@ if __name__ == '__main__':
 
     start_training(
         data_dir='path_to_data',
-        val_dir='path_to_val_data',
         batch_size=1,
         num_epochs=10,
         initial_lr_g=1e-4,
@@ -390,7 +363,6 @@ if __name__ == '__main__':
         label_smoothing_fake=0.1,
         suppress_detailed_logs=False,
         stop_flag=stop_flag,
-        use_cache=True,
         channel_multiplier=2,
         segments_per_track=10
     )
