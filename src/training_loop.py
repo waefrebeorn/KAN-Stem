@@ -227,6 +227,8 @@ def train_single_stem(
             writer.add_scalar('Metrics/SDR', avg_val_sdr, epoch + 1)
             writer.add_scalar('Metrics/SIR', avg_val_sir, epoch + 1)
             writer.add_scalar('Metrics/SAR', avg_val_sar, epoch + 1)
+            writer.add_scalar('Loss/Generator_Avg', running_loss_g / len(dataset.file_ids), epoch + 1)
+            writer.add_scalar('Loss/Discriminator_Avg', running_loss_d / len(dataset.file_ids), epoch + 1)
 
         if best_val_loss is None or avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
@@ -260,7 +262,7 @@ def train_single_stem(
         writer.close()
 
     logger.info(f"Training completed for stem: {stem_name}")
-    
+   
 def start_training(
     data_dir: str, batch_size: int, num_epochs: int, initial_lr_g: float, initial_lr_d: float,
     use_cuda: bool, checkpoint_dir: str, save_interval: int, accumulation_steps: int, num_stems: int,
