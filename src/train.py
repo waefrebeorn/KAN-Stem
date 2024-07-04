@@ -15,7 +15,14 @@ logger = logging.getLogger(__name__)
 stop_flag = Value('i', 0)
 training_process = None
 
-def start_training_wrapper(data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval, accumulation_steps, num_stems, num_workers, cache_dir, loss_function_str_g, loss_function_str_d, optimizer_name_g, optimizer_name_d, perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages, discriminator_update_interval, label_smoothing_real, label_smoothing_fake, suppress_detailed_logs, use_cache, channel_multiplier, segments_per_track=10):
+def start_training_wrapper(
+    data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval,
+    accumulation_steps, num_stems, num_workers, cache_dir, loss_function_str_g, loss_function_str_d, optimizer_name_g,
+    optimizer_name_d, perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma,
+    tensorboard_flag, add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay,
+    suppress_warnings, suppress_reading_messages, discriminator_update_interval, label_smoothing_real, label_smoothing_fake,
+    suppress_detailed_logs, use_cache, channel_multiplier, segments_per_track=10
+):
     global training_process, stop_flag
     stop_flag.value = 0  # Reset stop flag
     loss_function_map = {
@@ -28,49 +35,11 @@ def start_training_wrapper(data_dir, batch_size, num_epochs, learning_rate_g, le
     loss_function_g = loss_function_map[loss_function_str_g]
     loss_function_d = loss_function_map[loss_function_str_d]
 
-    training_params = {
-        'data_dir': data_dir,
-        'batch_size': batch_size,
-        'num_epochs': num_epochs,
-        'use_cuda': use_cuda,
-        'checkpoint_dir': checkpoint_dir,
-        'save_interval': save_interval,
-        'accumulation_steps': accumulation_steps,
-        'num_stems': num_stems,
-        'num_workers': num_workers,
-        'cache_dir': cache_dir,
-        'add_noise': add_noise,
-        'noise_amount': noise_amount,
-        'early_stopping_patience': early_stopping_patience,
-        'disable_early_stopping': disable_early_stopping,
-        'suppress_warnings': suppress_warnings,
-        'suppress_reading_messages': suppress_reading_messages,
-        'use_cache': use_cache,
-        'segments_per_track': segments_per_track  # Added this parameter
-    }
-
-    model_params = {
-        'initial_lr_g': learning_rate_g,
-        'initial_lr_d': learning_rate_d,
-        'loss_function_g': loss_function_g,
-        'loss_function_d': loss_function_d,
-        'optimizer_name_g': optimizer_name_g,
-        'optimizer_name_d': optimizer_name_d,
-        'perceptual_loss_flag': perceptual_loss_flag,
-        'perceptual_loss_weight': perceptual_loss_weight,
-        'clip_value': clip_value,
-        'scheduler_step_size': scheduler_step_size,
-        'scheduler_gamma': scheduler_gamma,
-        'tensorboard_flag': tensorboard_flag,
-        'weight_decay': weight_decay,
-        'channel_multiplier': channel_multiplier
-    }
-
     training_process = Process(target=start_training, args=(
         data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval,
         accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
-        perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag,
-        add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages,
+        perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, add_noise,
+        noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages,
         discriminator_update_interval, label_smoothing_real, label_smoothing_fake, suppress_detailed_logs, stop_flag, channel_multiplier, segments_per_track))
     training_process.start()
     return f"Training Started with {loss_function_str_g} for Generator and {loss_function_str_d} for Discriminator, using {optimizer_name_g} for Generator Optimizer and {optimizer_name_d} for Discriminator Optimizer"

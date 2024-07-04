@@ -213,9 +213,9 @@ def train_single_stem(
 
                     # Calculate SDR, SIR, SAR metrics
                     sdr, sir, sar = compute_sdr(targets.cpu(), outputs.cpu()), compute_sir(targets.cpu(), outputs.cpu()), compute_sar(targets.cpu(), outputs.cpu())
-                    val_sdr += sdr.mean().item()  # Reduce tensor to scalar
-                    val_sir += sir.mean().item()  # Reduce tensor to scalar
-                    val_sar += sar.mean().item()  # Reduce tensor to scalar
+                    val_sdr += sdr
+                    val_sir += sir
+                    val_sar += sar
 
         avg_val_loss = val_loss / len(val_dataset)
         avg_val_sdr = val_sdr / len(val_dataset)
@@ -260,7 +260,7 @@ def train_single_stem(
         writer.close()
 
     logger.info(f"Training completed for stem: {stem_name}")
-    
+
 def start_training(
     data_dir: str, batch_size: int, num_epochs: int, initial_lr_g: float, initial_lr_d: float,
     use_cuda: bool, checkpoint_dir: str, save_interval: int, accumulation_steps: int, num_stems: int,
