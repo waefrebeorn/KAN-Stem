@@ -257,11 +257,13 @@ with gr.Blocks() as demo:
         input_dir = gr.Textbox(label="Input Directory")
         output_dir = gr.Textbox(label="Output Directory")
         num_examples = gr.Number(label="Number of Examples", value=100)
+        target_length = gr.Number(label="Target Length (seconds)", value=60)
+        sample_rate = gr.Number(label="Sample Rate", value=44100)
         prepare_dataset_button = gr.Button("Prepare Dataset")
         prepare_output = gr.Textbox(label="Output")
         prepare_dataset_button.click(
             organize_and_prepare_dataset_gradio,
-            inputs=[input_dir, output_dir, num_examples],
+            inputs=[input_dir, output_dir, num_examples, target_length, sample_rate],
             outputs=prepare_output
         )
 

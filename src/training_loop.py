@@ -84,9 +84,24 @@ def train_single_stem(
                 logger.info("Training stopped.")
                 return
 
+            input_file_path = os.path.join(dataset.data_dir, file_id['input_file'])
+            target_file_path = os.path.join(dataset.data_dir, file_id['target_files'][stem_name])
+
+            # Log file paths for debugging
+            logger.info(f"Input file path: {input_file_path}")
+            logger.info(f"Target file path: {target_file_path}")
+
+            # Ensure files exist before proceeding
+            if not os.path.exists(input_file_path):
+                logger.error(f"Input file does not exist: {input_file_path}")
+                continue
+            if not os.path.exists(target_file_path):
+                logger.error(f"Target file does not exist: {target_file_path}")
+                continue
+
             # Load input and target data for the current file_id
-            input_data = dataset.process_and_cache_file(file_id['input_file'], file_id['identifier'], 'input')
-            target_data = dataset.process_and_cache_file(file_id['target_files'][stem_name], file_id['identifier'], stem_name)
+            input_data = dataset.process_and_cache_file(input_file_path, file_id['identifier'], 'input')
+            target_data = dataset.process_and_cache_file(target_file_path, file_id['identifier'], stem_name)
 
             if input_data.numel() == 0 or target_data.numel() == 0:
                 logger.warning(f"Skipping empty input or target for file_id: {file_id['identifier']}")
@@ -134,13 +149,14 @@ def train_single_stem(
                 # Scale the discriminator loss unconditionally
                 scaler_d.scale(loss_d).backward()
 
+                scaler_d.step(optimizer_d)
+                scaler_d.update()
+                optimizer_d.zero_grad(set_to_none=True)
+
             if (i + 1) % training_params['accumulation_steps'] == 0:
                 scaler_g.step(optimizer_g)
-                scaler_d.step(optimizer_d)
                 scaler_g.update()
-                scaler_d.update()
                 optimizer_g.zero_grad(set_to_none=True)
-                optimizer_d.zero_grad(set_to_none=True)
 
             running_loss_g += loss_g.item()
             running_loss_d += loss_d.item() if 'loss_d' in locals() else 0
@@ -152,8 +168,23 @@ def train_single_stem(
         val_loss = 0.0
         with torch.no_grad():
             for file_id in val_dataset.file_ids:
-                input_data = val_dataset.process_and_cache_file(file_id['input_file'], file_id['identifier'], 'input')
-                target_data = val_dataset.process_and_cache_file(file_id['target_files'][stem_name], file_id['identifier'], stem_name)
+                input_file_path = os.path.join(val_dataset.data_dir, file_id['input_file'])
+                target_file_path = os.path.join(val_dataset.data_dir, file_id['target_files'][stem_name])
+
+                # Log file paths for debugging
+                logger.info(f"Validation input file path: {input_file_path}")
+                logger.info(f"Validation target file path: {target_file_path}")
+
+                # Ensure files exist before proceeding
+                if not os.path.exists(input_file_path):
+                    logger.error(f"Validation input file does not exist: {input_file_path}")
+                    continue
+                if not os.path.exists(target_file_path):
+                    logger.error(f"Validation target file does not exist: {target_file_path}")
+                    continue
+
+                input_data = val_dataset.process_and_cache_file(input_file_path, file_id['identifier'], 'input')
+                target_data = val_dataset.process_and_cache_file(target_file_path, file_id['identifier'], stem_name)
 
                 if input_data.numel() == 0 or target_data.numel() == 0:
                     logger.warning(f"Skipping empty input or target for file_id: {file_id['identifier']}")

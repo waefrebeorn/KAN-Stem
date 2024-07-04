@@ -2,12 +2,26 @@ import os
 import random
 import numpy as np
 import soundfile as sf
-from prepare_dataset import normalize_length, ensure_mono
 from pydub import AudioSegment
 import warnings
+import librosa
 
 warnings.filterwarnings("ignore", message="Lazy modules are a new feature under heavy development")
 warnings.filterwarnings("ignore", message="oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders.")
+
+def standardize_length(waveform, sample_rate, target_length):
+    target_samples = target_length * sample_rate
+    waveform_length = len(waveform)
+
+    if waveform_length >= target_samples:
+        return waveform[:target_samples]
+    else:
+        return np.pad(waveform, (0, target_samples - waveform_length), 'constant')
+
+def ensure_mono(waveform):
+    if waveform.ndim > 1:
+        waveform = np.mean(waveform, axis=1)
+    return waveform
 
 def save_as_ogg(waveform, sample_rate, file_path):
     temp_wav_path = file_path.replace('.ogg', '.wav')
@@ -39,7 +53,7 @@ def generate_shuffled_noise(input_dirs, output_dir, num_examples=100, target_len
             file_path = os.path.join(input_dirs[stem], file)
             waveform, sample_rate = sf.read(file_path, dtype='float32')
             waveform = ensure_mono(waveform)
-            normalized_waveform = normalize_length(waveform, sample_rate, target_length)
+            normalized_waveform = standardize_length(waveform, sample_rate, target_length)
             
             shuffled_waveform = np.random.permutation(normalized_waveform)  # Shuffle the waveform
             
@@ -97,3 +111,4 @@ if __name__ == "__main__":
     }
 
     generate_shuffled_noise(input_dirs, args.output_dir, args.num_examples)
+
