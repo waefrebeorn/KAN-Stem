@@ -6,31 +6,34 @@ from datetime import datetime
 import logging
 from torch.cuda.amp import autocast, GradScaler
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-from typing import Any
-from torchvision.models import vgg16, VGG16_Weights
 from utils import (
     compute_sdr, compute_sir, compute_sar,
-    gradient_penalty, PerceptualLoss, detect_parameters_from_cache, detect_parameters_from_raw_data, 
-    StemSeparationDataset, collate_fn, log_training_parameters, 
-    ensure_dir_exists, get_optimizer, integrated_dynamic_batching, purge_vram,
-    process_and_cache_dataset
+    gradient_penalty, PerceptualLoss, detect_parameters,
+    StemSeparationDataset, collate_fn, log_training_parameters,
+    ensure_dir_exists, get_optimizer, purge_vram,
+    process_and_cache_dataset, create_dataloader
 )
 from model_setup import create_model_and_optimizer
-from model import save_to_cache, load_from_cache, clear_cache
+from model import save_to_cache, load_from_cache
 import time
 
 logger = logging.getLogger(__name__)
 
+def validate_tensor_shapes(tensor1, tensor2, message=""):
+    if tensor1.shape != tensor2.shape:
+        logger.error(f"Shape mismatch: {tensor1.shape} vs {tensor2.shape}. {message}")
+        raise ValueError(f"Shape mismatch: {tensor1.shape} vs {tensor2.shape}. {message}")
+
 def train_single_stem(
-    stem_name: str, 
-    dataset: StemSeparationDataset,  
+    stem_name: str,
+    dataset: StemSeparationDataset,
     val_dataset: StemSeparationDataset,
-    training_params: dict, 
+    training_params: dict,
     model_params: dict,
-    sample_rate: int, 
-    n_mels: int, 
-    n_fft: int, 
-    segment_length: int, 
+    sample_rate: int,
+    n_mels: int,
+    n_fft: int,
+    segment_length: int,
     stop_flag: torch.Tensor,
     suppress_reading_messages: bool = False
 ):
@@ -39,10 +42,11 @@ def train_single_stem(
         return
 
     logger.info(f"Starting training for single stem: {stem_name}")
-    
+
     device = torch.device(training_params['device_str'])
     model_cache_dir = os.path.join(training_params['cache_dir'], 'model_cache')
     os.makedirs(model_cache_dir, exist_ok=True)
+    cache_prefix = f'{stem_name}_'
 
     writer = SummaryWriter(log_dir=os.path.join(training_params['checkpoint_dir'], 'runs', f'stem_{stem_name}_{datetime.now().strftime("%Y%m%d-%H%M%S")}')) if model_params['tensorboard_flag'] else None
 
@@ -58,9 +62,8 @@ def train_single_stem(
     early_stopping_counter = 0
     best_val_loss = float('inf')
 
-    feature_extractor = vgg16(weights=VGG16_Weights.IMAGENET1K_V1).features.to(device).eval()
-    for param in feature_extractor.parameters():
-        param.requires_grad = False
+    # Initialize PerceptualLoss with MobileNetV2
+    perceptual_loss_fn = PerceptualLoss(sample_rate, n_fft, n_mels).to(device)
 
     for epoch in range(training_params['num_epochs']):
         if stop_flag.value == 1:
@@ -76,55 +79,59 @@ def train_single_stem(
         optimizer_g.zero_grad(set_to_none=True)
         optimizer_d.zero_grad(set_to_none=True)
 
-        for i, batch in enumerate(integrated_dynamic_batching(
-                dataset.data_dir, dataset.cache_dir, dataset.n_mels, dataset.n_fft, segment_length, 
-                training_params['batch_size'], device, stem_name, dataset.file_ids, shuffle=False)):
+        for i, file_id in enumerate(dataset.file_ids):
             if stop_flag.value == 1:
                 logger.info("Training stopped.")
                 return
 
-            inputs, targets = batch['input'], batch['target'][stem_name]
-            file_paths = batch['file_paths']
+            # Load input and target data for the current file_id
+            input_data = dataset.process_and_cache_file(file_id['input_file'], file_id['identifier'], 'input')
+            target_data = dataset.process_and_cache_file(file_id['target_files'][stem_name], file_id['identifier'], stem_name)
 
-            logger.debug(f"Batch target keys: {batch['target'].keys()}")
+            if input_data.numel() == 0 or target_data.numel() == 0:
+                logger.warning(f"Skipping empty input or target for file_id: {file_id['identifier']}")
+                continue
+
+            inputs = input_data.unsqueeze(0)
+            targets = target_data.unsqueeze(0)
+
+            # Print the shapes of the loaded tensors
+            print(f"Input tensor shape: {inputs.shape}")
+            print(f"Target tensor shape: {targets.shape}")
 
             with autocast():
-                outputs = []
-                for idx, segment in enumerate(inputs):
-                    cache_prefix = f'{stem_name}_{epoch}_{i}_{idx}'
-                    output = model(segment, model_cache_dir, cache_prefix)
-                    outputs.append(output)
-                outputs = torch.cat(outputs, dim=0)
-                
-                # Ensure the target shape matches the output shape by padding if necessary
-                if targets.size(0) < outputs.size(0):
-                    padding_segments = outputs.size(0) - targets.size(0)
-                    pad_shape = (padding_segments,) + targets.shape[1:]
-                    padding = torch.zeros(pad_shape, device=targets.device)
-                    targets = torch.cat([targets, padding], dim=0)
+                outputs = model(inputs.to(device), model_cache_dir, cache_prefix, file_id['identifier'])
+
+                # Print the shape of the model output
+                print(f"Model output tensor shape: {outputs.shape}")
+
+                # Validate tensor shapes before loss calculation
+                validate_tensor_shapes(outputs, targets, "Before computing loss_g")
 
                 loss_g = model_params['loss_function_g'](outputs, targets)
 
                 if model_params['perceptual_loss_flag'] and (i % 5 == 0):
-                    perceptual_loss = model_params['perceptual_loss_weight'] * PerceptualLoss(feature_extractor)(outputs, targets)
+                    perceptual_loss = model_params['perceptual_loss_weight'] * perceptual_loss_fn(outputs, targets)
                     loss_g += perceptual_loss
 
             scaler_g.scale(loss_g).backward()
 
+            # Discriminator Update
             if (i + 1) % training_params['discriminator_update_interval'] == 0:
                 with autocast():
                     if training_params['add_noise']:
                         noise = torch.randn_like(targets, device=device) * training_params['noise_amount']
                         targets = targets + noise
 
-                    real_out = discriminator(targets, model_cache_dir, f'{stem_name}_real_{epoch}_{i}')
-                    fake_out = discriminator(outputs.detach(), model_cache_dir, f'{stem_name}_fake_{epoch}_{i}')
+                    real_out = discriminator(targets)
+                    fake_out = discriminator(outputs.detach())
 
                     loss_d_real = model_params['loss_function_d'](real_out, torch.ones_like(real_out) * training_params['label_smoothing_real'])
                     loss_d_fake = model_params['loss_function_d'](fake_out, torch.zeros_like(fake_out) * training_params['label_smoothing_fake'])
                     gp = gradient_penalty(discriminator, targets, outputs.detach(), device)
                     loss_d = (loss_d_real + loss_d_fake) / 2 + gp
 
+                # Scale the discriminator loss unconditionally
                 scaler_d.scale(loss_d).backward()
 
             if (i + 1) % training_params['accumulation_steps'] == 0:
@@ -144,27 +151,28 @@ def train_single_stem(
         model.eval()
         val_loss = 0.0
         with torch.no_grad():
-            for batch in integrated_dynamic_batching(
-                    val_dataset.data_dir, val_dataset.cache_dir, val_dataset.n_mels, val_dataset.n_fft, segment_length, 
-                    training_params['batch_size'], device, stem_name, val_dataset.file_ids, shuffle=False):
-                inputs, targets = batch['input'], batch['target'][stem_name]
+            for file_id in val_dataset.file_ids:
+                input_data = val_dataset.process_and_cache_file(file_id['input_file'], file_id['identifier'], 'input')
+                target_data = val_dataset.process_and_cache_file(file_id['target_files'][stem_name], file_id['identifier'], stem_name)
+
+                if input_data.numel() == 0 or target_data.numel() == 0:
+                    logger.warning(f"Skipping empty input or target for file_id: {file_id['identifier']}")
+                    continue
+
+                inputs = input_data.unsqueeze(0)
+                targets = target_data.unsqueeze(0)
 
                 with autocast():
-                    outputs = []
-                    for idx, segment in enumerate(inputs):
-                        cache_prefix = f'val_{stem_name}_{epoch}_{i}_{idx}'
-                        output = model(segment, model_cache_dir, cache_prefix)
-                        outputs.append(output)
-                    outputs = torch.cat(outputs, dim=0)
-                    
-                    if targets.size(0) < outputs.size(0):
-                        padding_segments = outputs.size(0) - targets.size(0)
-                        pad_shape = (padding_segments,) + targets.shape[1:]
-                        padding = torch.zeros(pad_shape, device=targets.device)
-                        targets = torch.cat([targets, padding], dim=0)
+                    outputs = model(inputs.to(device), model_cache_dir, cache_prefix, file_id['identifier'])
+
+                    # Print the shape of the model output during validation
+                    print(f"Validation - Model output tensor shape: {outputs.shape}")
+
+                    # Validate tensor shapes before loss calculation during validation
+                    validate_tensor_shapes(outputs, targets, "During validation before computing loss")
 
                     loss = model_params['loss_function_g'](outputs, targets)
-                
+
                 val_loss += loss.item()
 
         if model_params['tensorboard_flag']:
@@ -188,23 +196,20 @@ def train_single_stem(
         scheduler_g.step(val_loss)
         scheduler_d.step(val_loss)
 
-        # Clear cache to save disk space
-        clear_cache(model_cache_dir)
-
     if model_params['tensorboard_flag']:
         writer.close()
 
     logger.info(f"Training completed for stem: {stem_name}")
 
 def start_training(
-    data_dir: str, batch_size: int, num_epochs: int, initial_lr_g: float, initial_lr_d: float, 
-    use_cuda: bool, checkpoint_dir: str, save_interval: int, accumulation_steps: int, num_stems: int, 
-    num_workers: int, cache_dir: str, loss_function_g: nn.Module, loss_function_d: nn.Module, 
-    optimizer_name_g: str, optimizer_name_d: str, perceptual_loss_flag: bool, perceptual_loss_weight: float, 
-    clip_value: float, scheduler_step_size: int, scheduler_gamma: float, tensorboard_flag: bool, 
-    add_noise: bool, noise_amount: float, early_stopping_patience: int, 
-    disable_early_stopping: bool, weight_decay: float, suppress_warnings: bool, suppress_reading_messages: bool, 
-    discriminator_update_interval: int, label_smoothing_real: float, label_smoothing_fake: float, 
+    data_dir: str, batch_size: int, num_epochs: int, initial_lr_g: float, initial_lr_d: float,
+    use_cuda: bool, checkpoint_dir: str, save_interval: int, accumulation_steps: int, num_stems: int,
+    num_workers: int, cache_dir: str, loss_function_g: nn.Module, loss_function_d: nn.Module,
+    optimizer_name_g: str, optimizer_name_d: str, perceptual_loss_flag: bool, perceptual_loss_weight: float,
+    clip_value: float, scheduler_step_size: int, scheduler_gamma: float, tensorboard_flag: bool,
+    add_noise: bool, noise_amount: float, early_stopping_patience: int,
+    disable_early_stopping: bool, weight_decay: float, suppress_warnings: bool, suppress_reading_messages: bool,
+    discriminator_update_interval: int, label_smoothing_real: float, label_smoothing_fake: float,
     suppress_detailed_logs: bool, stop_flag: torch.Tensor, channel_multiplier: float, segments_per_track: int = 10
 ):
     device = torch.device('cuda' if use_cuda and torch.cuda.is_available() else 'cpu')
@@ -250,18 +255,10 @@ def start_training(
     log_training_parameters(training_params)
 
     try:
-        sample_rate, n_mels, n_fft = detect_parameters_from_cache(cache_dir)
-    except ValueError:
-        sample_rate, n_mels, n_fft = detect_parameters_from_raw_data(data_dir)
-        process_and_cache_dataset(
-            data_dir=data_dir,
-            cache_dir=cache_dir,
-            n_mels=n_mels,
-            n_fft=n_fft,
-            device=device,
-            suppress_reading_messages=suppress_reading_messages
-        )
-        sample_rate, n_mels, n_fft = detect_parameters_from_cache(cache_dir)
+        sample_rate, n_mels, n_fft = detect_parameters(data_dir, cache_dir)
+    except ValueError as e:
+        logger.error(f"Error detecting parameters: {e}")
+        raise
 
     segment_length = 22050  # Adjusted to segment length
 
@@ -310,12 +307,12 @@ def start_training(
             return
 
         if stem_name == "input":
-            continue 
+            continue
 
         start_time = time.time()
 
         train_single_stem(
-            stem_name, train_dataset, val_dataset, training_params, model_params, 
+            stem_name, train_dataset, val_dataset, training_params, model_params,
             sample_rate, n_mels, n_fft, segment_length, stop_flag, suppress_reading_messages
         )
 

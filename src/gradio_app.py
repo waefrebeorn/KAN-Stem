@@ -111,7 +111,7 @@ with gr.Blocks() as demo:
         loss_function_d = gr.Dropdown(label="Discriminator Loss Function", choices=["MSELoss", "L1Loss", "SmoothL1Loss", "BCEWithLogitsLoss", "WassersteinLoss"], value="WassersteinLoss")
         optimizer_name_g = gr.Dropdown(label="Generator Optimizer", choices=["SGD", "Momentum", "Adagrad", "RMSProp", "Adadelta", "Adam"], value="SGD")
         optimizer_name_d = gr.Dropdown(label="Discriminator Optimizer", choices=["SGD", "Momentum", "Adagrad", "RMSProp", "Adadelta", "Adam"], value="RMSProp")
-        perceptual_loss_flag = gr.Checkbox(label="Use Perceptual Loss", value=True)
+        perceptual_loss_flag = gr.Checkbox(label="Use Perceptual Loss", value=False)
         clip_value = gr.Number(label="Gradient Clipping Value", value=1)
         scheduler_step_size = gr.Number(label="Scheduler Step Size", value=10)
         scheduler_gamma = gr.Number(label="Scheduler Gamma", value=0.9)
@@ -129,7 +129,7 @@ with gr.Blocks() as demo:
         perceptual_loss_weight = gr.Number(label="Perceptual Loss Weight", value=0.1)
         suppress_detailed_logs = gr.Checkbox(label="Suppress Detailed Logs", value=False)
         use_cache = gr.Checkbox(label="Use Cache", value=True)
-        optimization_method = gr.Dropdown(label="Optimization Method", choices=["None", "Optuna"], value="Optuna")
+        optimization_method = gr.Dropdown(label="Optimization Method", choices=["None", "Optuna"], value="None")
         optuna_trials = gr.Number(label="Optuna Trials", value=1)
         channel_multiplier = gr.Number(label="Channel Multiplier", value=1.0)  # Add channel_multiplier input
         start_training_button = gr.Button("Start Training")

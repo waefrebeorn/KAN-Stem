@@ -5,7 +5,6 @@ import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 import logging
 import h5py
-import math
 import gc
 
 logger = logging.getLogger(__name__)
@@ -13,6 +12,11 @@ logger = logging.getLogger(__name__)
 def purge_vram():
     torch.cuda.empty_cache()
     gc.collect()
+
+def log_memory_usage(tag):
+    allocated = torch.cuda.memory_allocated()
+    reserved = torch.cuda.memory_reserved()
+    logger.info(f"[{tag}] Allocated memory: {allocated / (1024 ** 3):.2f} GB, Reserved memory: {reserved / (1024 ** 3):.2f} GB")
 
 def save_to_cache(cache_dir: str, cache_file_name: str, tensor: torch.Tensor):
     os.makedirs(cache_dir, exist_ok=True)
@@ -41,164 +45,12 @@ def clear_cache(cache_dir: str):
         except Exception as e:
             logger.error(f"Error deleting cache file {file_path}: {e}")
 
-class RadialBasisFunction(nn.Module):
-    def __init__(self, grid_min: float = -1.5, grid_max: float = 1.5, num_grids: int = 8, denominator: float = None):
-        super().__init__()
-        grid = torch.linspace(grid_min, grid_max, num_grids, device='cuda')
-        self.register_buffer("grid", grid)
-        self.denominator = denominator or (grid_max - grid_min) / (num_grids - 1)
-
-    def forward(self, x: torch.Tensor, model_cache_dir: str, cache_prefix: str) -> torch.Tensor:
-        cache_file_name = f'{cache_prefix}_rbf.h5'
-        cache_file_path = os.path.join(model_cache_dir, cache_file_name)
-        if os.path.exists(cache_file_path):
-            return load_from_cache(model_cache_dir, cache_file_name, x.device)
-        
-        output = torch.exp(-((x[..., None] - self.grid) / self.denominator) ** 2)
-        save_to_cache(model_cache_dir, cache_file_name, output)
-        purge_vram()
-        return output
-
-class BSRBF_KANLayer(nn.Module):
-    def __init__(self, input_dim: int, output_dim: int, grid_size=5, spline_order=3, base_activation=torch.nn.ReLU, grid_range=[-1.5, 1.5]):
-        super().__init__()
-        self.layernorm = nn.LayerNorm(input_dim).cuda()
-        self.spline_order = spline_order
-        self.grid_size = grid_size
-        self.output_dim = output_dim
-        self.base_activation = base_activation().cuda()
-        self.input_dim = input_dim
-
-        self.base_weight = nn.Parameter(torch.empty(self.output_dim, self.input_dim, device='cuda'))
-        torch.nn.init.kaiming_uniform_(self.base_weight, a=math.sqrt(5))
-
-        self.spline_weight = nn.Parameter(torch.empty(self.output_dim, self.input_dim * (grid_size + spline_order), device='cuda'))
-        torch.nn.init.kaiming_uniform_(self.spline_weight, a=math.sqrt(5))
-
-        self.rbf = RadialBasisFunction(grid_range[0], grid_range[1], grid_size + spline_order).cuda()
-
-        h = (grid_range[1] - grid_range[0]) / grid_size
-        grid = (torch.arange(-spline_order, grid_size + spline_order + 1, device='cuda') * h + grid_range[0]).expand(self.input_dim, -1).contiguous()
-        self.register_buffer("grid", grid)
-
-    def b_splines(self, x: torch.Tensor, model_cache_dir: str, cache_prefix: str) -> torch.Tensor:
-        assert x.dim() == 3 and x.size(2) == self.input_dim
-        cache_file_name = f'{cache_prefix}_bsplines.h5'
-        cache_file_path = os.path.join(model_cache_dir, cache_file_name)
-        if os.path.exists(cache_file_path):
-            return load_from_cache(model_cache_dir, cache_file_name, x.device)
-        
-        grid: torch.Tensor = self.grid
-        x = x.unsqueeze(-1)
-        bases = ((x >= grid[:, :-1]) & (x < grid[:, 1:])).to(x.dtype)
-        for k in range(1, self.spline_order + 1):
-            bases = ((x - grid[:, : -(k + 1)]) / (grid[:, k:-1] - grid[:, : -(k + 1)]) * bases[:, :, :, :-1]) + \
-                    ((grid[:, k + 1:] - x) / (grid[:, k + 1:] - grid[:, 1:(-k)]) * bases[:, :, :, 1:])
-        assert bases.size() == (x.size(0), x.size(1), self.input_dim, self.grid_size + self.spline_order)
-        save_to_cache(model_cache_dir, cache_file_name, bases)
-        purge_vram()
-        return bases.contiguous()
-
-    def forward(self, x: torch.Tensor, model_cache_dir: str, cache_prefix: str) -> torch.Tensor:
-        x = self.layernorm(x)
-        base_output = F.linear(self.base_activation(x), self.base_weight)
-
-        bs_output = self.b_splines(x, model_cache_dir, cache_prefix).view(x.size(0), x.size(1), -1)
-        rbf_output = self.rbf(x, model_cache_dir, cache_prefix).view(x.size(0), x.size(1), -1)
-        bsrbf_output = bs_output + rbf_output
-        bsrbf_output = F.linear(bsrbf_output, self.spline_weight)
-
-        purge_vram()
-        return base_output + bsrbf_output
-
-class AttentionLayer(nn.Module):
-    def __init__(self, channels, reduction=16):
-        super(AttentionLayer, self).__init__()
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.fc = nn.Sequential(
-            nn.Linear(channels, channels // reduction),
-            nn.ReLU(inplace=True),
-            nn.Linear(channels // reduction, channels),
-            nn.Sigmoid()
-        ).cuda()
-
-    def forward(self, x: torch.Tensor, model_cache_dir: str, cache_prefix: str) -> torch.Tensor:
-        cache_file_name = f'{cache_prefix}_attention.h5'
-        cache_file_path = os.path.join(model_cache_dir, cache_file_name)
-        if os.path.exists(cache_file_path):
-            return load_from_cache(model_cache_dir, cache_file_name, x.device)
-
-        b, c, _, _ = x.size()
-        y = self.avg_pool(x).view(b, c)
-        y = self.fc(y).view(b, c, 1, 1)
-        output = x * y
-
-        save_to_cache(model_cache_dir, cache_file_name, output)
-        purge_vram()
-        return output
-
-class ResidualBlock(nn.Module):
-    def __init__(self, channels, dilation_rate, grid_size=5, spline_order=3):
-        super(ResidualBlock, self).__init__()
-        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=dilation_rate, dilation=dilation_rate, bias=False).cuda()
-        self.bn1 = nn.InstanceNorm2d(channels).cuda()
-        self.conv2 = nn.Conv2d(channels, channels, kernel_size=1, bias=False).cuda()
-        self.bn2 = nn.InstanceNorm2d(channels).cuda()
-        self.dropout = nn.Dropout(p=0.1).cuda()
-
-        self.bsrbf_layer = BSRBF_KANLayer(channels, channels, grid_size, spline_order).cuda()
-
-    def forward(self, x: torch.Tensor, model_cache_dir: str, cache_prefix: str, chunk_size: int = 10) -> torch.Tensor:
-        residual = x
-        batch_size = x.size(0)
-        results = []
-
-        for i in range(0, batch_size, chunk_size):
-            x_chunk = x[i:i + chunk_size]
-            cache_file_name = f'{cache_prefix}_residual_{i}.h5'
-            cache_file_path = os.path.join(model_cache_dir, cache_file_name)
-
-            if os.path.exists(cache_file_path):
-                x_chunk = load_from_cache(model_cache_dir, cache_file_name, x.device)
-            else:
-                x_chunk = F.relu(self.bn1(self.conv1(x_chunk)))
-                x_chunk = self.bn2(self.conv2(x_chunk))
-                x_chunk = self.dropout(x_chunk)
-                x_chunk += self.bsrbf_layer(residual[i:i + chunk_size].flatten(2).transpose(1, 2), model_cache_dir, f'{cache_prefix}_bsrbf_{i}').transpose(1, 2).view_as(x_chunk)
-                x_chunk = F.relu(x_chunk)
-                save_to_cache(model_cache_dir, cache_file_name, x_chunk)
-
-            results.append(x_chunk)
-
-        purge_vram()
-        return torch.cat(results, dim=0)
-
-class ContextAggregationNetwork(nn.Module):
-    def __init__(self, channels):
-        super(ContextAggregationNetwork, self).__init__()
-        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False).cuda()
-        self.bn1 = nn.InstanceNorm2d(channels).cuda()
-        self.conv2 = nn.Conv2d(channels, channels, kernel_size=1, bias=False).cuda()
-        self.bn2 = nn.InstanceNorm2d(channels).cuda()
-
-    def forward(self, x: torch.Tensor, model_cache_dir: str, cache_prefix: str) -> torch.Tensor:
-        cache_file_name = f'{cache_prefix}_context.h5'
-        cache_file_path = os.path.join(model_cache_dir, cache_file_name)
-        if os.path.exists(cache_file_path):
-            return load_from_cache(model_cache_dir, cache_file_name, x.device)
-
-        x = F.relu(self.bn1(self.conv1(x)))
-        x = F.relu(self.bn2(self.conv2(x)))
-
-        save_to_cache(model_cache_dir, cache_file_name, x)
-        purge_vram()
-        return x
-
 class MemoryEfficientStemSeparationModel(nn.Module):
-    def __init__(self, in_channels=3, out_channels=1, n_mels=32, target_length=22050):
+    def __init__(self, in_channels=3, out_channels=3, n_mels=32, target_length=22050):
         super(MemoryEfficientStemSeparationModel, self).__init__()
         self.n_mels = n_mels
         self.target_length = target_length
+        self.scaler = torch.cuda.amp.GradScaler()
 
         self.channel_processors = nn.ModuleList([
             nn.Sequential(
@@ -228,7 +80,7 @@ class MemoryEfficientStemSeparationModel(nn.Module):
             self.deconv_block(128, 64, kernel_size=3, stride=2, padding=1, output_padding=1),
             self.deconv_block(64, 32, kernel_size=3, stride=2, padding=1, output_padding=1)
         ])
-        self.final_conv = nn.Conv2d(32, out_channels, kernel_size=1).cuda()
+        self.final_conv = nn.Conv2d(32, 3, kernel_size=1).cuda()
 
     @staticmethod
     def conv_block(in_channels, out_channels, kernel_size, stride, padding):
@@ -246,55 +98,101 @@ class MemoryEfficientStemSeparationModel(nn.Module):
             nn.LeakyReLU(0.2, inplace=True)
         ).cuda()
 
-    def _forward_encoder(self, x: torch.Tensor, model_cache_dir: str, cache_prefix: str) -> torch.Tensor:
-        processed_segments = []
-        for idx, segment in enumerate(x):
-            cache_file_name = f'{cache_prefix}_encoder_{idx}.h5'
-            cache_file_path = os.path.join(model_cache_dir, cache_file_name)
-            if os.path.exists(cache_file_path):
-                processed_segment = load_from_cache(model_cache_dir, cache_file_name, segment.device)
-            else:
-                segment = segment.squeeze(1)
-                processed_channels = [checkpoint(channel_processor, segment[i:i+1, :, :].unsqueeze(0), use_reentrant=False) for i, channel_processor in enumerate(self.channel_processors)]
-                processed_segment = torch.cat(processed_channels, dim=1)
-                save_to_cache(model_cache_dir, cache_file_name, processed_segment)
-            processed_segments.append(processed_segment)
-        x = torch.cat(processed_segments, dim=0)
-        purge_vram()
+    def _reshape_input_tensor(self, x: torch.Tensor) -> torch.Tensor:
+        batch_size, segments, _, in_channels, n_mels, length = x.shape
+        x = x.view(batch_size * segments, in_channels, n_mels, length)
         return x
 
-    def _forward_combiner(self, x: torch.Tensor, model_cache_dir: str, cache_prefix: str) -> torch.Tensor:
-        cache_file_name = f'{cache_prefix}_combiner.h5'
+    def _reshape_output_tensor(self, x: torch.Tensor, original_segments: int) -> torch.Tensor:
+        if x.shape[0] == 1:
+            x = x.squeeze(0)
+        if x.dim() == 4:
+            batch_size, in_channels, n_mels, length = x.shape
+            x = x.view(1, original_segments, 1, in_channels, n_mels, length)
+        elif x.dim() == 5:
+            batch_size, segments, in_channels, n_mels, length = x.shape
+            x = x.view(batch_size // original_segments, original_segments, 1, in_channels, n_mels, length)
+        return x
+
+    def _forward_encoder(self, x: torch.Tensor, model_cache_dir: str, cache_prefix: str, identifier: str) -> torch.Tensor:
+        log_memory_usage("Before Encoder")
+        logger.info(f"Encoder input shape: {x.shape}")
+        cache_file_name = f'{cache_prefix}_encoder_{identifier}.h5'
+        cache_file_path = os.path.join(model_cache_dir, cache_file_name)
+        if os.path.exists(cache_file_path):
+            x = load_from_cache(model_cache_dir, cache_file_name, x.device)
+        else:
+            x = self._reshape_input_tensor(x)
+            processed_segments = []
+            for idx in range(x.size(0)):
+                segment = x[idx:idx+1, :, :, :]
+                processed_channels = [checkpoint(channel_processor, segment[:, i:i+1, :, :], use_reentrant=False) for i, channel_processor in enumerate(self.channel_processors)]
+                processed_segment = torch.cat(processed_channels, dim=1)
+                processed_segments.append(processed_segment)
+            x = torch.cat(processed_segments, dim=0)
+            save_to_cache(model_cache_dir, cache_file_name, x)
+        logger.info(f"Encoder output shape: {x.shape}")
+        purge_vram()
+        log_memory_usage("After Encoder")
+        return x
+
+    def _forward_combiner(self, x: torch.Tensor, model_cache_dir: str, cache_prefix: str, identifier: str) -> torch.Tensor:
+        log_memory_usage("Before Combiner")
+        logger.info(f"Combiner input shape: {x.shape}")
+        cache_file_name = f'{cache_prefix}_combiner_{identifier}.h5'
         cache_file_path = os.path.join(model_cache_dir, cache_file_name)
         if os.path.exists(cache_file_path):
             x = load_from_cache(model_cache_dir, cache_file_name, x.device)
         else:
             x = checkpoint(self.combiner, x, use_reentrant=False)
             save_to_cache(model_cache_dir, cache_file_name, x)
+        logger.info(f"Combiner output shape: {x.shape}")
         purge_vram()
+        log_memory_usage("After Combiner")
         return x
 
-    def _forward_decoder(self, x: torch.Tensor, model_cache_dir: str, cache_prefix: str) -> torch.Tensor:
+    def _forward_decoder(self, x: torch.Tensor, model_cache_dir: str, cache_prefix: str, identifier: str) -> torch.Tensor:
+        log_memory_usage("Before Decoder")
+        logger.info(f"Decoder input shape: {x.shape}")
         for idx, upsampler_layer in enumerate(self.upsampler):
-            cache_file_name = f'{cache_prefix}_decoder_{idx}.h5'
+            cache_file_name = f'{cache_prefix}_decoder_{idx}_{identifier}.h5'
             cache_file_path = os.path.join(model_cache_dir, cache_file_name)
             if os.path.exists(cache_file_path):
                 x = load_from_cache(model_cache_dir, cache_file_name, x.device)
             else:
-                x = checkpoint(upsampler_layer, x, use_reentrant=False)
+                with torch.cuda.amp.autocast():
+                    x = checkpoint(upsampler_layer, x, use_reentrant=False)
                 save_to_cache(model_cache_dir, cache_file_name, x)
+                logger.info(f"Decoder layer {idx} output shape: {x.shape}")
+
+        if x.shape[-1] > self.target_length:
+            x = x[..., :self.target_length]
+            logger.info(f"Adjusted decoder layer output shape: {x.shape}")
+
         purge_vram()
+        log_memory_usage("After Decoder")
         return x
 
-    def forward(self, x, model_cache_dir: str, cache_prefix: str):
+    def forward(self, x, model_cache_dir: str, cache_prefix: str, identifier: str):
+        log_memory_usage("Start Forward")
+        original_segments = x.shape[1] if x.dim() == 6 else 1 
         if x.dim() == 5:
-            x = x.squeeze(1)
-        x = self._forward_encoder(x, model_cache_dir, cache_prefix)
-        x = self._forward_combiner(x, model_cache_dir, cache_prefix)
-        x = self._forward_decoder(x, model_cache_dir, cache_prefix)
-        x = self.final_conv(x)
-        # Ensure output matches the target length
-        x = x[:, :, :, :self.target_length]
+            x = self._reshape_input_tensor(x)
+        with torch.cuda.amp.autocast():
+            x = self._forward_encoder(x, model_cache_dir, cache_prefix, identifier)
+            x = self._forward_combiner(x, model_cache_dir, cache_prefix, identifier)
+            x = self._forward_decoder(x, model_cache_dir, cache_prefix, identifier)
+            x = self.final_conv(x)
+            logger.info(f"Final conv output shape: {x.shape}")
+
+        if x.shape[-1] > self.target_length:
+            x = x[..., :self.target_length]
+
+        logger.info(f"Output shape before reshape: {x.shape}")
+        x = self._reshape_output_tensor(x, original_segments)
+        logger.info(f"Output shape after reshape: {x.shape}")
+
+        log_memory_usage("End Forward")
         purge_vram()
         return x
 
@@ -322,6 +220,8 @@ class KANDiscriminator(nn.Module):
     def forward(self, x: torch.Tensor, model_cache_dir: str, cache_prefix: str, chunk_size: int = 10) -> torch.Tensor:
         if x.dim() == 3:
             x = x.unsqueeze(1)
+        if x.dim() == 6:  # Adjust this part to handle 6D input properly
+            x = x.squeeze(2)
         if x.dim() > 4:
             raise ValueError(f"Invalid input shape. Expected 3 or 4 dimensions but got {x.dim()}")
 

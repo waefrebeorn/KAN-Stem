@@ -1,5 +1,6 @@
 import os
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import logging
 import soundfile as sf
@@ -11,9 +12,11 @@ from torch.utils.data import Dataset, DataLoader
 import torchaudio
 import torchaudio.transforms as T
 import torch.optim as optim
-import torch.nn as nn  # Make sure this is imported
 from pydub import AudioSegment
+from torchvision.models import mobilenet_v2, MobileNet_V2_Weights
 
+
+logger = logging.getLogger(__name__)
 logger = logging.getLogger(__name__)
 
 def setup_logger(name: str) -> logging.Logger:
@@ -21,42 +24,40 @@ def setup_logger(name: str) -> logging.Logger:
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     return logger
 
-def detect_parameters_from_cache(cache_dir: str, default_n_mels: int = 32, default_n_fft: int = 1024) -> Tuple[int, int, int]:
+def detect_parameters(data_dir: str, cache_dir: str, default_n_mels: int = 32, default_n_fft: int = 1024) -> Tuple[int, int, int]:
     sample_rates = []
-    for file_name in os.listdir(cache_dir):
-        if file_name.endswith('.h5'):
-            file_path = os.path.join(cache_dir, file_name)
-            try:
-                with h5py.File(file_path, 'r') as f:
-                    sample_rates.append(f.attrs.get('sample_rate', 44100))
-            except Exception as e:
-                logger.error(f"Error analyzing cache file {file_path}: {e}")
-    
-    if not sample_rates:
-        raise ValueError("No valid cache files found in the specified directory")
 
-    logger.info(f"Found {len(sample_rates)} valid cache files")
-    avg_sample_rate = int(np.mean(sample_rates))
-    n_mels = min(default_n_mels, int(avg_sample_rate / 100))
-    n_fft = min(default_n_fft, int(avg_sample_rate * 0.025))
-    return avg_sample_rate, n_mels, n_fft
-
-def detect_parameters_from_raw_data(data_dir: str, default_n_mels: int = 32, default_n_fft: int = 1024) -> Tuple[int, int, int]:
-    sample_rates = []
-    for root, _, files in os.walk(data_dir):
+    logger.info(f"Scanning cache directory: {cache_dir}")
+    for root, _, files in os.walk(cache_dir):
         for file_name in files:
-            if file_name.endswith('.ogg'):
+            if file_name.endswith('.h5'):
                 file_path = os.path.join(root, file_name)
+                logger.info(f"Found cache file: {file_path}")
+                try:
+                    with h5py.File(file_path, 'r') as f:
+                        sample_rates.append(f.attrs.get('sample_rate', 44100))
+                        logger.info(f"Sample rate from cache: {sample_rates[-1]}")
+                except Exception as e:
+                    logger.error(f"Error analyzing cache file {file_path}: {e}")
+
+    if not sample_rates:
+        logger.info(f"No valid cache files found, scanning data directory: {data_dir}")
+        for file_name in os.listdir(data_dir):
+            if file_name.endswith('.ogg'):
+                file_path = os.path.join(data_dir, file_name)
+                logger.info(f"Found raw audio file: {file_path}")
                 try:
                     info = sf.info(file_path)
                     sample_rates.append(info.samplerate)
+                    logger.info(f"Sample rate from raw audio: {sample_rates[-1]}")
                 except Exception as e:
                     logger.error(f"Error analyzing audio file {file_path}: {e}")
 
     if not sample_rates:
-        raise ValueError("No valid raw audio files found in the specified directory")
+        logger.error("No valid cache or raw audio files found in the specified directories")
+        raise ValueError("No valid cache or raw audio files found in the specified directories")
 
-    logger.info(f"Found {len(sample_rates)} valid raw audio files")
+    logger.info(f"Found {len(sample_rates)} valid audio files")
     avg_sample_rate = int(np.mean(sample_rates))
     n_mels = min(default_n_mels, int(avg_sample_rate / 100))
     n_fft = min(default_n_fft, int(avg_sample_rate * 0.025))
@@ -75,7 +76,7 @@ class StemSeparationDataset(Dataset):
         device: torch.device, suppress_warnings: bool = False,
         suppress_reading_messages: bool = False, num_workers: int = 1, stem_names: List[str] = None,
         stop_flag: Any = None, device_prep: torch.device = None, segments_per_track: int = 10,
-        file_ids: List[Dict[str, Any]] = None
+        file_ids: List[Dict[str, Any]] = None, stem_name: str = None  # Added stem_name parameter
     ):
         self.data_dir = data_dir
         self.n_mels = n_mels
@@ -89,7 +90,9 @@ class StemSeparationDataset(Dataset):
         self.stop_flag = stop_flag
         self.device_prep = device_prep or device
         self.segments_per_track = segments_per_track
+        self.stem_name = stem_name  # Added stem_name attribute
 
+        # Detect parameters only once during initialization
         self.sample_rate, _, _ = self._detect_parameters()
         self.stem_names = stem_names or self._infer_stem_names()
         self.file_ids = file_ids if file_ids is not None else self._get_file_ids()
@@ -102,10 +105,7 @@ class StemSeparationDataset(Dataset):
         self.amplitude_to_db = T.AmplitudeToDB().to(self.device_prep)
 
     def _detect_parameters(self):
-        try:
-            return detect_parameters_from_cache(self.cache_dir)
-        except ValueError:
-            return detect_parameters_from_raw_data(self.data_dir)
+        return detect_parameters(self.data_dir, self.cache_dir)
 
     def _infer_stem_names(self) -> List[str]:
         stem_files = os.listdir(self.data_dir)
@@ -201,9 +201,13 @@ class StemSeparationDataset(Dataset):
         input_data = self.process_and_cache_file(file_id['input_file'], identifier, 'input')
 
         target_data = {}
-        for stem in self.stem_names:
-            target_cache = self._get_cache_path(stem, identifier)
-            target_data[stem] = self.process_and_cache_file(file_id['target_files'][stem], identifier, stem)
+        if self.stem_name:
+            target_cache = self._get_cache_path(self.stem_name, identifier)
+            target_data[self.stem_name] = self.process_and_cache_file(file_id['target_files'][self.stem_name], identifier, self.stem_name)
+        else:
+            for stem in self.stem_names:
+                target_cache = self._get_cache_path(stem, identifier)
+                target_data[stem] = self.process_and_cache_file(file_id['target_files'][stem], identifier, stem)
 
         return {"input": input_data, "target": target_data, "file_id": identifier}
 
@@ -226,7 +230,7 @@ def collate_fn(batch: List[Dict[str, torch.Tensor]]) -> Dict[str, Union[torch.Te
     return {'input': inputs, 'target': targets, 'file_paths': file_ids}
 
 def create_dataloader(dataset: StemSeparationDataset, batch_size: int, shuffle: bool = True) -> DataLoader:
-    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, collate_fn=collate_fn, num_workers=4, pin_memory=True)
+    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle, collate_fn=collate_fn, num_workers=4, pin_memory=False)  # Set pin_memory to False
 
 def log_tensor_dimensions(tensor: torch.Tensor, message: str):
     logger.info(f"{message} - Tensor shape: {tensor.shape}")
@@ -274,55 +278,6 @@ def process_and_cache_dataset(
     val_file_ids = dataset.file_ids[split_index:]
     return train_file_ids, val_file_ids
 
-def integrated_dynamic_batching(data_dir: str, cache_dir: str, n_mels: int, n_fft: int, target_length: int, batch_size: int, device: torch.device, stem_name: str, file_ids: List[Dict[str, Any]], shuffle: bool = False):
-    dataset = StemSeparationDataset(
-        data_dir=data_dir,
-        n_mels=n_mels,
-        target_length=target_length,
-        n_fft=n_fft,
-        cache_dir=cache_dir,
-        device=device,
-        file_ids=file_ids
-    )
-    
-    if shuffle:
-        random.shuffle(file_ids)
-
-    for i in range(0, len(file_ids), batch_size):
-        batch_file_ids = file_ids[i:i + batch_size]
-
-        warmed_inputs = []
-        warmed_targets = []
-        warmed_file_paths = []
-
-        for file_id in batch_file_ids:
-            identifier = file_id['identifier']
-            input_cache_file_name = f"input_{identifier}_{n_mels}_{target_length}_{n_fft}.h5"
-            target_cache_file_name = f"{stem_name}_{identifier}_{n_mels}_{target_length}_{n_fft}.h5"
-            input_cache_file_path = os.path.join(cache_dir, input_cache_file_name)
-            target_cache_file_path = os.path.join(cache_dir, target_cache_file_name)
-
-            if os.path.exists(input_cache_file_path) and os.path.exists(target_cache_file_path):
-                logger.info(f"Cache files found for {identifier}. Skipping processing.")
-            else:
-                logger.warning(f"Cache files not found for {identifier}. Processing now.")
-                input_file_path = os.path.join(data_dir, f'example_{identifier}.ogg')
-                dataset.process_and_cache_file(input_file_path, identifier, "input")
-
-                target_file_path = os.path.join(data_dir, f'{stem_name}_{identifier}.ogg')
-                dataset.process_and_cache_file(target_file_path, identifier, stem_name)
-
-            data = load_from_cache(input_cache_file_path, device)
-            warmed_inputs.append(data['input'])
-            warmed_targets.append(load_from_cache(target_cache_file_path, device)['input'])
-            warmed_file_paths.append(identifier)
-
-        yield {
-            'input': torch.stack(warmed_inputs),
-            'target': {stem_name: torch.stack(warmed_targets)},
-            'file_paths': warmed_file_paths
-        }
-
 def compute_sdr(true: torch.Tensor, pred: torch.Tensor) -> torch.Tensor:
     noise = true - pred
     s_true = torch.sum(true ** 2, dim=[1, 2, 3])
@@ -365,17 +320,35 @@ def gradient_penalty(discriminator: nn.Module, real_data: torch.Tensor, fake_dat
     return penalty
 
 class PerceptualLoss(nn.Module):
-    def __init__(self, feature_extractor: nn.Module, layer_weights: List[float] = None):
+    def __init__(self, sample_rate, n_fft, n_mels):
         super(PerceptualLoss, self).__init__()
-        self.feature_extractor = feature_extractor
-        self.layer_weights = layer_weights if layer_weights is not None else [1.0] * len(self.feature_extractor)
+        self.feature_extractor = mobilenet_v2(weights=MobileNet_V2_Weights.IMAGENET1K_V1).features.cuda().eval()
+        for param in self.feature_extractor.parameters():
+            param.requires_grad = False  # Freeze the weights
 
-    def forward(self, y_true: torch.Tensor, y_pred: torch.Tensor) -> torch.Tensor:
-        loss = 0.0
-        features_true = self.feature_extractor(y_true)
+        self.channel_expander = nn.Conv2d(1, 3, kernel_size=1, stride=1, padding=0).cuda()
+        self.sample_rate = sample_rate
+        self.n_fft = n_fft
+        self.n_mels = n_mels
+
+    def forward(self, y_pred, y_true):
+        # Remove extra dimensions
+        y_pred = y_pred.squeeze(3).squeeze(2)
+        y_true = y_true.squeeze(3).squeeze(2)
+
+        # Ensure tensors have the correct shape
+        y_pred = y_pred.view(-1, 1, y_pred.size(2), y_pred.size(3))  
+        y_true = y_true.view(-1, 1, y_true.size(2), y_true.size(3))  
+
+        # Expand channels to 3
+        y_pred = self.channel_expander(y_pred)
+        y_true = self.channel_expander(y_true)
+
+        # Feature extraction
         features_pred = self.feature_extractor(y_pred)
-        for weight, feature_true, feature_pred in zip(self.layer_weights, features_true, features_pred):
-            loss += weight * F.l1_loss(feature_true, feature_pred)
+        features_true = self.feature_extractor(y_true)
+
+        loss = F.l1_loss(features_pred, features_true)
         return loss
 
 def log_training_parameters(params: Dict[str, Any]):
