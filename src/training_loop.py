@@ -25,7 +25,6 @@ def validate_tensor_shapes(tensor1, tensor2, message=""):
         raise ValueError(f"Shape mismatch: {tensor1.shape} vs {tensor2.shape}. {message}")
 
 def reshape_for_discriminator(x):
-    # Reshape the tensor to match the expected input shape for the discriminator
     return x.view(x.size(0), -1)
 
 def train_single_stem(
@@ -66,7 +65,6 @@ def train_single_stem(
     early_stopping_counter = 0
     best_val_loss = None
 
-    # Initialize PerceptualLoss with MobileNetV2
     perceptual_loss_fn = PerceptualLoss(sample_rate, n_fft, n_mels).to(device)
 
     for epoch in range(training_params['num_epochs']):
@@ -91,11 +89,9 @@ def train_single_stem(
             input_file_path = os.path.join(dataset.data_dir, file_id['input_file'])
             target_file_path = os.path.join(dataset.data_dir, file_id['target_files'][stem_name])
 
-            # Log file paths for debugging
             logger.info(f"Input file path: {input_file_path}")
             logger.info(f"Target file path: {target_file_path}")
 
-            # Ensure files exist before proceeding
             if not os.path.exists(input_file_path):
                 logger.error(f"Input file does not exist: {input_file_path}")
                 continue
@@ -103,7 +99,6 @@ def train_single_stem(
                 logger.error(f"Target file does not exist: {target_file_path}")
                 continue
 
-            # Load input and target data for the current file_id
             input_data = dataset.process_and_cache_file(input_file_path, file_id['identifier'], 'input')
             target_data = dataset.process_and_cache_file(target_file_path, file_id['identifier'], stem_name)
 
@@ -114,19 +109,13 @@ def train_single_stem(
             inputs = input_data.unsqueeze(0)
             targets = target_data.unsqueeze(0)
 
-            # Print the shapes of the loaded tensors
             print(f"Input tensor shape: {inputs.shape}")
             print(f"Target tensor shape: {targets.shape}")
 
             with autocast():
                 outputs = model(inputs.to(device), model_cache_dir, cache_prefix, file_id['identifier'], update_cache=False)
-
-                # Print the shape of the model output
                 print(f"Model output tensor shape: {outputs.shape}")
-
-                # Validate tensor shapes before loss calculation
                 validate_tensor_shapes(outputs, targets, "Before computing loss_g")
-
                 loss_g = model_params['loss_function_g'](outputs, targets)
 
                 if model_params['perceptual_loss_flag'] and (i % 5 == 0):
@@ -150,11 +139,10 @@ def train_single_stem(
 
             scaler_d.scale(loss_d).backward()
 
-            scaler_d.step(optimizer_d)
-            scaler_d.update()
-            optimizer_d.zero_grad(set_to_none=True)
-
             if (i + 1) % training_params['accumulation_steps'] == 0:
+                scaler_d.step(optimizer_d)
+                scaler_d.update()
+                optimizer_d.zero_grad(set_to_none=True)
                 scaler_g.step(optimizer_g)
                 scaler_g.update()
                 optimizer_g.zero_grad(set_to_none=True)
@@ -180,11 +168,9 @@ def train_single_stem(
                 input_file_path = os.path.join(val_dataset.data_dir, file_id['input_file'])
                 target_file_path = os.path.join(val_dataset.data_dir, file_id['target_files'][stem_name])
 
-                # Log file paths for debugging
                 logger.info(f"Validation input file path: {input_file_path}")
                 logger.info(f"Validation target file path: {target_file_path}")
 
-                # Ensure files exist before proceeding
                 if not os.path.exists(input_file_path):
                     logger.error(f"Validation input file does not exist: {input_file_path}")
                     continue
@@ -204,21 +190,15 @@ def train_single_stem(
 
                 with autocast():
                     outputs = model(inputs.to(device), model_cache_dir, cache_prefix, file_id['identifier'], update_cache=False)
-
-                    # Print the shape of the model output during validation
                     print(f"Validation - Model output tensor shape: {outputs.shape}")
-
-                    # Validate tensor shapes before loss calculation during validation
                     validate_tensor_shapes(outputs, targets, "During validation before computing loss")
-
                     loss = model_params['loss_function_g'](outputs, targets)
                     val_loss += loss.item()
 
-                    # Calculate SDR, SIR, SAR metrics
                     sdr, sir, sar = compute_sdr(targets.cpu(), outputs.cpu()), compute_sir(targets.cpu(), outputs.cpu()), compute_sar(targets.cpu(), outputs.cpu())
-                    val_sdr += sdr.mean().item()  # Reduce tensor to scalar
-                    val_sir += sir.mean().item()  # Reduce tensor to scalar
-                    val_sar += sar.mean().item()  # Reduce tensor to scalar
+                    val_sdr += sdr.mean().item()
+                    val_sir += sir.mean().item()
+                    val_sar += sar.mean().item()
 
         avg_val_loss = val_loss / len(val_dataset)
         avg_val_sdr = val_sdr / len(val_dataset)
@@ -258,7 +238,6 @@ def train_single_stem(
         scheduler_g.step(avg_val_loss)
         scheduler_d.step(avg_val_loss)
 
-        # Update the cache with the new model parameters
         for file_id in dataset.file_ids:
             input_file_path = os.path.join(dataset.data_dir, file_id['input_file'])
             if os.path.exists(input_file_path):
@@ -282,8 +261,8 @@ def start_training(
     add_noise: bool, noise_amount: float, early_stopping_patience: int,
     disable_early_stopping: bool, weight_decay: float, suppress_warnings: bool, suppress_reading_messages: bool,
     discriminator_update_interval: int, label_smoothing_real: float, label_smoothing_fake: float,
-    suppress_detailed_logs: bool, stop_flag: torch.Tensor, channel_multiplier: float, segments_per_track: int = 10,
-    update_cache: bool = False  # Add this parameter to the function signature
+    suppress_detailed_logs: bool, stop_flag: torch.Tensor, channel_multiplier: float, segments_per_track: int = 5,
+    use_cache: bool = True, update_cache: bool = False
 ):
     device = torch.device('cuda' if use_cuda and torch.cuda.is_available() else 'cpu')
     training_params = {
@@ -312,7 +291,8 @@ def start_training(
         'label_smoothing_fake': label_smoothing_fake,
         'suppress_detailed_logs': suppress_detailed_logs,
         'segments_per_track': segments_per_track,
-        'update_cache': update_cache  # Add this line to pass update_cache parameter
+        'use_cache': use_cache,
+        'update_cache': update_cache
     }
     model_params = {
         'optimizer_name_g': optimizer_name_g,
@@ -334,7 +314,7 @@ def start_training(
         logger.error(f"Error detecting parameters: {e}")
         raise
 
-    segment_length = 22050  # Adjusted to segment length
+    segment_length = 22050
 
     dataset = StemSeparationDataset(
         data_dir=data_dir,
@@ -435,6 +415,7 @@ if __name__ == '__main__':
         suppress_detailed_logs=False,
         stop_flag=stop_flag,
         channel_multiplier=2,
-        segments_per_track=10,
-        update_cache=True  # Add this line to pass update_cache parameter
+        segments_per_track=5,
+        use_cache=True,
+        update_cache=True
     )

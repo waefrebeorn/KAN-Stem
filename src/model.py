@@ -1,12 +1,12 @@
 import os
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 import logging
 import h5py
 import gc
 import math
+import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
 
@@ -167,6 +167,20 @@ class ContextAggregationNetwork(nn.Module):
         purge_vram()
         return x
 
+class DepthwiseSeparableConv(nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1):
+        super(DepthwiseSeparableConv, self).__init__()
+        self.depthwise = nn.Conv2d(in_channels, in_channels, kernel_size=kernel_size, stride=stride, padding=padding, groups=in_channels, bias=False)
+        self.pointwise = nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False)
+        self.bn = nn.BatchNorm2d(out_channels)
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        x = self.depthwise(x)
+        x = self.pointwise(x)
+        x = self.bn(x)
+        return self.relu(x)
+
 class MemoryEfficientStemSeparationModel(nn.Module):
     def __init__(self, in_channels=3, out_channels=3, n_mels=32, target_length=22050):
         super(MemoryEfficientStemSeparationModel, self).__init__()
@@ -176,23 +190,15 @@ class MemoryEfficientStemSeparationModel(nn.Module):
 
         self.channel_processors = nn.ModuleList([
             nn.Sequential(
-                nn.Conv2d(1, 32, kernel_size=3, stride=1, padding=1),
-                nn.BatchNorm2d(32),
-                nn.LeakyReLU(0.2, inplace=True),
-                nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
-                nn.BatchNorm2d(64),
-                nn.LeakyReLU(0.2, inplace=True),
-                nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
-                nn.BatchNorm2d(128),
-                nn.LeakyReLU(0.2, inplace=True),
-                nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
-                nn.BatchNorm2d(256),
-                nn.LeakyReLU(0.2, inplace=True)
+                DepthwiseSeparableConv(1, 32),
+                DepthwiseSeparableConv(32, 64, stride=2),
+                DepthwiseSeparableConv(64, 128, stride=2),
+                DepthwiseSeparableConv(128, 256, stride=2)
             ).cuda() for _ in range(in_channels)
         ])
 
         self.combiner = nn.Sequential(
-            nn.Conv2d(256 * in_channels, 256, kernel_size=3, stride=1, padding=1),
+            DepthwiseSeparableConv(256 * in_channels, 256),
             nn.BatchNorm2d(256),
             nn.LeakyReLU(0.2, inplace=True)
         ).cuda()
@@ -340,12 +346,9 @@ class KANDiscriminator(nn.Module):
 
         self.device = device
 
-        self.conv1 = nn.Conv2d(in_channels, int(out_channels * channel_multiplier), kernel_size=3, padding=1, bias=False).cuda()
-        self.bn1 = nn.InstanceNorm2d(int(out_channels * channel_multiplier)).cuda()
-        self.conv2 = nn.Conv2d(int(out_channels * channel_multiplier), int(out_channels * 2 * channel_multiplier), kernel_size=3, padding=1, bias=False).cuda()
-        self.bn2 = nn.InstanceNorm2d(int(out_channels * 2 * channel_multiplier)).cuda()
-        self.conv3 = nn.Conv2d(int(out_channels * 2 * channel_multiplier), int(out_channels * 4 * channel_multiplier), kernel_size=3, padding=1, bias=False).cuda()
-        self.bn3 = nn.InstanceNorm2d(int(out_channels * 4 * channel_multiplier)).cuda()
+        self.conv1 = DepthwiseSeparableConv(in_channels, int(out_channels * channel_multiplier)).cuda()
+        self.conv2 = DepthwiseSeparableConv(int(out_channels * channel_multiplier), int(out_channels * 2 * channel_multiplier)).cuda()
+        self.conv3 = DepthwiseSeparableConv(int(out_channels * 2 * channel_multiplier), int(out_channels * 4 * channel_multiplier)).cuda()
 
         self.fc1 = None
 
@@ -355,13 +358,13 @@ class KANDiscriminator(nn.Module):
         return x
 
     def _forward_conv_layers(self, x: torch.Tensor) -> torch.Tensor:
-        x = F.relu(self.bn1(self.conv1(x)))
+        x = self.conv1(x)
         purge_vram()
         log_memory_usage("After conv1")
-        x = F.relu(self.bn2(self.conv2(x)))
+        x = self.conv2(x)
         purge_vram()
         log_memory_usage("After conv2")
-        x = F.relu(self.bn3(self.conv3(x)))
+        x = self.conv3(x)
         purge_vram()
         log_memory_usage("After conv3")
         return x
@@ -415,7 +418,7 @@ class KANDiscriminator(nn.Module):
             purge_vram()
         
         return torch.cat(results, dim=0)
-      
+
 def load_model(checkpoint_path: str, in_channels: int, out_channels: int, n_mels: int, target_length: int, device: str = "cuda") -> nn.Module:
     model = MemoryEfficientStemSeparationModel(in_channels, out_channels, n_mels, target_length).to(device)
     model.load_state_dict(torch.load(checkpoint_path, map_location=device))

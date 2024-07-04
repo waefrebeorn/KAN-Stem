@@ -43,7 +43,7 @@ def perform_separation(checkpoints, file_path, n_mels, target_length, n_fft, num
     output_audio = []
 
     for checkpoint_path in checkpoints:
-        model = load_model(checkpoint_path, 1, 64, n_mels, target_length, 1, device)
+        model = load_model(checkpoint_path, 3, 3, n_mels, target_length, device=device)
         model.eval()
         
         with torch.no_grad():
@@ -53,9 +53,9 @@ def perform_separation(checkpoints, file_path, n_mels, target_length, n_fft, num
             
             # Calculate harmonic and percussive content and stack into 4D spectrogram
             spectrogram_np = mel_spectrogram.cpu().detach().numpy()
-            harmonic, percussive = librosa.decompose.hpss(spectrogram_np)
-            harmonic_t = torch.from_numpy(harmonic).to(device)
-            percussive_t = torch.from_numpy(percussive).to(device)
+            harmonic, percussive = librosa.decompose.hpss(spectrogram_np[0])
+            harmonic_t = torch.from_numpy(harmonic).unsqueeze(0).to(device)
+            percussive_t = torch.from_numpy(percussive).unsqueeze(0).to(device)
             
             input_mel = torch.stack([mel_spectrogram, harmonic_t, percussive_t], dim=-1)
             

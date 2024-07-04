@@ -72,7 +72,9 @@ def objective_optuna(trial, gradio_params):
         label_smoothing_real=gradio_params["label_smoothing_real"],
         label_smoothing_fake=gradio_params["label_smoothing_fake"],
         suppress_detailed_logs=gradio_params["suppress_detailed_logs"],
-        stop_flag=stop_flag
+        stop_flag=stop_flag,
+        channel_multiplier=gradio_params["channel_multiplier"],
+        segments_per_track=gradio_params["segments_per_track"]
     )
 
     return 0.0
@@ -84,5 +86,5 @@ def start_optuna_optimization(n_trials, gradio_params):
 
 def trial_dirname_creator(trial):
     """Creates a short and unique directory name for each trial."""
-    trial_hash = hashlib.sha1(trial.trial_id.encode()).hexdigest()
+    trial_hash = hashlib.sha1(str(trial.number).encode()).hexdigest()
     return f"trial_{trial_hash[:8]}"

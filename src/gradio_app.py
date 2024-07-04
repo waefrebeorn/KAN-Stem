@@ -108,10 +108,11 @@ with gr.Blocks() as demo:
         use_cuda = gr.Checkbox(label="Use CUDA", value=True)
         checkpoint_dir = gr.Textbox(label="Checkpoint Directory", value="./checkpoints")
         save_interval = gr.Number(label="Save Interval", value=10)
-        accumulation_steps = gr.Number(label="Accumulation Steps", value=4)
+        accumulation_steps = gr.Number(label="Accumulation Steps", value=1)
         num_stems = gr.Number(label="Number of Stems", value=6)
         num_workers = gr.Number(label="Number of Workers", value=1)
         cache_dir = gr.Textbox(label="Cache Directory", value="./cache")
+        segments_per_track = gr.Number(label="Segments per Track", value=1) 
         loss_function_g = gr.Dropdown(label="Generator Loss Function", choices=["MSELoss", "L1Loss", "SmoothL1Loss", "BCEWithLogitsLoss", "WassersteinLoss"], value="L1Loss")
         loss_function_d = gr.Dropdown(label="Discriminator Loss Function", choices=["MSELoss", "L1Loss", "SmoothL1Loss", "BCEWithLogitsLoss", "WassersteinLoss"], value="WassersteinLoss")
         optimizer_name_g = gr.Dropdown(label="Generator Optimizer", choices=["SGD", "Momentum", "Adagrad", "RMSProp", "Adadelta", "Adam"], value="SGD")
@@ -137,14 +138,14 @@ with gr.Blocks() as demo:
         optimization_method = gr.Dropdown(label="Optimization Method", choices=["None", "Optuna"], value="None")
         optuna_trials = gr.Number(label="Optuna Trials", value=1)
         channel_multiplier = gr.Number(label="Channel Multiplier", value=1.0)
-        update_cache = gr.Checkbox(label="Update Cache", value=True)  # Add update_cache input
+        update_cache = gr.Checkbox(label="Update Cache", value=True)
         start_training_button = gr.Button("Start Training")
         stop_training_button = gr.Button("Stop Training")
         resume_training_button = gr.Button("Resume Training")
         output = gr.Textbox(label="Output")
 
         def start_training_and_log_params(data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval,
-                                          accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
+                                          accumulation_steps, num_stems, num_workers, cache_dir, segments_per_track, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
                                           perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, 
                                           add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages,
                                           discriminator_update_interval, label_smoothing_real, label_smoothing_fake, perceptual_loss_weight, suppress_detailed_logs,
@@ -162,6 +163,7 @@ with gr.Blocks() as demo:
                 "num_stems": num_stems,
                 "num_workers": num_workers,
                 "cache_dir": cache_dir,
+                "segments_per_track": segments_per_track,  
                 "loss_function_g": loss_function_g,
                 "loss_function_d": loss_function_d,
                 "optimizer_name_g": optimizer_name_g,
@@ -184,8 +186,8 @@ with gr.Blocks() as demo:
                 "perceptual_loss_weight": perceptual_loss_weight,
                 "suppress_detailed_logs": suppress_detailed_logs,
                 "use_cache": use_cache,
-                "channel_multiplier": channel_multiplier,  # Add channel_multiplier to the parameters
-                "update_cache": update_cache  # Add update_cache to the parameters
+                "channel_multiplier": channel_multiplier,  # Add channel multiplier to parameters
+                "update_cache": update_cache  # Add update cache to parameters
             }
             log_training_parameters(gradio_params)
             if optimization_method == "Optuna":
@@ -196,13 +198,13 @@ with gr.Blocks() as demo:
                                               perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, add_noise,
                                               noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages,
                                               discriminator_update_interval, label_smoothing_real, label_smoothing_fake, perceptual_loss_weight, suppress_detailed_logs,
-                                              use_cache, channel_multiplier, update_cache)
+                                              use_cache, channel_multiplier, segments_per_track, update_cache)  # Pass segments per track and update cache
 
         start_training_button.click(
             start_training_and_log_params,
             inputs=[
                 data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval,
-                accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
+                accumulation_steps, num_stems, num_workers, cache_dir, segments_per_track, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
                 perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, add_noise, noise_amount, early_stopping_patience,
                 disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages, discriminator_update_interval, label_smoothing_real, 
                 label_smoothing_fake, perceptual_loss_weight, suppress_detailed_logs, optimization_method, optuna_trials, use_cache, channel_multiplier, update_cache
