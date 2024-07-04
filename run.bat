@@ -5,6 +5,7 @@ cd /d %SCRIPT_DIR%
 
 REM Set the environment variable to suppress oneDNN custom operations messages
 set TF_ENABLE_ONEDNN_OPTS=0
+set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True 
 
 REM Check if Python is installed and get the path
 for /f "tokens=*" %%p in ('where python') do (

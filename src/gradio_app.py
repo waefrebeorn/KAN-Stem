@@ -72,11 +72,16 @@ def evaluate_model(input_audio_path, checkpoint_dir, n_mels, target_length, n_ff
 
     for stem in range(num_stems):
         checkpoint_path = os.path.join(checkpoint_dir, f'checkpoint_stem_{stem}.pt')
-        model = load_model(checkpoint_path, 1, 64, n_mels, target_length, 1, device)  # 1 stem per model
+        model = load_model(checkpoint_path, 3, 64, n_mels, target_length, 1, device)  # 3 channels per model (harmonic, percussive, original)
         model.eval()
 
         with torch.no_grad():
-            input_mel = T.MelSpectrogram(sample_rate=sr, n_mels=n_mels, n_fft=n_fft)(input_audio.float()).unsqueeze(0).to(device)
+            mel_spectrogram = T.MelSpectrogram(sample_rate=sr, n_mels=n_mels, n_fft=n_fft)(input_audio.float()).unsqueeze(0).to(device)
+            harmonic, percussive = librosa.decompose.hpss(mel_spectrogram.cpu().numpy())
+            harmonic_t = torch.from_numpy(harmonic).to(device)
+            percussive_t = torch.from_numpy(percussive).to(device)
+            input_mel = torch.stack([mel_spectrogram, harmonic_t, percussive_t], dim=-1)
+
             output_mel = model(input_mel).cpu()
             inverse_mel_transform = T.InverseMelScale(n_stft=n_fft // 2 + 1, n_mels=n_mels)
             griffin_lim_transform = T.GriffinLim(n_fft=n_fft, n_iter=32)
@@ -123,7 +128,7 @@ with gr.Blocks() as demo:
         weight_decay = gr.Number(label="Weight Decay", value=1e-4)
         suppress_warnings = gr.Checkbox(label="Suppress Warnings", value=False)
         suppress_reading_messages = gr.Checkbox(label="Suppress Reading Messages", value=False)
-        discriminator_update_interval = gr.Number(label="Discriminator Update Interval", value=5)
+        discriminator_update_interval = gr.Number(label="Discriminator Update Interval", value=1)
         label_smoothing_real = gr.Slider(label="Label Smoothing Real", minimum=0.7, maximum=0.9, value=0.7, step=0.1)
         label_smoothing_fake = gr.Slider(label="Label Smoothing Fake", minimum=0.1, maximum=0.3, value=0.1, step=0.1)
         perceptual_loss_weight = gr.Number(label="Perceptual Loss Weight", value=0.1)
@@ -218,7 +223,7 @@ with gr.Blocks() as demo:
 
     with gr.Tab("Separation"):
         gr.Markdown("### Perform Separation")
-        checkpoint_dir = gr.Textbox(label="Checkpoint Directory", value="path_to_checkpoint_directory")
+        checkpoint_dir = gr.Textbox(label="Checkpoint Directory", value="./checkpoints")
         file_path = gr.Textbox(label="File Path", value='path_to_input_audio.wav')
         n_mels = gr.Number(label="Number of Mels", value=128)
         target_length = gr.Number(label="Target Length", value=256)
@@ -236,7 +241,7 @@ with gr.Blocks() as demo:
 
     with gr.Tab("Evaluation"):
         gr.Markdown("### Evaluate Model")
-        eval_checkpoint_dir = gr.Textbox(label="Checkpoint Directory", value="path_to_checkpoint_directory")
+        eval_checkpoint_dir = gr.Textbox(label="Checkpoint Directory", value="./checkpoints")
         eval_file_path = gr.Textbox(label="File Path")
         eval_n_mels = gr.Number(label="Number of Mels", value=128)
         eval_target_length = gr.Number(label="Target Length", value=256)

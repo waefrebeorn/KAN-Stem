@@ -11,11 +11,11 @@ warnings.filterwarnings("ignore", message="oneDNN custom operations are on. You 
 def create_model_and_optimizer(device, n_mels, target_length, initial_lr_g, initial_lr_d, 
                                optimizer_name_g, optimizer_name_d, weight_decay):
     # Create the generator model
-    model = MemoryEfficientStemSeparationModel(in_channels=1, out_channels=1, n_mels=n_mels, 
-                         target_length=target_length).to(device)
+    model = MemoryEfficientStemSeparationModel(in_channels=3, out_channels=3, n_mels=n_mels, 
+                                               target_length=target_length).to(device)
 
     # Create the discriminator model
-    discriminator = KANDiscriminator(in_channels=1, out_channels=32, n_mels=n_mels, 
+    discriminator = KANDiscriminator(in_channels=3, out_channels=64, n_mels=n_mels, 
                                      target_length=target_length, device=device).to(device)
 
     # Create the optimizers
@@ -30,8 +30,8 @@ def create_model_and_optimizer(device, n_mels, target_length, initial_lr_g, init
 
 def initialize_model(device, n_mels, target_length):
     """Initializes the generator model only (no discriminator)."""
-    model = MemoryEfficientStemSeparationModel(in_channels=1, out_channels=1, n_mels=n_mels, 
-                         target_length=target_length).to(device)
+    model = MemoryEfficientStemSeparationModel(in_channels=3, out_channels=3, n_mels=n_mels, 
+                                               target_length=target_length).to(device)
     return model
 
 if __name__ == "__main__":

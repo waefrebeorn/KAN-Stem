@@ -24,6 +24,10 @@ def validate_tensor_shapes(tensor1, tensor2, message=""):
         logger.error(f"Shape mismatch: {tensor1.shape} vs {tensor2.shape}. {message}")
         raise ValueError(f"Shape mismatch: {tensor1.shape} vs {tensor2.shape}. {message}")
 
+def reshape_for_discriminator(x):
+    # Reshape the tensor to match the expected input shape for the discriminator
+    return x.view(x.size(0), -1)
+
 def train_single_stem(
     stem_name: str,
     dataset: StemSeparationDataset,
@@ -131,27 +135,24 @@ def train_single_stem(
 
             scaler_g.scale(loss_g).backward()
 
-            # Discriminator Update
-            if (i + 1) % training_params['discriminator_update_interval'] == 0:
-                with autocast():
-                    if training_params['add_noise']:
-                        noise = torch.randn_like(targets, device=device) * training_params['noise_amount']
-                        targets = targets + noise
+            with autocast():
+                if training_params['add_noise']:
+                    noise = torch.randn_like(targets, device=device) * training_params['noise_amount']
+                    targets = targets + noise
 
-                    real_out = discriminator(targets)
-                    fake_out = discriminator(outputs.detach())
+                real_out = discriminator(targets, model_cache_dir, cache_prefix, file_id['identifier'], update_cache=False)
+                fake_out = discriminator(outputs.detach(), model_cache_dir, cache_prefix, f"fake_{file_id['identifier']}", update_cache=False)
 
-                    loss_d_real = model_params['loss_function_d'](real_out, torch.ones_like(real_out) * training_params['label_smoothing_real'])
-                    loss_d_fake = model_params['loss_function_d'](fake_out, torch.zeros_like(fake_out) * training_params['label_smoothing_fake'])
-                    gp = gradient_penalty(discriminator, targets, outputs.detach(), device)
-                    loss_d = (loss_d_real + loss_d_fake) / 2 + gp
+                loss_d_real = model_params['loss_function_d'](real_out, torch.ones_like(real_out) * training_params['label_smoothing_real'])
+                loss_d_fake = model_params['loss_function_d'](fake_out, torch.zeros_like(fake_out) * training_params['label_smoothing_fake'])
+                gp = gradient_penalty(discriminator, targets, outputs.detach(), device)
+                loss_d = (loss_d_real + loss_d_fake) / 2 + gp
 
-                # Scale the discriminator loss unconditionally
-                scaler_d.scale(loss_d).backward()
+            scaler_d.scale(loss_d).backward()
 
-                scaler_d.step(optimizer_d)
-                scaler_d.update()
-                optimizer_d.zero_grad(set_to_none=True)
+            scaler_d.step(optimizer_d)
+            scaler_d.update()
+            optimizer_d.zero_grad(set_to_none=True)
 
             if (i + 1) % training_params['accumulation_steps'] == 0:
                 scaler_g.step(optimizer_g)
@@ -159,12 +160,14 @@ def train_single_stem(
                 optimizer_g.zero_grad(set_to_none=True)
 
             running_loss_g += loss_g.item()
-            running_loss_d += loss_d.item() if 'loss_d' in locals() else 0
+            running_loss_d += loss_d.item()
 
             if (i + 1) % 100 == 0:
                 if model_params['tensorboard_flag']:
                     writer.add_scalar(f'Loss/Generator/{stem_name}', running_loss_g / (i + 1), epoch + 1)
                     writer.add_scalar(f'Loss/Discriminator/{stem_name}', running_loss_d / (i + 1), epoch + 1)
+                print(f"Epoch [{epoch+1}/{training_params['num_epochs']}] Batch [{i+1}/{len(dataset.file_ids)}]")
+                print(f"Generator Loss: {running_loss_g / (i + 1):.4f}, Discriminator Loss: {running_loss_d / (i + 1):.4f}")
                 purge_vram()
 
         model.eval()
@@ -230,6 +233,13 @@ def train_single_stem(
             writer.add_scalar('Loss/Generator_Avg', running_loss_g / len(dataset.file_ids), epoch + 1)
             writer.add_scalar('Loss/Discriminator_Avg', running_loss_d / len(dataset.file_ids), epoch + 1)
 
+        print(f"Epoch [{epoch+1}/{training_params['num_epochs']}]")
+        print(f"Generator Loss (Avg): {running_loss_g / len(dataset.file_ids):.4f}")
+        print(f"Discriminator Loss (Avg): {running_loss_d / len(dataset.file_ids):.4f}")
+        print(f"Validation Loss: {avg_val_loss:.4f}")
+        print(f"SDR: {avg_val_sdr:.4f}, SIR: {avg_val_sir:.4f}, SAR: {avg_val_sar:.4f}")
+        print("-----------------------------------")
+
         if best_val_loss is None or avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             early_stopping_counter = 0
@@ -262,7 +272,7 @@ def train_single_stem(
         writer.close()
 
     logger.info(f"Training completed for stem: {stem_name}")
-   
+
 def start_training(
     data_dir: str, batch_size: int, num_epochs: int, initial_lr_g: float, initial_lr_d: float,
     use_cuda: bool, checkpoint_dir: str, save_interval: int, accumulation_steps: int, num_stems: int,

@@ -377,7 +377,13 @@ def purge_vram():
         torch.cuda.empty_cache()
         logger.info("Successfully purged GPU cache.")
     except Exception as e:
-        logger.error(f"Error purging cache: {e}", exc_info=True)
+        logger.error(f"Error purging GPU cache: {e}", exc_info=True)
+    try:
+        gc.collect()
+        logger.info("Successfully performed garbage collection.")
+    except Exception as e:
+        logger.error(f"Error during garbage collection: {e}", exc_info=True)
+
 
 def load_from_cache(cache_file_path: str, device: torch.device) -> Dict[str, torch.Tensor]:
     try:

@@ -1,11 +1,12 @@
 import os
 import torch
-import torchaudio
+import torch.nn as nn
+import torchaudio.transforms as T
 import logging
 import soundfile as sf
-from torchaudio import transforms as T
-from model import load_model
 import librosa
+from model import load_model
+from utils import purge_vram  # Only importing purge_vram from utils
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +31,7 @@ def write_audio(file_path, data, samplerate):
     except Exception as e:
         logger.error(f"Error writing audio file {file_path}: {e}")
 
-def perform_separation(checkpoints, file_path, n_mels, target_length, n_fft, cache_dir, suppress_reading_messages):
+def perform_separation(checkpoints, file_path, n_mels, target_length, n_fft, num_stems, cache_dir, suppress_reading_messages):
     logger.info("Loading model for separation...")
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -76,14 +77,14 @@ def perform_separation(checkpoints, file_path, n_mels, target_length, n_fft, cac
     return result_paths
 
 if __name__ == '__main__':
-    # Example usage of perform_separation
     checkpoints = ['path_to_checkpoint_1', 'path_to_checkpoint_2']
     file_path = 'path_to_input_audio.wav'
     n_mels = 128
     target_length = 256
     n_fft = 2048
+    num_stems = 6
     cache_dir = './cache'
     suppress_reading_messages = False
     
-    separated_files = perform_separation(checkpoints, file_path, n_mels, target_length, n_fft, cache_dir, suppress_reading_messages)
+    separated_files = perform_separation(checkpoints, file_path, n_mels, target_length, n_fft, num_stems, cache_dir, suppress_reading_messages)
     logger.info(f'Separated files: {separated_files}')
