@@ -137,7 +137,7 @@ with gr.Blocks() as demo:
         use_cache = gr.Checkbox(label="Use Cache", value=True)
         optimization_method = gr.Dropdown(label="Optimization Method", choices=["None", "Optuna"], value="None")
         optuna_trials = gr.Number(label="Optuna Trials", value=1)
-        channel_multiplier = gr.Number(label="Channel Multiplier", value=1.0)
+        channel_multiplier = gr.Number(label="Channel Multiplier", value=0.5)
         update_cache = gr.Checkbox(label="Update Cache", value=True)
         start_training_button = gr.Button("Start Training")
         stop_training_button = gr.Button("Stop Training")

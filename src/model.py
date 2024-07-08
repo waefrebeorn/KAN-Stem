@@ -34,6 +34,7 @@ def save_to_cache(cache_dir: str, cache_file_name: str, tensor: torch.Tensor):
     with h5py.File(cache_file_path, 'w') as f:
         f.create_dataset('tensor', data=tensor.detach().cpu().numpy())
     logger.info(f"Saved tensor shape: {tensor.shape}")
+    purge_vram()
 
 def load_from_cache(cache_dir: str, cache_file_name: str, device: torch.device) -> torch.Tensor:
     cache_file_path = os.path.join(cache_dir, cache_file_name)
@@ -43,6 +44,7 @@ def load_from_cache(cache_dir: str, cache_file_name: str, device: torch.device) 
             raise KeyError(f"Tensor not found in cache file: {cache_file_path}")
         tensor = torch.tensor(f['tensor'][:], device=device).float()
     logger.info(f"Loaded tensor shape: {tensor.shape}")
+    purge_vram()
     return tensor
 
 class RadialBasisFunction(nn.Module):
@@ -52,10 +54,12 @@ class RadialBasisFunction(nn.Module):
         self.register_buffer("grid", grid)
         self.denominator = denominator or (grid_max - grid_min) / (num_grids - 1)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        output = torch.exp(-((x[..., None] - self.grid) / self.denominator) ** 2)
-        purge_vram()
-        return output
+    @staticmethod
+    def forward(x: torch.Tensor) -> torch.Tensor:
+        with torch.cuda.amp.autocast():
+            output = torch.exp(-((x[..., None] - x.grid) / x.denominator) ** 2)
+            purge_vram()
+            return output
 
 class BSRBF_KANLayer(nn.Module):
     def __init__(self, input_dim: int, output_dim: int, grid_size=5, spline_order=3, base_activation=torch.nn.ReLU, grid_range=[-1.5, 1.5]):
@@ -79,29 +83,30 @@ class BSRBF_KANLayer(nn.Module):
         grid = (torch.arange(-spline_order, grid_size + spline_order + 1, device='cuda') * h + grid_range[0]).expand(self.input_dim, -1).contiguous()
         self.register_buffer("grid", grid)
 
-    def b_splines(self, x: torch.Tensor) -> torch.Tensor:
-        assert x.dim() == 3 and x.size(2) == self.input_dim
-        grid: torch.Tensor = self.grid
+    @staticmethod
+    def b_splines(x: torch.Tensor, grid: torch.Tensor, spline_order: int, grid_size: int) -> torch.Tensor:
+        assert x.dim() == 3 and x.size(2) == grid.size(0)
         x = x.unsqueeze(-1)
         bases = ((x >= grid[:, :-1]) & (x < grid[:, 1:])).to(x.dtype)
-        for k in range(1, self.spline_order + 1):
+        for k in range(1, spline_order + 1):
             bases = ((x - grid[:, : -(k + 1)]) / (grid[:, k:-1] - grid[:, : -(k + 1)]) * bases[:, :, :, :-1]) + \
                     ((grid[:, k + 1:] - x) / (grid[:, k + 1:] - grid[:, 1:(-k)]) * bases[:, :, :, 1:])
-        assert bases.size() == (x.size(0), x.size(1), self.input_dim, self.grid_size + self.spline_order)
+        assert bases.size() == (x.size(0), x.size(1), grid.size(0), grid_size + spline_order)
         purge_vram()
         return bases.contiguous()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.layernorm(x)
-        base_output = F.linear(self.base_activation(x), self.base_weight)
+        with torch.cuda.amp.autocast():
+            base_output = F.linear(self.base_activation(x), self.base_weight)
 
-        bs_output = self.b_splines(x).view(x.size(0), x.size(1), -1)
-        rbf_output = self.rbf(x).view(x.size(0), x.size(1), -1)
-        bsrbf_output = bs_output + rbf_output
-        bsrbf_output = F.linear(bsrbf_output, self.spline_weight)
+            bs_output = self.b_splines(x, self.grid, self.spline_order, self.grid_size).view(x.size(0), x.size(1), -1)
+            rbf_output = self.rbf(x).view(x.size(0), x.size(1), -1)
+            bsrbf_output = bs_output + rbf_output
+            bsrbf_output = F.linear(bsrbf_output, self.spline_weight)
 
-        purge_vram()
-        return base_output + bsrbf_output
+            purge_vram()
+            return base_output + bsrbf_output
 
 class AttentionLayer(nn.Module):
     def __init__(self, channels, reduction=16):
@@ -116,12 +121,13 @@ class AttentionLayer(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         b, c, _, _ = x.size()
-        y = self.avg_pool(x).view(b, c)
-        y = self.fc(y).view(b, c, 1, 1)
-        output = x * y
+        with torch.cuda.amp.autocast():
+            y = self.avg_pool(x).view(b, c)
+            y = self.fc(y).view(b, c, 1, 1)
+            output = x * y
 
-        purge_vram()
-        return output
+            purge_vram()
+            return output
 
 class ResidualBlock(nn.Module):
     def __init__(self, channels, dilation_rate, grid_size=5, spline_order=3):
@@ -141,14 +147,15 @@ class ResidualBlock(nn.Module):
 
         for i in range(0, batch_size, chunk_size):
             x_chunk = x[i:i + chunk_size]
-            x_chunk = F.relu(self.bn1(self.conv1(x_chunk)))
-            x_chunk = self.bn2(self.conv2(x_chunk))
-            x_chunk = self.dropout(x_chunk)
-            x_chunk += self.bsrbf_layer(residual[i:i + chunk_size].flatten(2).transpose(1, 2)).transpose(1, 2).view_as(x_chunk)
-            x_chunk = F.relu(x_chunk)
+            with torch.cuda.amp.autocast():
+                x_chunk = F.relu(self.bn1(self.conv1(x_chunk)))
+                x_chunk = self.bn2(self.conv2(x_chunk))
+                x_chunk = self.dropout(x_chunk)
+                x_chunk += self.bsrbf_layer(residual[i:i + chunk_size].flatten(2).transpose(1, 2)).transpose(1, 2).view_as(x_chunk)
+                x_chunk = F.relu(x_chunk)
 
-            results.append(x_chunk)
-            purge_vram()
+                results.append(x_chunk)
+                purge_vram()
 
         return torch.cat(results, dim=0)
 
@@ -161,11 +168,12 @@ class ContextAggregationNetwork(nn.Module):
         self.bn2 = nn.InstanceNorm2d(channels).cuda()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = F.relu(self.bn1(self.conv1(x)))
-        x = F.relu(self.bn2(self.conv2(x)))
+        with torch.cuda.amp.autocast():
+            x = F.relu(self.bn1(self.conv1(x)))
+            x = F.relu(self.bn2(self.conv2(x)))
 
-        purge_vram()
-        return x
+            purge_vram()
+            return x
 
 class DepthwiseSeparableConv(nn.Module):
     def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1):
@@ -176,10 +184,11 @@ class DepthwiseSeparableConv(nn.Module):
         self.relu = nn.ReLU(inplace=True)
 
     def forward(self, x):
-        x = self.depthwise(x)
-        x = self.pointwise(x)
-        x = self.bn(x)
-        return self.relu(x)
+        with torch.cuda.amp.autocast():
+            x = self.depthwise(x)
+            x = self.pointwise(x)
+            x = self.bn(x)
+            return self.relu(x)
 
 class MemoryEfficientStemSeparationModel(nn.Module):
     def __init__(self, in_channels=3, out_channels=3, n_mels=32, target_length=22050):
