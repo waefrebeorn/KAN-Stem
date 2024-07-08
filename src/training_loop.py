@@ -112,15 +112,22 @@ def train_single_stem(
             print(f"Input tensor shape: {inputs.shape}")
             print(f"Target tensor shape: {targets.shape}")
 
-            with autocast():
-                outputs = model(inputs.to(device), model_cache_dir, cache_prefix, file_id['identifier'], update_cache=False)
-                print(f"Model output tensor shape: {outputs.shape}")
-                validate_tensor_shapes(outputs, targets, "Before computing loss_g")
-                loss_g = model_params['loss_function_g'](outputs, targets)
+            # Attempt to load from cache first
+            cache_file_name = f"{cache_prefix}_output_{file_id['identifier']}.h5"
+            if os.path.exists(os.path.join(model_cache_dir, cache_file_name)) and not training_params['update_cache']:
+                outputs = load_from_cache(model_cache_dir, cache_file_name, device)
+            else:
+                with autocast():
+                    outputs = model(inputs.to(device), model_cache_dir, cache_prefix, file_id['identifier'], update_cache=False)
+                    save_to_cache(model_cache_dir, cache_file_name, outputs)
 
-                if model_params['perceptual_loss_flag'] and (i % 5 == 0):
-                    perceptual_loss = model_params['perceptual_loss_weight'] * perceptual_loss_fn(outputs, targets)
-                    loss_g += perceptual_loss
+            print(f"Model output tensor shape: {outputs.shape}")
+            validate_tensor_shapes(outputs, targets, "Before computing loss_g")
+            loss_g = model_params['loss_function_g'](outputs, targets)
+
+            if model_params['perceptual_loss_flag'] and (i % 5 == 0):
+                perceptual_loss = model_params['perceptual_loss_weight'] * perceptual_loss_fn(outputs, targets)
+                loss_g += perceptual_loss
 
             scaler_g.scale(loss_g).backward()
 

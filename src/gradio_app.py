@@ -111,7 +111,7 @@ with gr.Blocks() as demo:
         accumulation_steps = gr.Number(label="Accumulation Steps", value=1)
         num_stems = gr.Number(label="Number of Stems", value=6)
         num_workers = gr.Number(label="Number of Workers", value=1)
-        cache_dir = gr.Textbox(label="Cache Directory", value="./cache")
+        cache_dir = gr.Textbox(label="Cache Directory", value="F:/")
         segments_per_track = gr.Number(label="Segments per Track", value=1) 
         loss_function_g = gr.Dropdown(label="Generator Loss Function", choices=["MSELoss", "L1Loss", "SmoothL1Loss", "BCEWithLogitsLoss", "WassersteinLoss"], value="L1Loss")
         loss_function_d = gr.Dropdown(label="Discriminator Loss Function", choices=["MSELoss", "L1Loss", "SmoothL1Loss", "BCEWithLogitsLoss", "WassersteinLoss"], value="WassersteinLoss")

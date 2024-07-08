@@ -366,6 +366,32 @@ class KANDiscriminator(nn.Module):
         x = x.view(batch_size * segments, in_channels, n_mels, length)
         return x
 
+    def _forward_conv_layers_with_cache(self, x: torch.Tensor, model_cache_dir: str, cache_prefix: str, identifier: str, update_cache: bool) -> torch.Tensor:
+        results = []
+        batch_size = x.size(0)
+        chunk_size = 1  # Smaller chunk size to reduce memory usage
+
+        logger.info(f"Batch size: {batch_size}, Chunk size: {chunk_size}")
+
+        for i in range(0, batch_size, chunk_size):
+            x_chunk = x[i:i + chunk_size]
+            cache_file_name = f'{cache_prefix}_conv_{identifier}_{i}.h5'
+            cache_file_path = os.path.join(model_cache_dir, cache_file_name)
+        
+            logger.info(f"Processing chunk {i // chunk_size + 1}/{batch_size // chunk_size}")
+            if os.path.exists(cache_file_path) and not update_cache:
+                logger.info(f"Loading from cache: {cache_file_name}")
+                x_chunk = load_from_cache(model_cache_dir, cache_file_name, x.device)
+            else:
+                logger.info(f"Processing and caching chunk: {cache_file_name}")
+                x_chunk = self._forward_conv_layers(x_chunk)
+                save_to_cache(model_cache_dir, cache_file_name, x_chunk)
+                purge_vram()
+
+            results.append(x_chunk)
+
+        return torch.cat(results, dim=0)
+
     def _forward_conv_layers(self, x: torch.Tensor) -> torch.Tensor:
         x = self.conv1(x)
         purge_vram()
@@ -378,27 +404,6 @@ class KANDiscriminator(nn.Module):
         log_memory_usage("After conv3")
         return x
 
-    def _forward_conv_layers_with_cache(self, x: torch.Tensor, model_cache_dir: str, cache_prefix: str, identifier: str, update_cache: bool) -> torch.Tensor:
-        results = []
-        batch_size = x.size(0)
-        chunk_size = 1  # Smaller chunk size to reduce memory usage
-
-        for i in range(0, batch_size, chunk_size):
-            x_chunk = x[i:i + chunk_size]
-            cache_file_name = f'{cache_prefix}_conv_{identifier}_{i}.h5'
-            cache_file_path = os.path.join(model_cache_dir, cache_file_name)
-            
-            if os.path.exists(cache_file_path) and not update_cache:
-                x_chunk = load_from_cache(model_cache_dir, cache_file_name, x.device)
-            else:
-                x_chunk = self._forward_conv_layers(x_chunk)
-                save_to_cache(model_cache_dir, cache_file_name, x_chunk)
-                purge_vram()
-
-            results.append(x_chunk)
-
-        return torch.cat(results, dim=0)
-
     def forward(self, x: torch.Tensor, model_cache_dir: str, cache_prefix: str, identifier: str, update_cache: bool = False) -> torch.Tensor:
         if x.dim() == 3:
             x = x.unsqueeze(1)
@@ -408,24 +413,26 @@ class KANDiscriminator(nn.Module):
             raise ValueError(f"Invalid input shape. Expected 4 dimensions but got {x.dim()}")
 
         x = x.to(self.device)
-        
+
         batch_size = x.size(0)
         results = []
 
-        for i in range(0, batch_size, 1):  # Process in smaller chunks to reduce memory usage
-            x_chunk = x[i:i + 5]
+        chunk_size = 1  # Adjusting chunk size to 1 for memory efficiency
+        for i in range(0, batch_size, chunk_size):
+            x_chunk = x[i:i + chunk_size]
             x_chunk = self._forward_conv_layers_with_cache(x_chunk, model_cache_dir, cache_prefix, f'{identifier}_{i}', update_cache)
             x_chunk = x_chunk.view(x_chunk.size(0), -1)
 
             if self.fc1 is None or self.fc1.in_features != x_chunk.shape[1]:
                 self.fc1 = nn.Linear(x_chunk.shape[1], 1).to(self.device)
                 nn.init.xavier_normal_(self.fc1.weight)
-            
-            x_chunk = torch.sigmoid(self.fc1(x_chunk))
-            
+
+            with torch.cuda.amp.autocast():
+                x_chunk = torch.sigmoid(self.fc1(x_chunk))
+
             results.append(x_chunk)
-            purge_vram()
-        
+            purge_vram()  # Purge VRAM after processing each chunk
+    
         return torch.cat(results, dim=0)
 
 def load_model(checkpoint_path: str, in_channels: int, out_channels: int, n_mels: int, target_length: int, device: str = "cuda") -> nn.Module:
