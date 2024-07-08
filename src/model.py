@@ -54,10 +54,9 @@ class RadialBasisFunction(nn.Module):
         self.register_buffer("grid", grid)
         self.denominator = denominator or (grid_max - grid_min) / (num_grids - 1)
 
-    @staticmethod
-    def forward(x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         with torch.cuda.amp.autocast():
-            output = torch.exp(-((x[..., None] - x.grid) / x.denominator) ** 2)
+            output = torch.exp(-((x[..., None] - self.grid) / self.denominator) ** 2)
             purge_vram()
             return output
 
@@ -239,12 +238,14 @@ class MemoryEfficientStemSeparationModel(nn.Module):
             nn.LeakyReLU(0.2, inplace=True)
         ).cuda()
 
-    def _reshape_input_tensor(self, x: torch.Tensor) -> torch.Tensor:
+    @staticmethod
+    def _reshape_input_tensor(x: torch.Tensor) -> torch.Tensor:
         batch_size, segments, _, in_channels, n_mels, length = x.shape
         x = x.view(batch_size * segments, in_channels, n_mels, length)
         return x
 
-    def _reshape_output_tensor(self, x: torch.Tensor, original_segments: int) -> torch.Tensor:
+    @staticmethod
+    def _reshape_output_tensor(x: torch.Tensor, original_segments: int) -> torch.Tensor:
         if x.shape[0] == 1:
             x = x.squeeze(0)
         if x.dim() == 4:
@@ -361,9 +362,22 @@ class KANDiscriminator(nn.Module):
 
         self.fc1 = None
 
-    def _reshape_input_tensor(self, x: torch.Tensor) -> torch.Tensor:
+    @staticmethod
+    def _reshape_input_tensor(x: torch.Tensor) -> torch.Tensor:
         batch_size, segments, _, in_channels, n_mels, length = x.shape
         x = x.view(batch_size * segments, in_channels, n_mels, length)
+        return x
+
+    def _forward_conv_layers(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.conv1(x)
+        purge_vram()
+        log_memory_usage("After conv1")
+        x = self.conv2(x)
+        purge_vram()
+        log_memory_usage("After conv2")
+        x = self.conv3(x)
+        purge_vram()
+        log_memory_usage("After conv3")
         return x
 
     def _forward_conv_layers_with_cache(self, x: torch.Tensor, model_cache_dir: str, cache_prefix: str, identifier: str, update_cache: bool) -> torch.Tensor:
@@ -391,18 +405,6 @@ class KANDiscriminator(nn.Module):
             results.append(x_chunk)
 
         return torch.cat(results, dim=0)
-
-    def _forward_conv_layers(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.conv1(x)
-        purge_vram()
-        log_memory_usage("After conv1")
-        x = self.conv2(x)
-        purge_vram()
-        log_memory_usage("After conv2")
-        x = self.conv3(x)
-        purge_vram()
-        log_memory_usage("After conv3")
-        return x
 
     def forward(self, x: torch.Tensor, model_cache_dir: str, cache_prefix: str, identifier: str, update_cache: bool = False) -> torch.Tensor:
         if x.dim() == 3:
