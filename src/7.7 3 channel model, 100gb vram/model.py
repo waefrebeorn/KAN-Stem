@@ -372,7 +372,7 @@ class KANDiscriminator(nn.Module):
     def _forward_conv_layers_with_cache(self, x: torch.Tensor, model_cache_dir: str, cache_prefix: str, identifier: str, update_cache: bool) -> torch.Tensor:
         results = []
         batch_size = x.size(0)
-        chunk_size = 1  # Smaller chunk size to reduce memory usage
+        chunk_size = 5  # Smaller chunk size to reduce memory usage
 
         for i in range(0, batch_size, chunk_size):
             x_chunk = x[i:i + chunk_size]
