@@ -85,6 +85,8 @@ def train_single_stem(
 
     perceptual_loss_fn = PerceptualLoss(sample_rate, n_fft, n_mels).to(device)
 
+    global_step = 0
+
     for epoch in range(training_params['num_epochs']):
         if stop_flag.value == 1:
             logger.info("Training stopped.")
@@ -179,16 +181,24 @@ def train_single_stem(
                 running_loss_g += loss_g.item()
                 running_loss_d += loss_d.item()
 
-                # Log losses for each segment
+                # Compute and log metrics
+                with torch.no_grad():
+                    sdr = compute_sdr(target_segment.cpu(), outputs.cpu())
+                    sir = compute_sir(target_segment.cpu(), outputs.cpu())
+                    sar = compute_sar(target_segment.cpu(), outputs.cpu())
+
                 if model_params['tensorboard_flag']:
                     global_step = epoch * len(dataset.file_ids) * len(input_data) + i * len(input_data) + segment_idx
                     writer.add_scalar(f'Loss/Generator/{stem_name}/Segment', loss_g.item(), global_step)
                     writer.add_scalar(f'Loss/Discriminator/{stem_name}/Segment', loss_d.item(), global_step)
+                    writer.add_scalar(f'Metrics/SDR/{stem_name}/Segment', sdr.mean().item(), global_step)
+                    writer.add_scalar(f'Metrics/SIR/{stem_name}/Segment', sir.mean().item(), global_step)
+                    writer.add_scalar(f'Metrics/SAR/{stem_name}/Segment', sar.mean().item(), global_step)
 
                 if (i + 1) % 100 == 0:
                     if model_params['tensorboard_flag']:
-                        writer.add_scalar(f'Loss/Generator/{stem_name}/Batch', running_loss_g / (i + 1), epoch + 1)
-                        writer.add_scalar(f'Loss/Discriminator/{stem_name}/Batch', running_loss_d / (i + 1), epoch + 1)
+                        writer.add_scalar(f'Loss/Generator/{stem_name}/Batch', running_loss_g / (i + 1), global_step)
+                        writer.add_scalar(f'Loss/Discriminator/{stem_name}/Batch', running_loss_d / (i + 1), global_step)
                     logger.info(f"Epoch [{epoch+1}/{training_params['num_epochs']}] Batch [{i+1}/{len(dataset.file_ids)}]")
                     logger.info(f"Generator Loss: {running_loss_g / (i + 1):.4f}, Discriminator Loss: {running_loss_d / (i + 1):.4f}")
                     purge_vram()
@@ -250,16 +260,22 @@ def train_single_stem(
                         val_sir += sir.mean().item()
                         val_sar += sar.mean().item()
 
+                        if model_params['tensorboard_flag']:
+                            writer.add_scalar(f'Loss/Validation/{stem_name}/Segment', loss.item(), global_step)
+                            writer.add_scalar(f'Metrics/SDR_Validation/{stem_name}/Segment', sdr.mean().item(), global_step)
+                            writer.add_scalar(f'Metrics/SIR_Validation/{stem_name}/Segment', sir.mean().item(), global_step)
+                            writer.add_scalar(f'Metrics/SAR_Validation/{stem_name}/Segment', sar.mean().item(), global_step)
+
         avg_val_loss = val_loss / len(val_dataset)
         avg_val_sdr = val_sdr / len(val_dataset)
         avg_val_sir = val_sir / len(val_dataset)
         avg_val_sar = val_sar / len(val_dataset)
 
         if model_params['tensorboard_flag']:
-            writer.add_scalar('Loss/Validation', avg_val_loss, epoch + 1)
-            writer.add_scalar('Metrics/SDR', avg_val_sdr, epoch + 1)
-            writer.add_scalar('Metrics/SIR', avg_val_sir, epoch + 1)
-            writer.add_scalar('Metrics/SAR', avg_val_sar, epoch + 1)
+            writer.add_scalar('Loss/Validation/Average', avg_val_loss, epoch + 1)
+            writer.add_scalar('Metrics/SDR/Validation_Average', avg_val_sdr, epoch + 1)
+            writer.add_scalar('Metrics/SIR/Validation_Average', avg_val_sir, epoch + 1)
+            writer.add_scalar('Metrics/SAR/Validation_Average', avg_val_sar, epoch + 1)
             writer.add_scalar('Loss/Generator_Avg', running_loss_g / len(dataset.file_ids), epoch + 1)
             writer.add_scalar('Loss/Discriminator_Avg', running_loss_d / len(dataset.file_ids), epoch + 1)
 
