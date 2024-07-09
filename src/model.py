@@ -42,7 +42,7 @@ def load_from_cache(cache_dir: str, cache_file_name: str, device: torch.device) 
     with h5py.File(cache_file_path, 'r') as f:
         if 'tensor' not in f:
             raise KeyError(f"Tensor not found in cache file: {cache_file_path}")
-        tensor = torch.tensor(f['tensor'][:], device=device).float()
+        tensor = torch.tensor(f['tensor'][:], device=device).float().requires_grad_(True)
     logger.info(f"Loaded tensor shape: {tensor.shape}")
     purge_vram()
     return tensor
@@ -82,15 +82,14 @@ class BSRBF_KANLayer(nn.Module):
         grid = (torch.arange(-spline_order, grid_size + spline_order + 1, device='cuda') * h + grid_range[0]).expand(self.input_dim, -1).contiguous()
         self.register_buffer("grid", grid)
 
-    @staticmethod
-    def b_splines(x: torch.Tensor, grid: torch.Tensor, spline_order: int, grid_size: int) -> torch.Tensor:
-        assert x.dim() == 3 and x.size(2) == grid.size(0)
+    def b_splines(self, x: torch.Tensor):
+        assert x.dim() == 3 and x.size(2) == self.grid.size(0)
         x = x.unsqueeze(-1)
-        bases = ((x >= grid[:, :-1]) & (x < grid[:, 1:])).to(x.dtype)
-        for k in range(1, spline_order + 1):
-            bases = ((x - grid[:, : -(k + 1)]) / (grid[:, k:-1] - grid[:, : -(k + 1)]) * bases[:, :, :, :-1]) + \
-                    ((grid[:, k + 1:] - x) / (grid[:, k + 1:] - grid[:, 1:(-k)]) * bases[:, :, :, 1:])
-        assert bases.size() == (x.size(0), x.size(1), grid.size(0), grid_size + spline_order)
+        bases = ((x >= self.grid[:, :-1]) & (x < self.grid[:, 1:])).to(x.dtype)
+        for k in range(1, self.spline_order + 1):
+            bases = ((x - self.grid[:, :-(k + 1)]) / (self.grid[:, k:-1] - self.grid[:, :-(k + 1)]) * bases[:, :, :, :-1]) + \
+                    ((self.grid[:, k + 1:] - x) / (self.grid[:, k + 1:] - self.grid[:, 1:(-k)]) * bases[:, :, :, 1:])
+        assert bases.size() == (x.size(0), x.size(1), self.grid.size(0), self.grid_size + self.spline_order)
         purge_vram()
         return bases.contiguous()
 
@@ -174,21 +173,6 @@ class ContextAggregationNetwork(nn.Module):
             purge_vram()
             return x
 
-class DepthwiseSeparableConv(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1):
-        super(DepthwiseSeparableConv, self).__init__()
-        self.depthwise = nn.Conv2d(in_channels, in_channels, kernel_size=kernel_size, stride=stride, padding=padding, groups=in_channels, bias=False)
-        self.pointwise = nn.Conv2d(in_channels, out_channels, kernel_size=1, bias=False)
-        self.bn = nn.BatchNorm2d(out_channels)
-        self.relu = nn.ReLU(inplace=True)
-
-    def forward(self, x):
-        with torch.cuda.amp.autocast():
-            x = self.depthwise(x)
-            x = self.pointwise(x)
-            x = self.bn(x)
-            return self.relu(x)
-
 class MemoryEfficientStemSeparationModel(nn.Module):
     def __init__(self, in_channels=3, out_channels=3, n_mels=32, target_length=22050):
         super(MemoryEfficientStemSeparationModel, self).__init__()
@@ -198,15 +182,31 @@ class MemoryEfficientStemSeparationModel(nn.Module):
 
         self.channel_processors = nn.ModuleList([
             nn.Sequential(
-                DepthwiseSeparableConv(1, 32),
-                DepthwiseSeparableConv(32, 64, stride=2),
-                DepthwiseSeparableConv(64, 128, stride=2),
-                DepthwiseSeparableConv(128, 256, stride=2)
+                nn.Conv2d(1, 32, kernel_size=3, stride=1, padding=1, groups=1, bias=False),
+                nn.Conv2d(32, 32, kernel_size=1, bias=False),
+                nn.BatchNorm2d(32),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1, groups=32, bias=False),
+                nn.Conv2d(64, 64, kernel_size=1, bias=False),
+                nn.BatchNorm2d(64),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1, groups=64, bias=False),
+                nn.Conv2d(128, 128, kernel_size=1, bias=False),
+                nn.BatchNorm2d(128),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1, groups=128, bias=False),
+                nn.Conv2d(256, 256, kernel_size=1, bias=False),
+                nn.BatchNorm2d(256),
+                nn.ReLU(inplace=True)
             ).cuda() for _ in range(in_channels)
         ])
 
         self.combiner = nn.Sequential(
-            DepthwiseSeparableConv(256 * in_channels, 256),
+            nn.Conv2d(256 * in_channels, 256 * in_channels, kernel_size=1, groups=in_channels, bias=False),  # Combine and group channels
+            nn.BatchNorm2d(256 * in_channels),  
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(256 * in_channels, 256 * in_channels, kernel_size=3, stride=1, padding=1, groups=256 * in_channels, bias=False),
+            nn.Conv2d(256 * in_channels, 256, kernel_size=1, bias=False),
             nn.BatchNorm2d(256),
             nn.LeakyReLU(0.2, inplace=True)
         ).cuda()
@@ -240,20 +240,21 @@ class MemoryEfficientStemSeparationModel(nn.Module):
 
     @staticmethod
     def _reshape_input_tensor(x: torch.Tensor) -> torch.Tensor:
-        batch_size, segments, _, in_channels, n_mels, length = x.shape
-        x = x.view(batch_size * segments, in_channels, n_mels, length)
+        if x.dim() == 6:
+            batch_size, segments, _, in_channels, n_mels, length = x.shape
+            x = x.view(batch_size * segments, in_channels, n_mels, length)
+        elif x.dim() == 5:
+            x = x.squeeze(1)  # Remove the segment dimension
         return x
 
     @staticmethod
     def _reshape_output_tensor(x: torch.Tensor, original_segments: int) -> torch.Tensor:
-        if x.shape[0] == 1:
-            x = x.squeeze(0)
-        if x.dim() == 4:
-            batch_size, in_channels, n_mels, length = x.shape
-            x = x.view(1, original_segments, 1, in_channels, n_mels, length)
-        elif x.dim() == 5:
-            batch_size, segments, in_channels, n_mels, length = x.shape
-            x = x.view(batch_size // original_segments, original_segments, 1, in_channels, n_mels, length)
+        if x.dim() == 4 and original_segments == 1:
+            _, in_channels, n_mels, length = x.shape
+            x = x.view(1, in_channels, n_mels, length)  # Handle single segment case
+        else:
+            batch_size, in_channels, n_mels, length = x.shape  
+            x = x.view(batch_size // original_segments, original_segments, in_channels, n_mels, length) # Remove extra dim
         return x
 
     def _forward_encoder(self, x: torch.Tensor, model_cache_dir: str, cache_prefix: str, identifier: str, update_cache: bool) -> torch.Tensor:
@@ -263,6 +264,8 @@ class MemoryEfficientStemSeparationModel(nn.Module):
         cache_file_name = f'{cache_prefix}_encoder_{identifier}.h5'
         cache_file_path = os.path.join(model_cache_dir, cache_file_name)
 
+        skipped_segments = []  # Initialize skipped_segments
+
         if os.path.exists(cache_file_path) and not update_cache:
             x = load_from_cache(model_cache_dir, cache_file_name, x.device)
         else:
@@ -270,9 +273,16 @@ class MemoryEfficientStemSeparationModel(nn.Module):
             processed_segments = []
             for idx in range(x.size(0)):
                 segment = x[idx:idx+1, :, :, :]
-                processed_channels = [checkpoint(channel_processor, segment[:, i:i+1, :, :], use_reentrant=False) for i, channel_processor in enumerate(self.channel_processors)]
-                processed_segment = torch.cat(processed_channels, dim=1)
-                processed_segments.append(processed_segment)
+                processed_channels = []
+                for i, channel_processor in enumerate(self.channel_processors):
+                    if segment[:, i:i+1, :, :].shape[1] > 0:
+                        processed_channel = checkpoint(channel_processor, segment[:, i:i+1, :, :], use_reentrant=False)
+                        processed_channels.append(processed_channel)
+                if processed_channels:
+                    processed_segment = torch.cat(processed_channels, dim=1)
+                    processed_segments.append(processed_segment)
+                else:
+                    skipped_segments.append(idx)  # Record the index of the skipped segment
             x = torch.cat(processed_segments, dim=0)
             
             save_to_cache(model_cache_dir, cache_file_name, x)
@@ -280,9 +290,9 @@ class MemoryEfficientStemSeparationModel(nn.Module):
         logger.info(f"Encoder output shape: {x.shape}")
         purge_vram()
         log_memory_usage("After Encoder")
-        return x
+        return x, skipped_segments  # Return both the processed data and skipped segment indices
 
-    def _forward_combiner(self, x: torch.Tensor, model_cache_dir: str, cache_prefix: str, identifier: str, update_cache: bool) -> torch.Tensor:
+    def _forward_combiner(self, x: torch.Tensor, skipped_segments, model_cache_dir: str, cache_prefix: str, identifier: str, update_cache: bool) -> torch.Tensor:
         log_memory_usage("Before Combiner")
         logger.info(f"Combiner input shape: {x.shape}")
 
@@ -303,7 +313,7 @@ class MemoryEfficientStemSeparationModel(nn.Module):
         log_memory_usage("After Combiner")
         return x
 
-    def _forward_decoder(self, x: torch.Tensor, model_cache_dir: str, cache_prefix: str, identifier: str, update_cache: bool) -> torch.Tensor:
+    def _forward_decoder(self, x: torch.Tensor, skipped_segments, model_cache_dir: str, cache_prefix: str, identifier: str, update_cache: bool) -> torch.Tensor:
         log_memory_usage("Before Decoder")
         logger.info(f"Decoder input shape: {x.shape}")
         for idx, upsampler_layer in enumerate(self.upsampler):
@@ -311,6 +321,7 @@ class MemoryEfficientStemSeparationModel(nn.Module):
             cache_file_path = os.path.join(model_cache_dir, cache_file_name)
             if os.path.exists(cache_file_path) and not update_cache:
                 x = load_from_cache(model_cache_dir, cache_file_name, x.device)
+                x.requires_grad = True  # Ensure gradients are tracked
             else:
                 with torch.cuda.amp.autocast():
                     x = checkpoint(upsampler_layer, x, use_reentrant=False)
@@ -333,11 +344,11 @@ class MemoryEfficientStemSeparationModel(nn.Module):
         if x.dim() == 5:
             x = self._reshape_input_tensor(x)
         with torch.cuda.amp.autocast():
-            x = self._forward_encoder(x, model_cache_dir, cache_prefix, identifier, update_cache)
-            x = self._forward_combiner(x, model_cache_dir, cache_prefix, identifier, update_cache)
-            x = self._forward_decoder(x, model_cache_dir, cache_prefix, identifier, update_cache)
-            x = self.final_conv(x)
-            logger.info(f"Final conv output shape: {x.shape}")
+            x, skipped_segments = self._forward_encoder(x, model_cache_dir, cache_prefix, identifier, update_cache)  # Get skipped segments
+            x = self._forward_combiner(x, skipped_segments, model_cache_dir, cache_prefix, identifier, update_cache)
+            x = self._forward_decoder(x, skipped_segments, model_cache_dir, cache_prefix, identifier, update_cache) 
+
+        x = self.final_conv(x)
 
         if x.shape[-1] > self.target_length:
             x = x[..., :self.target_length]
@@ -348,7 +359,7 @@ class MemoryEfficientStemSeparationModel(nn.Module):
 
         log_memory_usage("End Forward")
         purge_vram()
-        return x
+        return x, skipped_segments  # Return both the output and skipped segments
 
 class KANDiscriminator(nn.Module):
     def __init__(self, in_channels=3, out_channels=64, n_mels=32, target_length=22050, device="cuda", channel_multiplier=1.0):
@@ -356,16 +367,37 @@ class KANDiscriminator(nn.Module):
 
         self.device = device
 
-        self.conv1 = DepthwiseSeparableConv(in_channels, int(out_channels * channel_multiplier)).cuda()
-        self.conv2 = DepthwiseSeparableConv(int(out_channels * channel_multiplier), int(out_channels * 2 * channel_multiplier)).cuda()
-        self.conv3 = DepthwiseSeparableConv(int(out_channels * 2 * channel_multiplier), int(out_channels * 4 * channel_multiplier)).cuda()
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(in_channels, int(out_channels * channel_multiplier), kernel_size=3, stride=1, padding=1, groups=1, bias=False),
+            nn.Conv2d(int(out_channels * channel_multiplier), int(out_channels * channel_multiplier), kernel_size=1, bias=False),
+            nn.BatchNorm2d(int(out_channels * channel_multiplier)),
+            nn.ReLU(inplace=True)
+        ).cuda()
+
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(int(out_channels * channel_multiplier), int(out_channels * 2 * channel_multiplier), kernel_size=3, stride=1, padding=1, groups=int(out_channels * channel_multiplier), bias=False),
+            nn.Conv2d(int(out_channels * 2 * channel_multiplier), int(out_channels * 2 * channel_multiplier), kernel_size=1, bias=False),
+            nn.BatchNorm2d(int(out_channels * 2 * channel_multiplier)),
+            nn.ReLU(inplace=True)
+        ).cuda()
+
+        self.conv3 = nn.Sequential(
+            nn.Conv2d(int(out_channels * 2 * channel_multiplier), int(out_channels * 4 * channel_multiplier), kernel_size=3, stride=1, padding=1, groups=int(out_channels * 2 * channel_multiplier), bias=False),
+            nn.Conv2d(int(out_channels * 4 * channel_multiplier), int(out_channels * 4 * channel_multiplier), kernel_size=1, bias=False),
+            nn.BatchNorm2d(int(out_channels * 4 * channel_multiplier)),
+            nn.ReLU(inplace=True)
+        ).cuda()
 
         self.fc1 = None
 
     @staticmethod
     def _reshape_input_tensor(x: torch.Tensor) -> torch.Tensor:
-        batch_size, segments, _, in_channels, n_mels, length = x.shape
-        x = x.view(batch_size * segments, in_channels, n_mels, length)
+        if x.dim() == 6: 
+            batch_size, segments, _, in_channels, n_mels, length = x.shape
+            x = x.view(batch_size * segments, in_channels, n_mels, length)
+        elif x.dim() == 5:  
+            batch_size, in_channels, n_mels, length, _ = x.shape  
+            x = x.view(batch_size, in_channels, n_mels, length)  
         return x
 
     def _forward_conv_layers(self, x: torch.Tensor) -> torch.Tensor:
@@ -380,33 +412,7 @@ class KANDiscriminator(nn.Module):
         log_memory_usage("After conv3")
         return x
 
-    def _forward_conv_layers_with_cache(self, x: torch.Tensor, model_cache_dir: str, cache_prefix: str, identifier: str, update_cache: bool) -> torch.Tensor:
-        results = []
-        batch_size = x.size(0)
-        chunk_size = 1  # Smaller chunk size to reduce memory usage
-
-        logger.info(f"Batch size: {batch_size}, Chunk size: {chunk_size}")
-
-        for i in range(0, batch_size, chunk_size):
-            x_chunk = x[i:i + chunk_size]
-            cache_file_name = f'{cache_prefix}_conv_{identifier}_{i}.h5'
-            cache_file_path = os.path.join(model_cache_dir, cache_file_name)
-        
-            logger.info(f"Processing chunk {i // chunk_size + 1}/{batch_size // chunk_size}")
-            if os.path.exists(cache_file_path) and not update_cache:
-                logger.info(f"Loading from cache: {cache_file_name}")
-                x_chunk = load_from_cache(model_cache_dir, cache_file_name, x.device)
-            else:
-                logger.info(f"Processing and caching chunk: {cache_file_name}")
-                x_chunk = self._forward_conv_layers(x_chunk)
-                save_to_cache(model_cache_dir, cache_file_name, x_chunk)
-                purge_vram()
-
-            results.append(x_chunk)
-
-        return torch.cat(results, dim=0)
-
-    def forward(self, x: torch.Tensor, model_cache_dir: str, cache_prefix: str, identifier: str, update_cache: bool = False) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         if x.dim() == 3:
             x = x.unsqueeze(1)
         if x.dim() == 6:
@@ -416,26 +422,18 @@ class KANDiscriminator(nn.Module):
 
         x = x.to(self.device)
 
-        batch_size = x.size(0)
-        results = []
+        x = self._forward_conv_layers(x)
+        x = x.view(x.size(0), -1)
 
-        chunk_size = 1  # Adjusting chunk size to 1 for memory efficiency
-        for i in range(0, batch_size, chunk_size):
-            x_chunk = x[i:i + chunk_size]
-            x_chunk = self._forward_conv_layers_with_cache(x_chunk, model_cache_dir, cache_prefix, f'{identifier}_{i}', update_cache)
-            x_chunk = x_chunk.view(x_chunk.size(0), -1)
+        if self.fc1 is None or self.fc1.in_features != x.shape[1]:
+            self.fc1 = nn.Linear(x.shape[1], 1).to(self.device)
+            nn.init.xavier_normal_(self.fc1.weight)
 
-            if self.fc1 is None or self.fc1.in_features != x_chunk.shape[1]:
-                self.fc1 = nn.Linear(x_chunk.shape[1], 1).to(self.device)
-                nn.init.xavier_normal_(self.fc1.weight)
+        with torch.cuda.amp.autocast():
+            x = torch.sigmoid(self.fc1(x))
 
-            with torch.cuda.amp.autocast():
-                x_chunk = torch.sigmoid(self.fc1(x_chunk))
-
-            results.append(x_chunk)
-            purge_vram()  # Purge VRAM after processing each chunk
-    
-        return torch.cat(results, dim=0)
+        purge_vram()
+        return x
 
 def load_model(checkpoint_path: str, in_channels: int, out_channels: int, n_mels: int, target_length: int, device: str = "cuda") -> nn.Module:
     model = MemoryEfficientStemSeparationModel(in_channels, out_channels, n_mels, target_length).to(device)

@@ -2,6 +2,7 @@ import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.autograd as autograd
 import logging
 import soundfile as sf
 import h5py
@@ -14,7 +15,7 @@ import torchaudio.transforms as T
 import torch.optim as optim
 from pydub import AudioSegment
 from torchvision.models import mobilenet_v2, MobileNet_V2_Weights
-
+import gc
 
 logger = logging.getLogger(__name__)
 logger = logging.getLogger(__name__)
@@ -299,25 +300,38 @@ def compute_sar(true: torch.Tensor, pred: torch.Tensor) -> torch.Tensor:
     sar = 10 * torch.log10(s_noise / (s_artif + 1e-8))
     return sar
 
-def gradient_penalty(discriminator: nn.Module, real_data: torch.Tensor, fake_data: torch.Tensor, device: torch.device, lambda_gp: float = 10) -> torch.Tensor:
-    batch_size = real_data.size(0)
-    alpha = torch.rand(batch_size, 1, 1, 1).to(device)
-    interpolated = alpha * real_data + ((1 - alpha) * fake_data)
-    interpolated.requires_grad_(True)
+def gradient_penalty(discriminator, real_samples, fake_samples, device):
+    """Calculates the gradient penalty loss for WGAN GP."""
 
-    d_interpolated = discriminator(interpolated)
+    # Interpolation
+    alpha = torch.rand(real_samples.size(0), 1, 1, 1, device=device).expand_as(real_samples)
+    interpolated = (alpha * real_samples + (1 - alpha) * fake_samples).requires_grad_(True)
+
+    # Discriminator output
+    prob_interpolated = discriminator(interpolated)
+
+    # Gradient calculation
     gradients = torch.autograd.grad(
-        outputs=d_interpolated,
+        outputs=prob_interpolated,
         inputs=interpolated,
-        grad_outputs=torch.ones_like(d_interpolated),
+        grad_outputs=torch.ones_like(prob_interpolated, device=device),
         create_graph=True,
-        retain_graph=True
+        retain_graph=True,
+        only_inputs=True,
     )[0]
 
-    gradients = gradients.view(batch_size, -1)
-    gradient_norm = gradients.norm(2, dim=1)
-    penalty = ((gradient_norm - 1) ** 2).mean()
-    return penalty
+    # Error Handling for None Gradients:
+    if gradients is None:
+        logger.error(
+            "Gradients are None. This might be due to an error in the discriminator or how gradients are calculated."
+        )
+        raise RuntimeError("Gradient calculation failed in gradient_penalty")
+
+    # Gradient penalty calculation
+    gradients = gradients.view(gradients.size(0), -1)  
+    gradient_penalty = torch.mean((gradients.norm(2, dim=1) - 1) ** 2)
+
+    return gradient_penalty
 
 class PerceptualLoss(nn.Module):
     def __init__(self, sample_rate, n_fft, n_mels):

@@ -16,6 +16,7 @@ from utils import (
 from model_setup import create_model_and_optimizer
 from model import save_to_cache, load_from_cache
 import time
+import numpy as np  # For creating zero-filled segments
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,23 @@ def validate_tensor_shapes(tensor1, tensor2, message=""):
 
 def reshape_for_discriminator(x):
     return x.view(x.size(0), -1)
+
+def assemble_full_output(full_outputs: list, skipped_segments: list, target_shape: tuple) -> torch.Tensor:
+    """Assembles the full output from segments, filling in skipped segments with zeros."""
+    
+    full_output = torch.zeros(target_shape)
+    current_segment = 0
+
+    for i in range(target_shape[0]):
+        if i in skipped_segments:
+            # Fill skipped segment with zeros (or appropriate placeholder)
+            full_output[i] = torch.zeros_like(full_outputs[0])  
+        else:
+            # Copy the output of the processed segment
+            full_output[i] = full_outputs[current_segment]
+            current_segment += 1
+
+    return full_output
 
 def train_single_stem(
     stem_name: str,
@@ -106,64 +124,83 @@ def train_single_stem(
                 logger.warning(f"Skipping empty input or target for file_id: {file_id['identifier']}")
                 continue
 
-            inputs = input_data.unsqueeze(0)
-            targets = target_data.unsqueeze(0)
+            full_outputs = []  # Store outputs for the entire track
+            all_skipped_segments = []
 
-            print(f"Input tensor shape: {inputs.shape}")
-            print(f"Target tensor shape: {targets.shape}")
+            for segment_idx in range(input_data.size(0)):
+                input_segment = input_data[segment_idx].unsqueeze(0)
+                target_segment = target_data[segment_idx].unsqueeze(0)
 
-            # Attempt to load from cache first
-            cache_file_name = f"{cache_prefix}_output_{file_id['identifier']}.h5"
-            if os.path.exists(os.path.join(model_cache_dir, cache_file_name)) and not training_params['update_cache']:
-                outputs = load_from_cache(model_cache_dir, cache_file_name, device)
-            else:
+                logger.info(f"Input tensor shape: {input_segment.shape}")
+                logger.info(f"Target tensor shape: {target_segment.shape}")
+
                 with autocast():
-                    outputs = model(inputs.to(device), model_cache_dir, cache_prefix, file_id['identifier'], update_cache=False)
-                    save_to_cache(model_cache_dir, cache_file_name, outputs)
+                    outputs, skipped_segments = model(input_segment.to(device), model_cache_dir, cache_prefix, f'{file_id["identifier"]}_{segment_idx}', update_cache=False)
+                    logger.info(f"Model output tensor shape: {outputs.shape}")
 
-            print(f"Model output tensor shape: {outputs.shape}")
-            validate_tensor_shapes(outputs, targets, "Before computing loss_g")
-            loss_g = model_params['loss_function_g'](outputs, targets)
+                    # Ensure target tensor shape matches output tensor shape
+                    if target_segment.dim() == 5 and target_segment.size(1) == 1:
+                        target_segment = target_segment.squeeze(1)
 
-            if model_params['perceptual_loss_flag'] and (i % 5 == 0):
-                perceptual_loss = model_params['perceptual_loss_weight'] * perceptual_loss_fn(outputs, targets)
-                loss_g += perceptual_loss
+                    validate_tensor_shapes(outputs, target_segment, "Before computing loss_g")
+                    loss_g = model_params['loss_function_g'](outputs, target_segment)
 
-            scaler_g.scale(loss_g).backward()
+                    if model_params['perceptual_loss_flag'] and (i % 5 == 0):
+                        perceptual_loss = model_params['perceptual_loss_weight'] * perceptual_loss_fn(outputs, target_segment)
+                        loss_g += perceptual_loss
 
-            with autocast():
-                if training_params['add_noise']:
-                    noise = torch.randn_like(targets, device=device) * training_params['noise_amount']
-                    targets = targets + noise
-
-                real_out = discriminator(targets, model_cache_dir, cache_prefix, file_id['identifier'], update_cache=False)
-                fake_out = discriminator(outputs.detach(), model_cache_dir, cache_prefix, f"fake_{file_id['identifier']}", update_cache=False)
-
-                loss_d_real = model_params['loss_function_d'](real_out, torch.ones_like(real_out) * training_params['label_smoothing_real'])
-                loss_d_fake = model_params['loss_function_d'](fake_out, torch.zeros_like(fake_out) * training_params['label_smoothing_fake'])
-                gp = gradient_penalty(discriminator, targets, outputs.detach(), device)
-                loss_d = (loss_d_real + loss_d_fake) / 2 + gp
-
-            scaler_d.scale(loss_d).backward()
-
-            if (i + 1) % training_params['accumulation_steps'] == 0:
-                scaler_d.step(optimizer_d)
-                scaler_d.update()
-                optimizer_d.zero_grad(set_to_none=True)
-                scaler_g.step(optimizer_g)
-                scaler_g.update()
-                optimizer_g.zero_grad(set_to_none=True)
-
-            running_loss_g += loss_g.item()
-            running_loss_d += loss_d.item()
-
-            if (i + 1) % 100 == 0:
-                if model_params['tensorboard_flag']:
-                    writer.add_scalar(f'Loss/Generator/{stem_name}', running_loss_g / (i + 1), epoch + 1)
-                    writer.add_scalar(f'Loss/Discriminator/{stem_name}', running_loss_d / (i + 1), epoch + 1)
-                print(f"Epoch [{epoch+1}/{training_params['num_epochs']}] Batch [{i+1}/{len(dataset.file_ids)}]")
-                print(f"Generator Loss: {running_loss_g / (i + 1):.4f}, Discriminator Loss: {running_loss_d / (i + 1):.4f}")
+                scaler_g.scale(loss_g).backward(retain_graph=True)
                 purge_vram()
+
+                with autocast():
+                    if training_params['add_noise']:
+                        noise = torch.randn_like(target_segment, device=device) * training_params['noise_amount']
+                        target_segment = target_segment + noise
+
+                    real_out = discriminator(target_segment)  # No need for update_cache here
+                    fake_out = discriminator(outputs)  # No need for update_cache here
+
+                    loss_d_real = model_params['loss_function_d'](real_out, torch.ones_like(real_out) * training_params['label_smoothing_real'])
+                    loss_d_fake = model_params['loss_function_d'](fake_out, torch.zeros_like(fake_out) * training_params['label_smoothing_fake'])
+                    gp = gradient_penalty(discriminator, target_segment, outputs, device)
+                    loss_d = (loss_d_real + loss_d_fake) / 2 + gp
+
+                scaler_d.scale(loss_d).backward()
+                purge_vram()
+
+                if (i + 1) % training_params['accumulation_steps'] == 0:
+                    scaler_d.step(optimizer_d)
+                    scaler_d.update()
+                    optimizer_d.zero_grad(set_to_none=True)
+                    scaler_g.step(optimizer_g)
+                    scaler_g.update()
+                    optimizer_g.zero_grad(set_to_none=True)
+
+                running_loss_g += loss_g.item()
+                running_loss_d += loss_d.item()
+
+                # Log losses for each segment
+                if model_params['tensorboard_flag']:
+                    global_step = epoch * len(dataset.file_ids) * len(input_data) + i * len(input_data) + segment_idx
+                    writer.add_scalar(f'Loss/Generator/{stem_name}/Segment', loss_g.item(), global_step)
+                    writer.add_scalar(f'Loss/Discriminator/{stem_name}/Segment', loss_d.item(), global_step)
+
+                if (i + 1) % 100 == 0:
+                    if model_params['tensorboard_flag']:
+                        writer.add_scalar(f'Loss/Generator/{stem_name}/Batch', running_loss_g / (i + 1), epoch + 1)
+                        writer.add_scalar(f'Loss/Discriminator/{stem_name}/Batch', running_loss_d / (i + 1), epoch + 1)
+                    logger.info(f"Epoch [{epoch+1}/{training_params['num_epochs']}] Batch [{i+1}/{len(dataset.file_ids)}]")
+                    logger.info(f"Generator Loss: {running_loss_g / (i + 1):.4f}, Discriminator Loss: {running_loss_d / (i + 1):.4f}")
+                    purge_vram()
+
+                # Track skipped segments for the entire track
+                all_skipped_segments.extend([seg_idx + segment_idx for seg_idx in skipped_segments])
+
+                # Accumulate outputs for the entire track
+                full_outputs.append(outputs.detach().cpu())  # Store as detached tensors for efficiency
+
+            # Reassemble full output for validation and metrics calculation
+            assembled_output = assemble_full_output(full_outputs, all_skipped_segments, target_data.shape)
 
         model.eval()
         val_loss = 0.0
@@ -192,20 +229,26 @@ def train_single_stem(
                     logger.warning(f"Skipping empty input or target for file_id: {file_id['identifier']}")
                     continue
 
-                inputs = input_data.unsqueeze(0)
-                targets = target_data.unsqueeze(0)
+                for segment_idx in range(input_data.size(0)):
+                    input_segment = input_data[segment_idx].unsqueeze(0)
+                    target_segment = target_data[segment_idx].unsqueeze(0)
 
-                with autocast():
-                    outputs = model(inputs.to(device), model_cache_dir, cache_prefix, file_id['identifier'], update_cache=False)
-                    print(f"Validation - Model output tensor shape: {outputs.shape}")
-                    validate_tensor_shapes(outputs, targets, "During validation before computing loss")
-                    loss = model_params['loss_function_g'](outputs, targets)
-                    val_loss += loss.item()
+                    with autocast():
+                        outputs, skipped_segments = model(input_segment.to(device), model_cache_dir, cache_prefix, f'{file_id["identifier"]}_{segment_idx}', update_cache=False)
+                        logger.info(f"Validation - Model output tensor shape: {outputs.shape}")
 
-                    sdr, sir, sar = compute_sdr(targets.cpu(), outputs.cpu()), compute_sir(targets.cpu(), outputs.cpu()), compute_sar(targets.cpu(), outputs.cpu())
-                    val_sdr += sdr.mean().item()
-                    val_sir += sir.mean().item()
-                    val_sar += sar.mean().item()
+                        # Ensure target tensor shape matches output tensor shape
+                        if target_segment.dim() == 5 and target_segment.size(1) == 1:
+                            target_segment = target_segment.squeeze(1)
+
+                        validate_tensor_shapes(outputs, target_segment, "During validation before computing loss")
+                        loss = model_params['loss_function_g'](outputs, target_segment)
+                        val_loss += loss.item()
+
+                        sdr, sir, sar = compute_sdr(target_segment.cpu(), outputs.cpu()), compute_sir(target_segment.cpu(), outputs.cpu()), compute_sar(target_segment.cpu(), outputs.cpu())
+                        val_sdr += sdr.mean().item()
+                        val_sir += sir.mean().item()
+                        val_sar += sar.mean().item()
 
         avg_val_loss = val_loss / len(val_dataset)
         avg_val_sdr = val_sdr / len(val_dataset)
@@ -220,12 +263,12 @@ def train_single_stem(
             writer.add_scalar('Loss/Generator_Avg', running_loss_g / len(dataset.file_ids), epoch + 1)
             writer.add_scalar('Loss/Discriminator_Avg', running_loss_d / len(dataset.file_ids), epoch + 1)
 
-        print(f"Epoch [{epoch+1}/{training_params['num_epochs']}]")
-        print(f"Generator Loss (Avg): {running_loss_g / len(dataset.file_ids):.4f}")
-        print(f"Discriminator Loss (Avg): {running_loss_d / len(dataset.file_ids):.4f}")
-        print(f"Validation Loss: {avg_val_loss:.4f}")
-        print(f"SDR: {avg_val_sdr:.4f}, SIR: {avg_val_sir:.4f}, SAR: {avg_val_sar:.4f}")
-        print("-----------------------------------")
+        logger.info(f"Epoch [{epoch+1}/{training_params['num_epochs']}]")
+        logger.info(f"Generator Loss (Avg): {running_loss_g / len(dataset.file_ids):.4f}")
+        logger.info(f"Discriminator Loss (Avg): {running_loss_d / len(dataset.file_ids):.4f}")
+        logger.info(f"Validation Loss: {avg_val_loss:.4f}")
+        logger.info(f"SDR: {avg_val_sdr:.4f}, SIR: {avg_val_sir:.4f}, SAR: {avg_val_sar:.4f}")
+        logger.info("-----------------------------------")
 
         if best_val_loss is None or avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss

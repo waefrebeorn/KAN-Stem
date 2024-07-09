@@ -16,7 +16,7 @@ import warnings
 
 warnings.filterwarnings("ignore", message="Lazy modules are a new feature under heavy development")
 warnings.filterwarnings("ignore", message="oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders.")
-
+warnings.filterwarnings("ignore", message="unable to parse version details from package URL.", module="gradio.analytics")
 # Configure logging
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
