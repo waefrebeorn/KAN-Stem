@@ -231,6 +231,8 @@ def train_single_stem(
                     logger.warning(f"Skipping empty input or target for file_id: {file_id['identifier']}")
                     continue
 
+                val_outputs = []  # Store outputs for the entire validation track
+
                 for segment_idx in range(input_data.size(0)):
                     input_segment = input_data[segment_idx].unsqueeze(0)
                     target_segment = target_data[segment_idx].unsqueeze(0)
@@ -257,6 +259,12 @@ def train_single_stem(
                             writer.add_scalar(f'Metrics/SDR_Validation/{stem_name}/Segment', sdr.mean().item(), global_step)
                             writer.add_scalar(f'Metrics/SIR_Validation/{stem_name}/Segment', sir.mean().item(), global_step)
                             writer.add_scalar(f'Metrics/SAR_Validation/{stem_name}/Segment', sar.mean().item(), global_step)
+
+                    # Accumulate outputs for the entire validation track
+                    val_outputs.append(outputs.detach().cpu())  # Store as detached tensors for efficiency
+
+                # Reassemble full output for validation and metrics calculation
+                assembled_val_output = assemble_full_output(val_outputs, [], target_data.shape)
 
         avg_val_loss = val_loss / len(val_dataset)
         avg_val_sdr = val_sdr / len(val_dataset)
