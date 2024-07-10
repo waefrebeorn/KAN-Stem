@@ -178,7 +178,14 @@ with gr.Blocks() as demo:
         start_training_button = gr.Button("Start Training")
         stop_training_button = gr.Button("Stop Training")
         resume_training_button = gr.Button("Resume Training")
+        save_checkpoint_button = gr.Button("Save Checkpoint")
         output = gr.Textbox(label="Output")
+
+        checkpoint_flag = torch.multiprocessing.Value('i', 0)  # New checkpoint flag
+
+        def set_checkpoint_flag():
+            checkpoint_flag.value = 1
+            return "Checkpoint flag set. Checkpoint will be saved during the next segment."
 
         def start_training_and_log_params(data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval,
                                           accumulation_steps, num_stems, num_workers, cache_dir, segments_per_track, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
@@ -234,7 +241,7 @@ with gr.Blocks() as demo:
                                               perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, add_noise,
                                               noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages,
                                               discriminator_update_interval, label_smoothing_real, label_smoothing_fake, perceptual_loss_weight, suppress_detailed_logs,
-                                              use_cache, channel_multiplier, segments_per_track, update_cache)  # Pass segments per track and update cache
+                                              use_cache, channel_multiplier, segments_per_track, update_cache, checkpoint_flag)  # Pass checkpoint flag
 
         start_training_button.click(
             start_training_and_log_params,
@@ -256,6 +263,11 @@ with gr.Blocks() as demo:
         resume_training_button.click(
             resume_training_wrapper,
             inputs=[checkpoint_dir],
+            outputs=output
+        )
+
+        save_checkpoint_button.click(
+            set_checkpoint_flag,
             outputs=output
         )
 

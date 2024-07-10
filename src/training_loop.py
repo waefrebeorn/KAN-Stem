@@ -55,6 +55,7 @@ def train_single_stem(
     n_fft: int,
     segment_length: int,
     stop_flag: torch.Tensor,
+    checkpoint_flag: torch.Tensor,
     suppress_reading_messages: bool = False
 ):
     if stem_name == "input":
@@ -205,6 +206,13 @@ def train_single_stem(
                     logger.info(f"Generator Loss: {running_loss_g / (i + 1):.4f}, Discriminator Loss: {running_loss_d / (i + 1):.4f}")
                     purge_vram()
 
+                # Checkpoint saving
+                if checkpoint_flag.value == 1:
+                    checkpoint_path = os.path.join(training_params['checkpoint_dir'], f'stem_{stem_name}_epoch_{epoch+1}_segment_{segment_idx+1}.pt')
+                    torch.save(model.state_dict(), checkpoint_path)
+                    logger.info(f"Checkpoint saved during segment: {checkpoint_path}")
+                    checkpoint_flag.value = 0  # Reset the flag
+
                 # Accumulate outputs for the entire track
                 full_outputs.append(outputs.detach().cpu())  # Store as detached tensors for efficiency
 
@@ -330,7 +338,7 @@ def start_training(
     add_noise: bool, noise_amount: float, early_stopping_patience: int,
     disable_early_stopping: bool, weight_decay: float, suppress_warnings: bool, suppress_reading_messages: bool,
     discriminator_update_interval: int, label_smoothing_real: float, label_smoothing_fake: float,
-    suppress_detailed_logs: bool, stop_flag: torch.Tensor, channel_multiplier: float, segments_per_track: int = 5,
+    suppress_detailed_logs: bool, stop_flag: torch.Tensor, checkpoint_flag: torch.Tensor, channel_multiplier: float, segments_per_track: int = 5,
     use_cache: bool = True, update_cache: bool = False
 ):
     device = torch.device('cuda' if use_cuda and torch.cuda.is_available() else 'cpu')
@@ -436,7 +444,7 @@ def start_training(
 
         train_single_stem(
             stem_name, train_dataset, val_dataset, training_params, model_params,
-            sample_rate, n_mels, n_fft, segment_length, stop_flag, suppress_reading_messages
+            sample_rate, n_mels, n_fft, segment_length, stop_flag, checkpoint_flag, suppress_reading_messages
         )
 
         end_time = time.time()
@@ -447,6 +455,7 @@ def start_training(
 
 if __name__ == '__main__':
     stop_flag = torch.multiprocessing.Value('i', 0)
+    checkpoint_flag = torch.multiprocessing.Value('i', 0)  # New checkpoint flag
 
     start_training(
         data_dir='path_to_data',
@@ -483,6 +492,7 @@ if __name__ == '__main__':
         label_smoothing_fake=0.1,
         suppress_detailed_logs=False,
         stop_flag=stop_flag,
+        checkpoint_flag=checkpoint_flag,  # Pass the checkpoint flag
         channel_multiplier=2,
         segments_per_track=5,
         use_cache=True,

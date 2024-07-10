@@ -6,6 +6,7 @@ from multiprocessing import Value
 import hashlib
 import warnings
 import torch
+from train import start_training_wrapper, stop_training_wrapper
 
 warnings.filterwarnings("ignore", message="Lazy modules are a new feature under heavy development")
 warnings.filterwarnings("ignore", message="oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders.")
@@ -36,13 +37,14 @@ def objective_optuna(trial, gradio_params):
     clip_value = trial.suggest_float('clip_value', 0.5, 1.5)
 
     stop_flag = Value('i', 0)  # Shared flag for stopping processes
+    checkpoint_flag = Value('i', 0)  # Shared flag for saving checkpoints
 
-    start_training(
+    start_training_wrapper(
         data_dir=gradio_params["data_dir"],
         batch_size=effective_batch_size,  # Actual batch size from gradio_params
         num_epochs=5,  # Test with only 5 epochs
-        initial_lr_g=learning_rate_g,
-        initial_lr_d=learning_rate_d,
+        learning_rate_g=learning_rate_g,
+        learning_rate_d=learning_rate_d,
         use_cuda=gradio_params["use_cuda"],
         checkpoint_dir=gradio_params["checkpoint_dir"],
         save_interval=gradio_params["save_interval"],
@@ -50,9 +52,8 @@ def objective_optuna(trial, gradio_params):
         num_stems=gradio_params["num_stems"],
         num_workers=gradio_params["num_workers"],
         cache_dir=gradio_params["cache_dir"],
-        use_cache=gradio_params["use_cache"],  # Added use_cache parameter
-        loss_function_g=nn.L1Loss(),
-        loss_function_d=wasserstein_loss,
+        loss_function_str_g="L1Loss",
+        loss_function_str_d="WassersteinLoss",
         optimizer_name_g="Adam",
         optimizer_name_d="Adam",
         perceptual_loss_flag=True,
@@ -72,9 +73,10 @@ def objective_optuna(trial, gradio_params):
         label_smoothing_real=gradio_params["label_smoothing_real"],
         label_smoothing_fake=gradio_params["label_smoothing_fake"],
         suppress_detailed_logs=gradio_params["suppress_detailed_logs"],
-        stop_flag=stop_flag,
+        use_cache=gradio_params["use_cache"],
         channel_multiplier=gradio_params["channel_multiplier"],
-        segments_per_track=gradio_params["segments_per_track"]
+        segments_per_track=gradio_params["segments_per_track"],
+        update_cache=gradio_params["update_cache"]
     )
 
     return 0.0

@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 # Define global variables
 stop_flag = Value('i', 0)
+checkpoint_flag = Value('i', 0)
 training_process = None
 
 def start_training_wrapper(
@@ -23,8 +24,9 @@ def start_training_wrapper(
     suppress_warnings, suppress_reading_messages, discriminator_update_interval, label_smoothing_real, label_smoothing_fake,
     suppress_detailed_logs, use_cache, channel_multiplier, segments_per_track=10, update_cache=True
 ):
-    global training_process, stop_flag
+    global training_process, stop_flag, checkpoint_flag
     stop_flag.value = 0  # Reset stop flag
+    checkpoint_flag.value = 0  # Reset checkpoint flag
     loss_function_map = {
         "MSELoss": nn.MSELoss(),
         "L1Loss": nn.L1Loss(),
@@ -40,7 +42,7 @@ def start_training_wrapper(
         accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
         perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, add_noise,
         noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages,
-        discriminator_update_interval, label_smoothing_real, label_smoothing_fake, suppress_detailed_logs, stop_flag, use_cache, channel_multiplier, segments_per_track, update_cache))
+        discriminator_update_interval, label_smoothing_real, label_smoothing_fake, suppress_detailed_logs, stop_flag, use_cache, channel_multiplier, segments_per_track, update_cache, checkpoint_flag))
     training_process.start()
     return f"Training Started with {loss_function_str_g} for Generator and {loss_function_str_d} for Discriminator, using {optimizer_name_g} for Generator Optimizer and {optimizer_name_d} for Discriminator Optimizer"
 
