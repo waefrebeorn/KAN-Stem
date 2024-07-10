@@ -123,6 +123,7 @@ def train_single_stem(
                 continue
 
             full_outputs = []  # Store outputs for the entire track
+            all_skipped_segments = []
 
             for segment_idx in range(input_data.size(0)):
                 input_segment = input_data[segment_idx].unsqueeze(0)
@@ -132,7 +133,7 @@ def train_single_stem(
                 logger.info(f"Target tensor shape: {target_segment.shape}")
 
                 with autocast():
-                    outputs = model(input_segment.to(device))
+                    outputs, skipped_segments = model(input_segment.to(device))
                     logger.info(f"Model output tensor shape: {outputs.shape}")
 
                     # Ensure target tensor shape matches output tensor shape
@@ -198,11 +199,14 @@ def train_single_stem(
                     logger.info(f"Generator Loss: {running_loss_g / (i + 1):.4f}, Discriminator Loss: {running_loss_d / (i + 1):.4f}")
                     purge_vram()
 
+                # Track skipped segments for the entire track
+                all_skipped_segments.extend([seg_idx + segment_idx for seg_idx in skipped_segments])
+
                 # Accumulate outputs for the entire track
                 full_outputs.append(outputs.detach().cpu())  # Store as detached tensors for efficiency
 
             # Reassemble full output for validation and metrics calculation
-            assembled_output = assemble_full_output(full_outputs, [], target_data.shape)
+            assembled_output = assemble_full_output(full_outputs, all_skipped_segments, target_data.shape)
 
         model.eval()
         val_loss = 0.0
@@ -236,7 +240,7 @@ def train_single_stem(
                     target_segment = target_data[segment_idx].unsqueeze(0)
 
                     with autocast():
-                        outputs = model(input_segment.to(device))
+                        outputs, skipped_segments = model(input_segment.to(device))
                         logger.info(f"Validation - Model output tensor shape: {outputs.shape}")
 
                         # Ensure target tensor shape matches output tensor shape

@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 import logging
+import h5py
 import gc
 import math
 import torch.nn.functional as F
@@ -25,6 +26,26 @@ def log_memory_usage(tag):
     allocated = torch.cuda.memory_allocated()
     reserved = torch.cuda.memory_reserved()
     logger.info(f"[{tag}] Allocated memory: {allocated / (1024 ** 3):.2f} GB, Reserved memory: {reserved / (1024 ** 3):.2f} GB")
+
+def save_to_cache(cache_dir: str, cache_file_name: str, tensor: torch.Tensor):
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_file_path = os.path.join(cache_dir, cache_file_name)
+    logger.info(f"Saving tensor to cache file: {cache_file_path}")
+    with h5py.File(cache_file_path, 'w') as f:
+        f.create_dataset('tensor', data=tensor.detach().cpu().numpy())
+    logger.info(f"Saved tensor shape: {tensor.shape}")
+    purge_vram()
+
+def load_from_cache(cache_dir: str, cache_file_name: str, device: torch.device) -> torch.Tensor:
+    cache_file_path = os.path.join(cache_dir, cache_file_name)
+    logger.info(f"Loading tensor from cache file: {cache_file_path}")
+    with h5py.File(cache_file_path, 'r') as f:
+        if 'tensor' not in f:
+            raise KeyError(f"Tensor not found in cache file: {cache_file_path}")
+        tensor = torch.tensor(f['tensor'][:], device=device).float().requires_grad_(True)
+    logger.info(f"Loaded tensor shape: {tensor.shape}")
+    purge_vram()
+    return tensor
 
 class RadialBasisFunction(nn.Module):
     def __init__(self, grid_min: float = -1.5, grid_max: float = 1.5, num_grids: int = 8, denominator: float = None):
@@ -236,49 +257,76 @@ class MemoryEfficientStemSeparationModel(nn.Module):
             x = x.view(batch_size // original_segments, original_segments, in_channels, n_mels, length) # Remove extra dim
         return x
 
-    def _forward_encoder(self, x: torch.Tensor) -> torch.Tensor:
+    def _forward_encoder(self, x: torch.Tensor, model_cache_dir: str, cache_prefix: str, identifier: str, update_cache: bool) -> torch.Tensor:
         log_memory_usage("Before Encoder")
         logger.info(f"Encoder input shape: {x.shape}")
+        
+        cache_file_name = f'{cache_prefix}_encoder_{identifier}.h5'
+        cache_file_path = os.path.join(model_cache_dir, cache_file_name)
 
-        x = self._reshape_input_tensor(x)
-        processed_segments = []
-        for idx in range(x.size(0)):
-            segment = x[idx:idx+1, :, :, :]
-            processed_channels = []
-            for i, channel_processor in enumerate(self.channel_processors):
-                if segment[:, i:i+1, :, :].shape[1] > 0:
-                    processed_channel = checkpoint(channel_processor, segment[:, i:i+1, :, :], use_reentrant=False)
-                    processed_channels.append(processed_channel)
-            if processed_channels:
-                processed_segment = torch.cat(processed_channels, dim=1)
-                processed_segments.append(processed_segment)
-        x = torch.cat(processed_segments, dim=0)
+        skipped_segments = []  # Initialize skipped_segments
+
+        if os.path.exists(cache_file_path) and not update_cache:
+            x = load_from_cache(model_cache_dir, cache_file_name, x.device)
+        else:
+            x = self._reshape_input_tensor(x)
+            processed_segments = []
+            for idx in range(x.size(0)):
+                segment = x[idx:idx+1, :, :, :]
+                processed_channels = []
+                for i, channel_processor in enumerate(self.channel_processors):
+                    if segment[:, i:i+1, :, :].shape[1] > 0:
+                        processed_channel = checkpoint(channel_processor, segment[:, i:i+1, :, :], use_reentrant=False)
+                        processed_channels.append(processed_channel)
+                if processed_channels:
+                    processed_segment = torch.cat(processed_channels, dim=1)
+                    processed_segments.append(processed_segment)
+                else:
+                    skipped_segments.append(idx)  # Record the index of the skipped segment
+            x = torch.cat(processed_segments, dim=0)
+            
+            save_to_cache(model_cache_dir, cache_file_name, x)
         
         logger.info(f"Encoder output shape: {x.shape}")
         purge_vram()
         log_memory_usage("After Encoder")
-        return x
+        return x, skipped_segments  # Return both the processed data and skipped segment indices
 
-    def _forward_combiner(self, x: torch.Tensor) -> torch.Tensor:
+    def _forward_combiner(self, x: torch.Tensor, skipped_segments, model_cache_dir: str, cache_prefix: str, identifier: str, update_cache: bool) -> torch.Tensor:
         log_memory_usage("Before Combiner")
         logger.info(f"Combiner input shape: {x.shape}")
 
-        x = checkpoint(self.combiner, x, use_reentrant=False)
-        x = self.attention_layer(x)
-        x = self.context_aggregation_network(x)
+        cache_file_name = f'{cache_prefix}_combiner_{identifier}.h5'
+        cache_file_path = os.path.join(model_cache_dir, cache_file_name)
+
+        if os.path.exists(cache_file_path) and not update_cache:
+            x = load_from_cache(model_cache_dir, cache_file_name, x.device)
+        else:
+            x = checkpoint(self.combiner, x, use_reentrant=False)
+            x = self.attention_layer(x)
+            x = self.context_aggregation_network(x)
+            
+            save_to_cache(model_cache_dir, cache_file_name, x)
 
         logger.info(f"Combiner output shape: {x.shape}")
         purge_vram()
         log_memory_usage("After Combiner")
         return x
 
-    def _forward_decoder(self, x: torch.Tensor) -> torch.Tensor:
+    def _forward_decoder(self, x: torch.Tensor, skipped_segments, model_cache_dir: str, cache_prefix: str, identifier: str, update_cache: bool) -> torch.Tensor:
         log_memory_usage("Before Decoder")
         logger.info(f"Decoder input shape: {x.shape}")
         for idx, upsampler_layer in enumerate(self.upsampler):
-            with torch.cuda.amp.autocast():
-                x = checkpoint(upsampler_layer, x, use_reentrant=False)
-            logger.info(f"Decoder layer {idx} output shape: {x.shape}")
+            cache_file_name = f'{cache_prefix}_decoder_{idx}_{identifier}.h5'
+            cache_file_path = os.path.join(model_cache_dir, cache_file_name)
+            if os.path.exists(cache_file_path) and not update_cache:
+                x = load_from_cache(model_cache_dir, cache_file_name, x.device)
+                x.requires_grad = True  # Ensure gradients are tracked
+            else:
+                with torch.cuda.amp.autocast():
+                    x = checkpoint(upsampler_layer, x, use_reentrant=False)
+                save_to_cache(model_cache_dir, cache_file_name, x)
+                logger.info(f"Decoder layer {idx} output shape: {x.shape}")
 
             purge_vram()
 
@@ -290,15 +338,15 @@ class MemoryEfficientStemSeparationModel(nn.Module):
         log_memory_usage("After Decoder")
         return x
 
-    def forward(self, x) -> torch.Tensor:
+    def forward(self, x, model_cache_dir: str, cache_prefix: str, identifier: str, update_cache: bool = False) -> torch.Tensor:
         log_memory_usage("Start Forward")
         original_segments = x.shape[1] if x.dim() == 6 else 1 
         if x.dim() == 5:
             x = self._reshape_input_tensor(x)
         with torch.cuda.amp.autocast():
-            x = self._forward_encoder(x)
-            x = self._forward_combiner(x)
-            x = self._forward_decoder(x) 
+            x, skipped_segments = self._forward_encoder(x, model_cache_dir, cache_prefix, identifier, update_cache)  # Get skipped segments
+            x = self._forward_combiner(x, skipped_segments, model_cache_dir, cache_prefix, identifier, update_cache)
+            x = self._forward_decoder(x, skipped_segments, model_cache_dir, cache_prefix, identifier, update_cache) 
 
         x = self.final_conv(x)
 
@@ -311,7 +359,7 @@ class MemoryEfficientStemSeparationModel(nn.Module):
 
         log_memory_usage("End Forward")
         purge_vram()
-        return x
+        return x, skipped_segments  # Return both the output and skipped segments
 
 class KANDiscriminator(nn.Module):
     def __init__(self, in_channels=3, out_channels=64, n_mels=32, target_length=22050, device="cuda", channel_multiplier=1.0):

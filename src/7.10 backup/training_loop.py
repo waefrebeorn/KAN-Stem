@@ -14,6 +14,7 @@ from utils import (
     process_and_cache_dataset, create_dataloader
 )
 from model_setup import create_model_and_optimizer
+from model import save_to_cache, load_from_cache
 import time
 import numpy as np  # For creating zero-filled segments
 
@@ -64,6 +65,9 @@ def train_single_stem(
     logger.info(f"Starting training for single stem: {stem_name}")
 
     device = torch.device(training_params['device_str'])
+    model_cache_dir = os.path.join(training_params['cache_dir'], 'model_cache')
+    os.makedirs(model_cache_dir, exist_ok=True)
+    cache_prefix = f'{stem_name}_'
 
     writer = SummaryWriter(log_dir=os.path.join(training_params['checkpoint_dir'], 'runs', f'stem_{stem_name}_{datetime.now().strftime("%Y%m%d-%H%M%S")}')) if model_params['tensorboard_flag'] else None
 
@@ -123,6 +127,7 @@ def train_single_stem(
                 continue
 
             full_outputs = []  # Store outputs for the entire track
+            all_skipped_segments = []
 
             for segment_idx in range(input_data.size(0)):
                 input_segment = input_data[segment_idx].unsqueeze(0)
@@ -132,7 +137,7 @@ def train_single_stem(
                 logger.info(f"Target tensor shape: {target_segment.shape}")
 
                 with autocast():
-                    outputs = model(input_segment.to(device))
+                    outputs, skipped_segments = model(input_segment.to(device), model_cache_dir, cache_prefix, f'{file_id["identifier"]}_{segment_idx}', update_cache=False)
                     logger.info(f"Model output tensor shape: {outputs.shape}")
 
                     # Ensure target tensor shape matches output tensor shape
@@ -198,11 +203,14 @@ def train_single_stem(
                     logger.info(f"Generator Loss: {running_loss_g / (i + 1):.4f}, Discriminator Loss: {running_loss_d / (i + 1):.4f}")
                     purge_vram()
 
+                # Track skipped segments for the entire track
+                all_skipped_segments.extend([seg_idx + segment_idx for seg_idx in skipped_segments])
+
                 # Accumulate outputs for the entire track
                 full_outputs.append(outputs.detach().cpu())  # Store as detached tensors for efficiency
 
             # Reassemble full output for validation and metrics calculation
-            assembled_output = assemble_full_output(full_outputs, [], target_data.shape)
+            assembled_output = assemble_full_output(full_outputs, all_skipped_segments, target_data.shape)
 
         model.eval()
         val_loss = 0.0
@@ -236,7 +244,7 @@ def train_single_stem(
                     target_segment = target_data[segment_idx].unsqueeze(0)
 
                     with autocast():
-                        outputs = model(input_segment.to(device))
+                        outputs, skipped_segments = model(input_segment.to(device), model_cache_dir, cache_prefix, f'{file_id["identifier"]}_{segment_idx}', update_cache=False)
                         logger.info(f"Validation - Model output tensor shape: {outputs.shape}")
 
                         # Ensure target tensor shape matches output tensor shape
@@ -295,6 +303,15 @@ def train_single_stem(
 
         scheduler_g.step(avg_val_loss)
         scheduler_d.step(avg_val_loss)
+
+        for file_id in dataset.file_ids:
+            input_file_path = os.path.join(dataset.data_dir, file_id['input_file'])
+            if os.path.exists(input_file_path):
+                input_data = dataset.process_and_cache_file(input_file_path, file_id['identifier'], 'input')
+                if input_data.numel() != 0:
+                    inputs = input_data.unsqueeze(0)
+                    with autocast():
+                        model(inputs.to(device), model_cache_dir, cache_prefix, file_id['identifier'], update_cache=True)
 
     if model_params['tensorboard_flag']:
         writer.close()
