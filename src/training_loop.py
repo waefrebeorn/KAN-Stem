@@ -128,12 +128,14 @@ def train_single_stem(
                 input_segment = input_data[segment_idx].unsqueeze(0)
                 target_segment = target_data[segment_idx].unsqueeze(0)
 
-                logger.info(f"Input tensor shape: {input_segment.shape}")
-                logger.info(f"Target tensor shape: {target_segment.shape}")
+                if model_params['tensorboard_flag']:
+                    logger.debug(f"Input tensor shape: {input_segment.shape}")
+                    logger.debug(f"Target tensor shape: {target_segment.shape}")
 
                 with autocast():
                     outputs = model(input_segment.to(device))
-                    logger.info(f"Model output tensor shape: {outputs.shape}")
+                    if model_params['tensorboard_flag']:
+                        logger.debug(f"Model output tensor shape: {outputs.shape}")
 
                     # Ensure target tensor shape matches output tensor shape
                     if target_segment.dim() == 5 and target_segment.size(1) == 1:
@@ -190,6 +192,11 @@ def train_single_stem(
                     writer.add_scalar(f'Metrics/SIR/{stem_name}/Segment', sir.mean().item(), global_step)
                     writer.add_scalar(f'Metrics/SAR/{stem_name}/Segment', sar.mean().item(), global_step)
 
+                    # Print TensorBoard findings to console
+                    print(f"Epoch [{epoch+1}/{training_params['num_epochs']}], Segment [{segment_idx+1}/{input_data.size(0)}]: "
+                          f"Loss_G: {loss_g.item():.4f}, Loss_D: {loss_d.item():.4f}, SDR: {sdr.mean().item():.4f}, "
+                          f"SIR: {sir.mean().item():.4f}, SAR: {sar.mean().item():.4f}")
+
                 if (i + 1) % 100 == 0:
                     if model_params['tensorboard_flag']:
                         writer.add_scalar(f'Loss/Generator/{stem_name}/Batch', running_loss_g / (i + 1), global_step)
@@ -239,7 +246,8 @@ def train_single_stem(
 
                     with autocast():
                         outputs = model(input_segment.to(device))
-                        logger.info(f"Validation - Model output tensor shape: {outputs.shape}")
+                        if model_params['tensorboard_flag']:
+                            logger.debug(f"Validation - Model output tensor shape: {outputs.shape}")
 
                         # Ensure target tensor shape matches output tensor shape
                         if target_segment.dim() == 5 and target_segment.size(1) == 1:
@@ -259,6 +267,10 @@ def train_single_stem(
                             writer.add_scalar(f'Metrics/SDR_Validation/{stem_name}/Segment', sdr.mean().item(), global_step)
                             writer.add_scalar(f'Metrics/SIR_Validation/{stem_name}/Segment', sir.mean().item(), global_step)
                             writer.add_scalar(f'Metrics/SAR_Validation/{stem_name}/Segment', sar.mean().item(), global_step)
+
+                        # Print TensorBoard findings to console
+                        print(f"Validation - Epoch [{epoch+1}/{training_params['num_epochs']}], Segment [{segment_idx+1}/{input_data.size(0)}]: "
+                              f"Loss: {loss.item():.4f}, SDR: {sdr.mean().item():.4f}, SIR: {sir.mean().item():.4f}, SAR: {sar.mean().item():.4f}")
 
                     # Accumulate outputs for the entire validation track
                     val_outputs.append(outputs.detach().cpu())  # Store as detached tensors for efficiency

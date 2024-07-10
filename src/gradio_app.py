@@ -13,6 +13,7 @@ from prepare_dataset import organize_and_prepare_dataset_gradio
 from generate_other_noise import generate_shuffled_noise_gradio
 from hyperparameter_optimization import objective_optuna, start_optuna_optimization
 import warnings
+import tensorflow as tf
 
 warnings.filterwarnings("ignore", message="Lazy modules are a new feature under heavy development")
 warnings.filterwarnings("ignore", message="oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders.")
@@ -97,6 +98,41 @@ def log_training_parameters(params):
     for key, value in params.items():
         logger.info(f"{key}: {value}")
 
+def parse_event_file(event_file):
+    data = {}
+    for e in tf.compat.v1.train.summary_iterator(event_file):
+        for v in e.summary.value:
+            if v.tag not in data:
+                data[v.tag] = []
+            data[v.tag].append((e.step, v.simple_value))
+    return data
+
+def truncate_data(data, max_entries_per_tag=10):
+    truncated_data = {}
+    for tag, values in data.items():
+        truncated_data[tag] = values[:max_entries_per_tag]
+    return truncated_data
+
+def format_data(truncated_data):
+    formatted_data = ""
+    for tag, values in truncated_data.items():
+        formatted_data += f"Tag: {tag}\n"
+        for step, value in values:
+            formatted_data += f"Step: {step}, Value: {value}\n"
+        formatted_data += "\n"
+    return formatted_data
+
+def save_to_txt(formatted_data, output_file):
+    with open(output_file, 'w') as f:
+        f.write(formatted_data)
+
+def parse_and_format_event_file(event_file, output_file, max_entries_per_tag):
+    data = parse_event_file(event_file)
+    truncated_data = truncate_data(data, max_entries_per_tag)
+    formatted_data = format_data(truncated_data)
+    save_to_txt(formatted_data, output_file)
+    return formatted_data
+
 with gr.Blocks() as demo:
     with gr.Tab("Training"):
         gr.Markdown("### Train the Model")
@@ -111,7 +147,7 @@ with gr.Blocks() as demo:
         accumulation_steps = gr.Number(label="Accumulation Steps", value=1)
         num_stems = gr.Number(label="Number of Stems", value=6)
         num_workers = gr.Number(label="Number of Workers", value=1)
-        cache_dir = gr.Textbox(label="Cache Directory", value="F:/")
+        cache_dir = gr.Textbox(label="Cache Directory", value="./cache")
         segments_per_track = gr.Number(label="Segments per Track", value=1) 
         loss_function_g = gr.Dropdown(label="Generator Loss Function", choices=["MSELoss", "L1Loss", "SmoothL1Loss", "BCEWithLogitsLoss", "WassersteinLoss"], value="L1Loss")
         loss_function_d = gr.Dropdown(label="Discriminator Loss Function", choices=["MSELoss", "L1Loss", "SmoothL1Loss", "BCEWithLogitsLoss", "WassersteinLoss"], value="WassersteinLoss")
@@ -287,6 +323,25 @@ with gr.Blocks() as demo:
             generate_shuffled_noise_gradio,
             inputs=[noise_input_dir, noise_output_dir, noise_num_examples],
             outputs=noise_output
+        )
+
+    with gr.Tab("Parse TensorFlow Event File"):
+        gr.Markdown("### Parse TensorFlow Event File")
+        event_file = gr.Textbox(label="Event File Path")
+        output_file = gr.Textbox(label="Output File Path", value="parsed_output.txt")
+        max_entries_per_tag = gr.Number(label="Max Entries per Tag", value=120)
+        parse_event_button = gr.Button("Parse Event File")
+        parsed_output = gr.Textbox(label="Parsed Output")
+        
+        def parse_and_display_event_file(event_file, output_file, max_entries_per_tag):
+            parse_event_file(event_file, output_file, max_entries_per_tag)
+            with open(output_file, 'r') as file:
+                return file.read()
+
+        parse_event_button.click(
+            parse_and_display_event_file,
+            inputs=[event_file, output_file, max_entries_per_tag],
+            outputs=parsed_output
         )
 
 if __name__ == "__main__":

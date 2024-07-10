@@ -12,19 +12,19 @@ logger = logging.getLogger(__name__)
 def purge_vram():
     try:
         torch.cuda.empty_cache()
-        logger.info("Successfully purged GPU cache.")
+        logger.debug("Successfully purged GPU cache.")
     except Exception as e:
         logger.error(f"Error purging GPU cache: {e}", exc_info=True)
     try:
         gc.collect()
-        logger.info("Successfully performed garbage collection.")
+        logger.debug("Successfully performed garbage collection.")
     except Exception as e:
         logger.error(f"Error during garbage collection: {e}", exc_info=True)
 
 def log_memory_usage(tag):
     allocated = torch.cuda.memory_allocated()
     reserved = torch.cuda.memory_reserved()
-    logger.info(f"[{tag}] Allocated memory: {allocated / (1024 ** 3):.2f} GB, Reserved memory: {reserved / (1024 ** 3):.2f} GB")
+    logger.debug(f"[{tag}] Allocated memory: {allocated / (1024 ** 3):.2f} GB, Reserved memory: {reserved / (1024 ** 3):.2f} GB")
 
 class RadialBasisFunction(nn.Module):
     def __init__(self, grid_min: float = -1.5, grid_max: float = 1.5, num_grids: int = 8, denominator: float = None):
@@ -238,7 +238,7 @@ class MemoryEfficientStemSeparationModel(nn.Module):
 
     def _forward_encoder(self, x: torch.Tensor) -> torch.Tensor:
         log_memory_usage("Before Encoder")
-        logger.info(f"Encoder input shape: {x.shape}")
+        logger.debug(f"Encoder input shape: {x.shape}")
 
         x = self._reshape_input_tensor(x)
         processed_segments = []
@@ -254,37 +254,37 @@ class MemoryEfficientStemSeparationModel(nn.Module):
                 processed_segments.append(processed_segment)
         x = torch.cat(processed_segments, dim=0)
         
-        logger.info(f"Encoder output shape: {x.shape}")
+        logger.debug(f"Encoder output shape: {x.shape}")
         purge_vram()
         log_memory_usage("After Encoder")
         return x
 
     def _forward_combiner(self, x: torch.Tensor) -> torch.Tensor:
         log_memory_usage("Before Combiner")
-        logger.info(f"Combiner input shape: {x.shape}")
+        logger.debug(f"Combiner input shape: {x.shape}")
 
         x = checkpoint(self.combiner, x, use_reentrant=False)
         x = self.attention_layer(x)
         x = self.context_aggregation_network(x)
 
-        logger.info(f"Combiner output shape: {x.shape}")
+        logger.debug(f"Combiner output shape: {x.shape}")
         purge_vram()
         log_memory_usage("After Combiner")
         return x
 
     def _forward_decoder(self, x: torch.Tensor) -> torch.Tensor:
         log_memory_usage("Before Decoder")
-        logger.info(f"Decoder input shape: {x.shape}")
+        logger.debug(f"Decoder input shape: {x.shape}")
         for idx, upsampler_layer in enumerate(self.upsampler):
             with torch.cuda.amp.autocast():
                 x = checkpoint(upsampler_layer, x, use_reentrant=False)
-            logger.info(f"Decoder layer {idx} output shape: {x.shape}")
+            logger.debug(f"Decoder layer {idx} output shape: {x.shape}")
 
             purge_vram()
 
         if x.shape[-1] > self.target_length:
             x = x[..., :self.target_length]
-            logger.info(f"Adjusted decoder layer output shape: {x.shape}")
+            logger.debug(f"Adjusted decoder layer output shape: {x.shape}")
 
         purge_vram()
         log_memory_usage("After Decoder")
@@ -305,9 +305,9 @@ class MemoryEfficientStemSeparationModel(nn.Module):
         if x.shape[-1] > self.target_length:
             x = x[..., :self.target_length]
 
-        logger.info(f"Output shape before reshape: {x.shape}")
+        logger.debug(f"Output shape before reshape: {x.shape}")
         x = self._reshape_output_tensor(x, original_segments)
-        logger.info(f"Output shape after reshape: {x.shape}")
+        logger.debug(f"Output shape after reshape: {x.shape}")
 
         log_memory_usage("End Forward")
         purge_vram()
@@ -394,6 +394,6 @@ def load_model(checkpoint_path: str, in_channels: int, out_channels: int, n_mels
     return model
 
 if __name__ == "__main__":
-    logger.info("Model script executed directly.")
+    logger.debug("Model script executed directly.")
 else:
-    logger.info("Model script imported as a module.")
+    logger.debug("Model script imported as a module.")
