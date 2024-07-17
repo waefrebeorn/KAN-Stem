@@ -10,19 +10,18 @@ warnings.filterwarnings("ignore", message="oneDNN custom operations are on. You 
 
 def create_model_and_optimizer(device, n_mels, target_length, initial_lr_g, initial_lr_d, 
                                optimizer_name_g, optimizer_name_d, weight_decay):
-    # Create the generator model
+    optimizer_name_g = optimizer_name_g.capitalize()
+    optimizer_name_d = optimizer_name_d.capitalize()
+    
     model = MemoryEfficientStemSeparationModel(in_channels=3, out_channels=3, n_mels=n_mels, 
                                                target_length=target_length).to(device)
 
-    # Create the discriminator model
     discriminator = KANDiscriminator(in_channels=3, out_channels=64, n_mels=n_mels, 
                                      target_length=target_length, device=device).to(device)
 
-    # Create the optimizers
     optimizer_g = get_optimizer(optimizer_name_g, model.parameters(), initial_lr_g, weight_decay)
     optimizer_d = get_optimizer(optimizer_name_d, discriminator.parameters(), initial_lr_d, weight_decay)
 
-    # Create gradient scalers for mixed precision training
     scaler_g = GradScaler()
     scaler_d = GradScaler()
 

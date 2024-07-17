@@ -1,9 +1,11 @@
 import os
 import torch
+import torch.optim as optim
 import torch.nn as nn
 from torch.utils.tensorboard import SummaryWriter
 from datetime import datetime
 import logging
+from multiprocessing import Value, Process, Manager
 from torch.cuda.amp import autocast, GradScaler
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from utils import (
@@ -14,6 +16,7 @@ from utils import (
     process_and_cache_dataset, create_dataloader
 )
 from model_setup import create_model_and_optimizer
+from utils_checkpoint import save_checkpoint  # Import the save_checkpoint function
 import time
 import numpy as np  # For creating zero-filled segments
 
@@ -54,8 +57,9 @@ def train_single_stem(
     n_mels: int,
     n_fft: int,
     segment_length: int,
-    stop_flag: torch.Tensor,
-    checkpoint_flag: torch.Tensor,
+    stop_flag: Value,
+    checkpoint_flag: Value,
+    training_state: dict,
     suppress_reading_messages: bool = False
 ):
     if stem_name == "input":
@@ -73,6 +77,23 @@ def train_single_stem(
         training_params['initial_lr_g'], training_params['initial_lr_d'], model_params['optimizer_name_g'],
         model_params['optimizer_name_d'], training_params['weight_decay']
     )
+
+    # Debugging statement
+    print(f"[train_single_stem] training_state type: {type(training_state)}")
+    print(f"[train_single_stem] training_state value: {training_state}")
+    assert isinstance(training_state, (dict, Manager().DictProxy)), "training_state must be a dictionary or DictProxy object"
+
+    # Store in training_state
+    training_state.update({
+        "model": model,
+        "optimizer_g": optimizer_g,
+        "optimizer_d": optimizer_d,
+        "scaler_g": scaler_g,
+        "scaler_d": scaler_d,
+        "stem_name": stem_name,
+        "model_params": model_params,
+        "training_params": training_params
+    })
 
     scheduler_g = ReduceLROnPlateau(optimizer_g, mode='min', factor=0.5, patience=10)
     scheduler_d = ReduceLROnPlateau(optimizer_d, mode='min', factor=0.5, patience=10)
@@ -97,6 +118,8 @@ def train_single_stem(
 
         optimizer_g.zero_grad(set_to_none=True)
         optimizer_d.zero_grad(set_to_none=True)
+
+        training_state['current_epoch'] = epoch  # Update current epoch in training_state
 
         for i, file_id in enumerate(dataset.file_ids):
             if stop_flag.value == 1:
@@ -208,9 +231,20 @@ def train_single_stem(
 
                 # Checkpoint saving
                 if checkpoint_flag.value == 1:
-                    checkpoint_path = os.path.join(training_params['checkpoint_dir'], f'stem_{stem_name}_epoch_{epoch+1}_segment_{segment_idx+1}.pt')
-                    torch.save(model.state_dict(), checkpoint_path)
-                    logger.info(f"Checkpoint saved during segment: {checkpoint_path}")
+                    save_checkpoint(
+                        checkpoint_dir=training_params['checkpoint_dir'],
+                        epoch=epoch,
+                        segment_idx=segment_idx,
+                        model=model,
+                        optimizer_g=optimizer_g,
+                        optimizer_d=optimizer_d,
+                        scaler_g=scaler_g,
+                        scaler_d=scaler_d,
+                        model_params=model_params,
+                        training_params=training_params,
+                        stem_name=stem_name,
+                        is_epoch_checkpoint=False
+                    )
                     checkpoint_flag.value = 0  # Reset the flag
 
                 # Accumulate outputs for the entire track
@@ -276,9 +310,9 @@ def train_single_stem(
                             writer.add_scalar(f'Metrics/SIR_Validation/{stem_name}/Segment', sir.mean().item(), global_step)
                             writer.add_scalar(f'Metrics/SAR_Validation/{stem_name}/Segment', sar.mean().item(), global_step)
 
-                        # Print TensorBoard findings to console
-                        print(f"Validation - Epoch [{epoch+1}/{training_params['num_epochs']}], Segment [{segment_idx+1}/{input_data.size(0)}]: "
-                              f"Loss: {loss.item():.4f}, SDR: {sdr.mean().item():.4f}, SIR: {sir.mean().item():.4f}, SAR: {sar.mean().item():.4f}")
+                            # Print TensorBoard findings to console
+                            print(f"Validation - Epoch [{epoch+1}/{training_params['num_epochs']}], Segment [{segment_idx+1}/{input_data.size(0)}]: "
+                                  f"Loss: {loss.item():.4f}, SDR: {sdr.mean().item():.4f}, SIR: {sir.mean().item():.4f}, SAR: {sar.mean().item():.4f}")
 
                     # Accumulate outputs for the entire validation track
                     val_outputs.append(outputs.detach().cpu())  # Store as detached tensors for efficiency
@@ -317,9 +351,20 @@ def train_single_stem(
             break
 
         if (epoch + 1) % training_params['save_interval'] == 0:
-            checkpoint_path = os.path.join(training_params['checkpoint_dir'], f'stem_{stem_name}_epoch_{epoch+1}.pt')
-            torch.save(model.state_dict(), checkpoint_path)
-            logger.info(f"Checkpoint saved: {checkpoint_path}")
+            save_checkpoint(
+                checkpoint_dir=training_params['checkpoint_dir'],
+                epoch=epoch,
+                segment_idx=None,  # No segment for epoch checkpoint
+                model=model,
+                optimizer_g=optimizer_g,
+                optimizer_d=optimizer_d,
+                scaler_g=scaler_g,
+                scaler_d=scaler_d,
+                model_params=model_params,
+                training_params=training_params,
+                stem_name=stem_name,
+                is_epoch_checkpoint=True
+            )
 
         scheduler_g.step(avg_val_loss)
         scheduler_d.step(avg_val_loss)
@@ -338,8 +383,8 @@ def start_training(
     add_noise: bool, noise_amount: float, early_stopping_patience: int,
     disable_early_stopping: bool, weight_decay: float, suppress_warnings: bool, suppress_reading_messages: bool,
     discriminator_update_interval: int, label_smoothing_real: float, label_smoothing_fake: float,
-    suppress_detailed_logs: bool, stop_flag: torch.Tensor, checkpoint_flag: torch.Tensor, channel_multiplier: float, segments_per_track: int = 5,
-    use_cache: bool = True, update_cache: bool = False
+    suppress_detailed_logs: bool, stop_flag: torch.Tensor, checkpoint_flag: torch.Tensor, training_state: dict,  # Pass training_state as a parameter
+    channel_multiplier: float, segments_per_track: int = 5, use_cache: bool = True, update_cache: bool = False
 ):
     device = torch.device('cuda' if use_cuda and torch.cuda.is_available() else 'cpu')
     training_params = {
@@ -442,9 +487,14 @@ def start_training(
 
         start_time = time.time()
 
+        # Debugging statement
+        print(f"[start_training] training_state type: {type(training_state)}")
+        print(f"[start_training] training_state value: {training_state}")
+        assert isinstance(training_state, (dict, Manager().DictProxy)), "training_state must be a dictionary or DictProxy object"
+
         train_single_stem(
             stem_name, train_dataset, val_dataset, training_params, model_params,
-            sample_rate, n_mels, n_fft, segment_length, stop_flag, checkpoint_flag, suppress_reading_messages
+            sample_rate, n_mels, n_fft, segment_length, stop_flag, checkpoint_flag, training_state, suppress_reading_messages  # Pass training_state
         )
 
         end_time = time.time()
@@ -452,49 +502,3 @@ def start_training(
         logger.info(f"Training for stem {stem_name} finished in {epoch_duration:.2f} seconds")
 
     logger.info("Training finished.")
-
-if __name__ == '__main__':
-    stop_flag = torch.multiprocessing.Value('i', 0)
-    checkpoint_flag = torch.multiprocessing.Value('i', 0)  # New checkpoint flag
-
-    start_training(
-        data_dir='path_to_data',
-        batch_size=1,
-        num_epochs=10,
-        initial_lr_g=1e-4,
-        initial_lr_d=1e-4,
-        use_cuda=True,
-        checkpoint_dir='./checkpoints',
-        save_interval=1,
-        accumulation_steps=1,
-        num_stems=6,
-        num_workers=1,
-        cache_dir='./cache',
-        loss_function_g=torch.nn.L1Loss(),
-        loss_function_d=torch.nn.BCELoss(),
-        optimizer_name_g='Adam',
-        optimizer_name_d='Adam',
-        perceptual_loss_flag=True,
-        perceptual_loss_weight=0.1,
-        clip_value=0.1,
-        scheduler_step_size=10,
-        scheduler_gamma=0.1,
-        tensorboard_flag=True,
-        add_noise=False,
-        noise_amount=0.1,
-        early_stopping_patience=5,
-        disable_early_stopping=False,
-        weight_decay=1e-5,
-        suppress_warnings=False,
-        suppress_reading_messages=True,
-        discriminator_update_interval=1,
-        label_smoothing_real=0.9,
-        label_smoothing_fake=0.1,
-        suppress_detailed_logs=False,
-        stop_flag=stop_flag,
-        checkpoint_flag=checkpoint_flag,  # Pass the checkpoint flag
-        channel_multiplier=2,
-        segments_per_track=5,
-        use_cache=True,
-        update_cache=True
-    )

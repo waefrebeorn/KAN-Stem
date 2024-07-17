@@ -2,7 +2,8 @@ import os
 import torch
 import torch.nn as nn
 import gradio as gr
-from train import start_training_wrapper, stop_training_wrapper, resume_training_wrapper
+from multiprocessing import Value, Process, Manager
+from train import start_training_wrapper, stop_training_wrapper, save_checkpoint_gradio, resume_training, start_training
 from separate_stems import perform_separation
 from model import load_model
 import torchaudio.transforms as T
@@ -12,12 +13,17 @@ import mir_eval
 from prepare_dataset import organize_and_prepare_dataset_gradio
 from generate_other_noise import generate_shuffled_noise_gradio
 from hyperparameter_optimization import objective_optuna, start_optuna_optimization
+from parse_event_file import parse_event_file
+from utils_checkpoint import save_checkpoint
+from model_setup import create_model_and_optimizer, initialize_model
 import warnings
 import tensorflow as tf
+import time
 
 warnings.filterwarnings("ignore", message="Lazy modules are a new feature under heavy development")
 warnings.filterwarnings("ignore", message="oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders.")
 warnings.filterwarnings("ignore", message="unable to parse version details from package URL.", module="gradio.analytics")
+
 # Configure logging
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -73,7 +79,7 @@ def evaluate_model(input_audio_path, checkpoint_dir, n_mels, target_length, n_ff
 
     for stem in range(num_stems):
         checkpoint_path = os.path.join(checkpoint_dir, f'checkpoint_stem_{stem}.pt')
-        model = load_model(checkpoint_path, 3, 64, n_mels, target_length, 1, device)  # 3 channels per model (harmonic, percussive, original)
+        model = load_model(checkpoint_path, 3, 64, n_mels, target_length, 1, device)
         model.eval()
 
         with torch.no_grad():
@@ -98,263 +104,393 @@ def log_training_parameters(params):
     for key, value in params.items():
         logger.info(f"{key}: {value}")
 
-def parse_event_file(event_file):
-    data = {}
-    for e in tf.compat.v1.train.summary_iterator(event_file):
-        for v in e.summary.value:
-            if v.tag not in data:
-                data[v.tag] = []
-            data[v.tag].append((e.step, v.simple_value))
-    return data
+def stop_training():
+    global stop_flag
+    stop_flag.value = 1
+    return stop_training_wrapper(stop_flag)
 
-def truncate_data(data, max_entries_per_tag=10):
-    truncated_data = {}
-    for tag, values in data.items():
-        truncated_data[tag] = values[:max_entries_per_tag]
-    return truncated_data
+def start_training_and_log_params(data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval,
+                                  accumulation_steps, num_stems, num_workers, cache_dir, segments_per_track, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
+                                  perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, 
+                                  add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages,
+                                  discriminator_update_interval, label_smoothing_real, label_smoothing_fake, perceptual_loss_weight, suppress_detailed_logs,
+                                  optimization_method, optuna_trials, use_cache, channel_multiplier, update_cache):
+    global training_state
+    gradio_params = {
+        "data_dir": data_dir,
+        "batch_size": batch_size,
+        "num_epochs": num_epochs,
+        "learning_rate_g": learning_rate_g,
+        "learning_rate_d": learning_rate_d,
+        "use_cuda": use_cuda,
+        "checkpoint_dir": checkpoint_dir,
+        "save_interval": save_interval,
+        "accumulation_steps": accumulation_steps,
+        "num_stems": num_stems,
+        "num_workers": num_workers,
+        "cache_dir": cache_dir,
+        "segments_per_track": segments_per_track,  
+        "loss_function_g": loss_function_g,
+        "loss_function_d": loss_function_d,
+        "optimizer_name_g": optimizer_name_g,
+        "optimizer_name_d": optimizer_name_d,
+        "perceptual_loss_flag": perceptual_loss_flag,
+        "clip_value": clip_value,
+        "scheduler_step_size": scheduler_step_size,
+        "scheduler_gamma": scheduler_gamma,
+        "tensorboard_flag": tensorboard_flag,
+        "add_noise": add_noise,
+        "noise_amount": noise_amount,
+        "early_stopping_patience": early_stopping_patience,
+        "disable_early_stopping": disable_early_stopping,
+        "weight_decay": weight_decay,
+        "suppress_warnings": suppress_warnings,
+        "suppress_reading_messages": suppress_reading_messages,
+        "discriminator_update_interval": discriminator_update_interval,
+        "label_smoothing_real": label_smoothing_real,
+        "label_smoothing_fake": label_smoothing_fake,
+        "perceptual_loss_weight": perceptual_loss_weight,
+        "suppress_detailed_logs": suppress_detailed_logs,
+        "use_cache": use_cache,
+        "channel_multiplier": channel_multiplier,  
+        "update_cache": update_cache  
+    }
+    log_training_parameters(gradio_params)
+    training_state.update({
+        "model_params": gradio_params,
+        "training_started": True
+    })
 
-def format_data(truncated_data):
-    formatted_data = ""
-    for tag, values in truncated_data.items():
-        formatted_data += f"Tag: {tag}\n"
-        for step, value in values:
-            formatted_data += f"Step: {step}, Value: {value}\n"
-        formatted_data += "\n"
-    return formatted_data
+    if optimization_method == "Optuna":
+        return start_optuna_optimization(optuna_trials, gradio_params)
+    else:
+        return start_training_wrapper(data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval,
+                                      accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
+                                      perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, add_noise,
+                                      noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages,
+                                      discriminator_update_interval, label_smoothing_real, label_smoothing_fake, suppress_detailed_logs,
+                                      use_cache, channel_multiplier, segments_per_track, update_cache, training_state, stop_flag, checkpoint_flag)
 
-def save_to_txt(formatted_data, output_file):
-    with open(output_file, 'w') as f:
-        f.write(formatted_data)
+def resume_training_wrapper(
+    selected_checkpoint, checkpoint_dir, data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, save_interval,
+    accumulation_steps, num_stems, num_workers, cache_dir, segments_per_track, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
+    perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, add_noise, noise_amount, early_stopping_patience,
+    disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages, discriminator_update_interval, label_smoothing_real,
+    label_smoothing_fake, perceptual_loss_weight, suppress_detailed_logs, use_cache, channel_multiplier, update_cache
+):
+    try:
+        # Load selected checkpoint
+        checkpoint = torch.load(selected_checkpoint, map_location='cpu')
 
-def parse_and_format_event_file(event_file, output_file, max_entries_per_tag):
-    data = parse_event_file(event_file)
-    truncated_data = truncate_data(data, max_entries_per_tag)
-    formatted_data = format_data(truncated_data)
-    save_to_txt(formatted_data, output_file)
-    return formatted_data
+        # Ensure model params and other necessary params are passed correctly
+        training_params = {
+            'data_dir': data_dir,
+            'batch_size': batch_size,
+            'num_epochs': num_epochs,
+            'learning_rate_g': learning_rate_g,
+            'learning_rate_d': learning_rate_d,
+            'use_cuda': use_cuda,
+            'save_interval': save_interval,
+            'accumulation_steps': accumulation_steps,
+            'num_stems': num_stems,
+            'num_workers': num_workers,
+            'cache_dir': cache_dir,
+            'segments_per_track': segments_per_track,
+            'loss_function_g': loss_function_g,
+            'loss_function_d': loss_function_d,
+            'optimizer_name_g': optimizer_name_g,
+            'optimizer_name_d': optimizer_name_d,
+            'perceptual_loss_flag': perceptual_loss_flag,
+            'clip_value': clip_value,
+            'scheduler_step_size': scheduler_step_size,
+            'scheduler_gamma': scheduler_gamma,
+            'tensorboard_flag': tensorboard_flag,
+            'add_noise': add_noise,
+            'noise_amount': noise_amount,
+            'early_stopping_patience': early_stopping_patience,
+            'disable_early_stopping': disable_early_stopping,
+            'weight_decay': weight_decay,
+            'suppress_warnings': suppress_warnings,
+            'suppress_reading_messages': suppress_reading_messages,
+            'discriminator_update_interval': discriminator_update_interval,
+            'label_smoothing_real': label_smoothing_real,
+            'label_smoothing_fake': label_smoothing_fake,
+            'perceptual_loss_weight': perceptual_loss_weight,
+            'suppress_detailed_logs': suppress_detailed_logs,
+            'use_cache': use_cache,
+            'channel_multiplier': channel_multiplier,
+            'update_cache': update_cache,
+        }
 
-with gr.Blocks() as demo:
-    with gr.Tab("Training"):
-        gr.Markdown("### Train the Model")
-        data_dir = gr.Textbox(label="Data Directory", value="K:/KAN-Stem DataSet/prepared dataset")
-        batch_size = gr.Number(label="Batch Size", value=1)
-        num_epochs = gr.Number(label="Number of Epochs", value=10)
-        learning_rate_g = gr.Number(label="Generator Learning Rate", value=0.03)
-        learning_rate_d = gr.Number(label="Discriminator Learning Rate", value=3e-5)
-        use_cuda = gr.Checkbox(label="Use CUDA", value=True)
-        checkpoint_dir = gr.Textbox(label="Checkpoint Directory", value="./checkpoints")
-        save_interval = gr.Number(label="Save Interval", value=1)
-        accumulation_steps = gr.Number(label="Accumulation Steps", value=1)
-        num_stems = gr.Number(label="Number of Stems", value=6)
-        num_workers = gr.Number(label="Number of Workers", value=1)
-        cache_dir = gr.Textbox(label="Cache Directory", value="./cache")
-        segments_per_track = gr.Number(label="Segments per Track", value=1) 
-        loss_function_g = gr.Dropdown(label="Generator Loss Function", choices=["MSELoss", "L1Loss", "SmoothL1Loss", "BCEWithLogitsLoss", "WassersteinLoss"], value="L1Loss")
-        loss_function_d = gr.Dropdown(label="Discriminator Loss Function", choices=["MSELoss", "L1Loss", "SmoothL1Loss", "BCEWithLogitsLoss", "WassersteinLoss"], value="WassersteinLoss")
-        optimizer_name_g = gr.Dropdown(label="Generator Optimizer", choices=["SGD", "Momentum", "Adagrad", "RMSProp", "Adadelta", "Adam"], value="SGD")
-        optimizer_name_d = gr.Dropdown(label="Discriminator Optimizer", choices=["SGD", "Momentum", "Adagrad", "RMSProp", "Adadelta", "Adam"], value="RMSProp")
-        perceptual_loss_flag = gr.Checkbox(label="Use Perceptual Loss", value=False)
-        clip_value = gr.Number(label="Gradient Clipping Value", value=1)
-        scheduler_step_size = gr.Number(label="Scheduler Step Size", value=10)
-        scheduler_gamma = gr.Number(label="Scheduler Gamma", value=0.9)
-        tensorboard_flag = gr.Checkbox(label="Enable TensorBoard Logging", value=True)
-        add_noise = gr.Checkbox(label="Add Noise", value=True)
-        noise_amount = gr.Number(label="Noise Amount", value=0.1)
-        early_stopping_patience = gr.Number(label="Early Stopping Patience", value=25)
-        disable_early_stopping = gr.Checkbox(label="Disable Early Stopping", value=False)
-        weight_decay = gr.Number(label="Weight Decay", value=1e-4)
-        suppress_warnings = gr.Checkbox(label="Suppress Warnings", value=False)
-        suppress_reading_messages = gr.Checkbox(label="Suppress Reading Messages", value=False)
-        discriminator_update_interval = gr.Number(label="Discriminator Update Interval", value=1)
-        label_smoothing_real = gr.Slider(label="Label Smoothing Real", minimum=0.7, maximum=0.9, value=0.7, step=0.1)
-        label_smoothing_fake = gr.Slider(label="Label Smoothing Fake", minimum=0.1, maximum=0.3, value=0.1, step=0.1)
-        perceptual_loss_weight = gr.Number(label="Perceptual Loss Weight", value=0.1)
-        suppress_detailed_logs = gr.Checkbox(label="Suppress Detailed Logs", value=False)
-        use_cache = gr.Checkbox(label="Use Cache", value=True)
-        optimization_method = gr.Dropdown(label="Optimization Method", choices=["None", "Optuna"], value="None")
-        optuna_trials = gr.Number(label="Optuna Trials", value=1)
-        channel_multiplier = gr.Number(label="Channel Multiplier", value=0.5)
-        update_cache = gr.Checkbox(label="Update Cache", value=True)
-        start_training_button = gr.Button("Start Training")
-        stop_training_button = gr.Button("Stop Training")
-        resume_training_button = gr.Button("Resume Training")
-        save_checkpoint_button = gr.Button("Save Checkpoint")
-        output = gr.Textbox(label="Output")
-
-        checkpoint_flag = torch.multiprocessing.Value('i', 0)  # New checkpoint flag
-
-        def set_checkpoint_flag():
-            checkpoint_flag.value = 1
-            return "Checkpoint flag set. Checkpoint will be saved during the next segment."
-
-        def start_training_and_log_params(data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval,
-                                          accumulation_steps, num_stems, num_workers, cache_dir, segments_per_track, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
-                                          perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, 
-                                          add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages,
-                                          discriminator_update_interval, label_smoothing_real, label_smoothing_fake, perceptual_loss_weight, suppress_detailed_logs,
-                                          optimization_method, optuna_trials, use_cache, channel_multiplier, update_cache):
-            gradio_params = {
-                "data_dir": data_dir,
-                "batch_size": batch_size,
-                "num_epochs": num_epochs,
-                "learning_rate_g": learning_rate_g,
-                "learning_rate_d": learning_rate_d,
-                "use_cuda": use_cuda,
-                "checkpoint_dir": checkpoint_dir,
-                "save_interval": save_interval,
-                "accumulation_steps": accumulation_steps,
-                "num_stems": num_stems,
-                "num_workers": num_workers,
-                "cache_dir": cache_dir,
-                "segments_per_track": segments_per_track,  
-                "loss_function_g": loss_function_g,
-                "loss_function_d": loss_function_d,
-                "optimizer_name_g": optimizer_name_g,
-                "optimizer_name_d": optimizer_name_d,
-                "perceptual_loss_flag": perceptual_loss_flag,
-                "clip_value": clip_value,
-                "scheduler_step_size": scheduler_step_size,
-                "scheduler_gamma": scheduler_gamma,
-                "tensorboard_flag": tensorboard_flag,
-                "add_noise": add_noise,
-                "noise_amount": noise_amount,
-                "early_stopping_patience": early_stopping_patience,
-                "disable_early_stopping": disable_early_stopping,
-                "weight_decay": weight_decay,
-                "suppress_warnings": suppress_warnings,
-                "suppress_reading_messages": suppress_reading_messages,
-                "discriminator_update_interval": discriminator_update_interval,
-                "label_smoothing_real": label_smoothing_real,
-                "label_smoothing_fake": label_smoothing_fake,
-                "perceptual_loss_weight": perceptual_loss_weight,
-                "suppress_detailed_logs": suppress_detailed_logs,
-                "use_cache": use_cache,
-                "channel_multiplier": channel_multiplier,  # Add channel multiplier to parameters
-                "update_cache": update_cache  # Add update cache to parameters
-            }
-            log_training_parameters(gradio_params)
-            if optimization_method == "Optuna":
-                return start_optuna_optimization(optuna_trials, gradio_params)
-            else:
-                return start_training_wrapper(data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval,
-                                              accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
-                                              perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, add_noise,
-                                              noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages,
-                                              discriminator_update_interval, label_smoothing_real, label_smoothing_fake, perceptual_loss_weight, suppress_detailed_logs,
-                                              use_cache, channel_multiplier, segments_per_track, update_cache, checkpoint_flag)  # Pass checkpoint flag
-
-        start_training_button.click(
-            start_training_and_log_params,
-            inputs=[
-                data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval,
-                accumulation_steps, num_stems, num_workers, cache_dir, segments_per_track, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
-                perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, add_noise, noise_amount, early_stopping_patience,
-                disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages, discriminator_update_interval, label_smoothing_real, 
-                label_smoothing_fake, perceptual_loss_weight, suppress_detailed_logs, optimization_method, optuna_trials, use_cache, channel_multiplier, update_cache
-            ],
-            outputs=output
+        # Create model and optimizer
+        device = torch.device('cuda' if use_cuda and torch.cuda.is_available() else 'cpu')
+        target_length = checkpoint.get('target_length', checkpoint.get('segment_length', 22050))
+        model, discriminator, optimizer_g, optimizer_d, scaler_g, scaler_d = create_model_and_optimizer(
+            device=device,
+            n_mels=checkpoint['n_mels'],
+            target_length=target_length,
+            initial_lr_g=training_params['learning_rate_g'],
+            initial_lr_d=training_params['learning_rate_d'],
+            optimizer_name_g=training_params['optimizer_name_g'],
+            optimizer_name_d=training_params['optimizer_name_d'],
+            weight_decay=training_params['weight_decay']
         )
 
-        stop_training_button.click(
-            stop_training_wrapper,
-            outputs=output
+        # Load state dictionaries, ignoring unexpected keys
+        model.load_state_dict(checkpoint['model_state_dict'])
+        discriminator.load_state_dict(checkpoint['discriminator_state_dict'], strict=False)
+        optimizer_g.load_state_dict(checkpoint['optimizer_g_state_dict'])
+        optimizer_d.load_state_dict(checkpoint['optimizer_d_state_dict'])
+        scaler_g.load_state_dict(checkpoint['scaler_g_state_dict'])
+        scaler_d.load_state_dict(checkpoint['scaler_d_state_dict'])
+
+        # Move model and discriminator to CPU before updating training_state
+        model.cpu()
+        discriminator.cpu()
+
+        # Update the training state
+        training_state.update({
+            'model': model,
+            'discriminator': discriminator,
+            'optimizer_g': optimizer_g,
+            'optimizer_d': optimizer_d,
+            'scaler_g': scaler_g,
+            'scaler_d': scaler_d,
+            'model_params': checkpoint.get('model_params', {}),
+            'training_params': training_params,
+            'stem_name': checkpoint.get('stem_name'),
+            'current_epoch': checkpoint.get('epoch', 0),
+            'current_segment': checkpoint.get('segment', 0),
+            'training_started': True,
+            'target_length': target_length
+        })
+
+        # Resume training
+        start_training(
+            data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval,
+            accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
+            perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, add_noise,
+            noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages,
+            discriminator_update_interval, label_smoothing_real, label_smoothing_fake, suppress_detailed_logs, stop_flag, checkpoint_flag,
+            training_state, use_cache, channel_multiplier, segments_per_track, update_cache, checkpoint.get('segment', 0)
         )
 
-        resume_training_button.click(
-            resume_training_wrapper,
-            inputs=[checkpoint_dir],
-            outputs=output
-        )
+        return f"Resumed training from checkpoint: {selected_checkpoint}"
+    except KeyError as e:
+        logger.error(f"KeyError during checkpoint loading: {e}")
+        return f"KeyError during checkpoint loading: {e}"
+    except Exception as e:
+        logger.error(f"Exception during checkpoint loading: {e}")
+        return f"Exception during checkpoint loading: {e}"
 
-        save_checkpoint_button.click(
-            set_checkpoint_flag,
-            outputs=output
-        )
-
-    with gr.Tab("Separation"):
-        gr.Markdown("### Perform Separation")
-        checkpoint_dir = gr.Textbox(label="Checkpoint Directory", value="./checkpoints")
-        file_path = gr.Textbox(label="File Path", value='path_to_input_audio.wav')
-        n_mels = gr.Number(label="Number of Mels", value=128)
-        target_length = gr.Number(label="Target Length", value=256)
-        n_fft = gr.Number(label="Number of FFT", value=2048)
-        num_stems = gr.Number(label="Number of Stems", value=7)
-        cache_dir = gr.Textbox(label="Cache Directory", value="./cache")
-        suppress_reading_messages = gr.Checkbox(label="Suppress Reading Messages", value=False)
-        perform_separation_button = gr.Button("Perform Separation")
-        result = gr.Files(label="Separated Stems")
-        perform_separation_button.click(
-            perform_separation_wrapper,
-            inputs=[checkpoint_dir, file_path, n_mels, target_length, n_fft, num_stems, cache_dir, suppress_reading_messages],
-            outputs=result
-        )
-
-    with gr.Tab("Evaluation"):
-        gr.Markdown("### Evaluate Model")
-        eval_checkpoint_dir = gr.Textbox(label="Checkpoint Directory", value="./checkpoints")
-        eval_file_path = gr.Textbox(label="File Path")
-        eval_n_mels = gr.Number(label="Number of Mels", value=128)
-        eval_target_length = gr.Number(label="Target Length", value=256)
-        eval_n_fft = gr.Number(label="Number of FFT", value=2048)
-        eval_num_stems = gr.Number(label="Number of Stems", value=7)
-        eval_cache_dir = gr.Textbox(label="Cache Directory", value="./cache")
-        suppress_reading_messages = gr.Checkbox(label="Suppress Reading Messages", value=False)
-        eval_button = gr.Button("Evaluate")
-        sdr_output = gr.Textbox(label="Signal-to-Distortion Ratio (SDR)")
-        sir_output = gr.Textbox(label="Signal-to-Interference Ratio (SIR)")
-        sar_output = gr.Textbox(label="Signal-to-Artifacts Ratio (SAR)")
-        eval_button.click(
-            evaluate_model,
-            inputs=[eval_file_path, eval_checkpoint_dir, eval_n_mels, eval_target_length, eval_n_fft, eval_num_stems, eval_cache_dir, suppress_reading_messages],
-            outputs=[sdr_output, sir_output, sar_output]
-        )
-
-    with gr.Tab("Prepare Dataset"):
-        gr.Markdown("### Prepare Dataset")
-        input_dir = gr.Textbox(label="Input Directory")
-        output_dir = gr.Textbox(label="Output Directory")
-        num_examples = gr.Number(label="Number of Examples", value=100)
-        target_length = gr.Number(label="Target Length (seconds)", value=60)
-        sample_rate = gr.Number(label="Sample Rate", value=44100)
-        prepare_dataset_button = gr.Button("Prepare Dataset")
-        prepare_output = gr.Textbox(label="Output")
-        prepare_dataset_button.click(
-            organize_and_prepare_dataset_gradio,
-            inputs=[input_dir, output_dir, num_examples, target_length, sample_rate],
-            outputs=prepare_output
-        )
-
-    with gr.Tab("Generate Other Noise"):
-        gr.Markdown("### Generate Shuffled Noise for 'Other' Category")
-        noise_input_dir = gr.Textbox(label="Input Directory")
-        noise_output_dir = gr.Textbox(label="Output Directory")
-        noise_num_examples = gr.Number(label="Number of Examples", value=100)
-        generate_noise_button = gr.Button("Generate Noise")
-        noise_output = gr.Textbox(label="Output")
-        generate_noise_button.click(
-            generate_shuffled_noise_gradio,
-            inputs=[noise_input_dir, noise_output_dir, noise_num_examples],
-            outputs=noise_output
-        )
-
-    with gr.Tab("Parse TensorFlow Event File"):
-        gr.Markdown("### Parse TensorFlow Event File")
-        event_file = gr.Textbox(label="Event File Path")
-        output_file = gr.Textbox(label="Output File Path", value="parsed_output.txt")
-        max_entries_per_tag = gr.Number(label="Max Entries per Tag", value=120)
-        parse_event_button = gr.Button("Parse Event File")
-        parsed_output = gr.Textbox(label="Parsed Output")
-        
-        def parse_and_display_event_file(event_file, output_file, max_entries_per_tag):
-            parse_event_file(event_file, output_file, max_entries_per_tag)
-            with open(output_file, 'r') as file:
-                return file.read()
-
-        parse_event_button.click(
-            parse_and_display_event_file,
-            inputs=[event_file, output_file, max_entries_per_tag],
-            outputs=parsed_output
-        )
+def update_checkpoint_dropdown(checkpoint_dir):
+    checkpoints = get_checkpoints(checkpoint_dir)
+    return gr.update(choices=checkpoints)
 
 if __name__ == "__main__":
+    import multiprocessing
+    multiprocessing.freeze_support()  # For frozen executables
+
+    # Define global variables (Move them inside __main__)
+    stop_flag = Value('i', 0)
+    checkpoint_flag = Value('i', 0)
+    training_process = None
+
+    # Global training state dictionary (use a Manager to make it shareable)
+    manager = Manager()
+    training_state = manager.dict({
+        # Initialize your training state here
+        "model": None,
+        "optimizer_g": None,
+        "optimizer_d": None,
+        "scaler_g": None,
+        "scaler_d": None,
+        "model_params": {},
+        "training_params": {},
+        "stem_name": None,
+        "current_epoch": 0,
+        "current_segment": 0,
+        "training_started": False
+    })
+
+    # Ensure this block is guarded to prevent recursive spawning issues on Windows
+    multiprocessing.set_start_method("spawn", force=True)
+
+    with gr.Blocks() as demo:
+        with gr.Tab("Training"):
+            gr.Markdown("### Train the Model")
+            data_dir = gr.Textbox(label="Data Directory", value="K:/KAN-Stem DataSet/prepared dataset")
+            batch_size = gr.Number(label="Batch Size", value=1)
+            num_epochs = gr.Number(label="Number of Epochs", value=10)
+            learning_rate_g = gr.Number(label="Generator Learning Rate", value=0.03)
+            learning_rate_d = gr.Number(label="Discriminator Learning Rate", value=3e-5)
+            use_cuda = gr.Checkbox(label="Use CUDA", value=True)
+            checkpoint_dir = gr.Textbox(label="Checkpoint Directory", value="./checkpoints")
+            save_interval = gr.Number(label="Save Interval", value=1)
+            accumulation_steps = gr.Number(label="Accumulation Steps", value=1)
+            num_stems = gr.Number(label="Number of Stems", value=6)
+            num_workers = gr.Number(label="Number of Workers", value=1)
+            cache_dir = gr.Textbox(label="Cache Directory", value="./cache")
+            segments_per_track = gr.Number(label="Segments per Track", value=1)
+            loss_function_g = gr.Dropdown(label="Generator Loss Function", choices=["MSELoss", "L1Loss", "SmoothL1Loss", "BCEWithLogitsLoss", "WassersteinLoss"], value="L1Loss")
+            loss_function_d = gr.Dropdown(label="Discriminator Loss Function", choices=["MSELoss", "L1Loss", "SmoothL1Loss", "BCEWithLogitsLoss", "WassersteinLoss"], value="WassersteinLoss")
+            optimizer_name_g = gr.Dropdown(label="Generator Optimizer", choices=["SGD", "Momentum", "Adagrad", "RMSProp", "Adadelta", "Adam"], value="SGD")
+            optimizer_name_d = gr.Dropdown(label="Discriminator Optimizer", choices=["SGD", "Momentum", "Adagrad", "RMSProp", "Adadelta", "Adam"], value="RMSProp")
+            perceptual_loss_flag = gr.Checkbox(label="Use Perceptual Loss", value=False)
+            clip_value = gr.Number(label="Gradient Clipping Value", value=1)
+            scheduler_step_size = gr.Number(label="Scheduler Step Size", value=10)
+            scheduler_gamma = gr.Number(label="Scheduler Gamma", value=0.9)
+            tensorboard_flag = gr.Checkbox(label="Enable TensorBoard Logging", value=True)
+            add_noise = gr.Checkbox(label="Add Noise", value=True)
+            noise_amount = gr.Number(label="Noise Amount", value=0.1)
+            early_stopping_patience = gr.Number(label="Early Stopping Patience", value=25)
+            disable_early_stopping = gr.Checkbox(label="Disable Early Stopping", value=False)
+            weight_decay = gr.Number(label="Weight Decay", value=1e-4)
+            suppress_warnings = gr.Checkbox(label="Suppress Warnings", value=False)
+            suppress_reading_messages = gr.Checkbox(label="Suppress Reading Messages", value=False)
+            discriminator_update_interval = gr.Number(label="Discriminator Update Interval", value=1)
+            label_smoothing_real = gr.Slider(label="Label Smoothing Real", minimum=0.7, maximum=0.9, value=0.7, step=0.1)
+            label_smoothing_fake = gr.Slider(label="Label Smoothing Fake", minimum=0.1, maximum=0.3, value=0.1, step=0.1)
+            perceptual_loss_weight = gr.Number(label="Perceptual Loss Weight", value=0.1)
+            suppress_detailed_logs = gr.Checkbox(label="Suppress Detailed Logs", value=False)
+            use_cache = gr.Checkbox(label="Use Cache", value=True)
+            optimization_method = gr.Dropdown(label="Optimization Method", choices=["None", "Optuna"], value="None")
+            optuna_trials = gr.Number(label="Optuna Trials", value=1)
+            channel_multiplier = gr.Number(label="Channel Multiplier", value=0.5)
+            update_cache = gr.Checkbox(label="Update Cache", value=True)
+            start_training_button = gr.Button("Start Training")
+            stop_training_button = gr.Button("Stop Training")
+            resume_checkpoint_dropdown = gr.Dropdown(label="Select Checkpoint", choices=get_checkpoints(), value=None)
+            refresh_checkpoint_button = gr.Button("Refresh Checkpoints")
+            resume_training_button = gr.Button("Resume Training")
+            save_checkpoint_button = gr.Button("Save Checkpoint")
+            output = gr.Textbox(label="Output")
+
+            start_training_button.click(
+                start_training_and_log_params,
+                inputs=[
+                    data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval,
+                    accumulation_steps, num_stems, num_workers, cache_dir, segments_per_track, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
+                    perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, add_noise, noise_amount, early_stopping_patience,
+                    disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages, discriminator_update_interval, label_smoothing_real, 
+                    label_smoothing_fake, perceptual_loss_weight, suppress_detailed_logs, optimization_method, optuna_trials, use_cache, channel_multiplier, update_cache
+                ],
+                outputs=output
+            )
+
+            stop_training_button.click(
+                lambda: stop_training_wrapper(stop_flag),
+                inputs=[],
+                outputs=output
+            )
+
+            refresh_checkpoint_button.click(
+                lambda chkpt_dir: update_checkpoint_dropdown(chkpt_dir),
+                inputs=[checkpoint_dir],
+                outputs=resume_checkpoint_dropdown
+            )
+
+            resume_training_button.click(
+                resume_training_wrapper,
+                inputs=[
+                    resume_checkpoint_dropdown, checkpoint_dir, data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, save_interval,
+                    accumulation_steps, num_stems, num_workers, cache_dir, segments_per_track, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
+                    perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, add_noise, noise_amount, early_stopping_patience,
+                    disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages, discriminator_update_interval, label_smoothing_real,
+                    label_smoothing_fake, perceptual_loss_weight, suppress_detailed_logs, use_cache, channel_multiplier, update_cache
+                ],
+                outputs=output
+            )
+            
+            save_checkpoint_button.click(
+                lambda chkpt_dir: save_checkpoint_gradio(chkpt_dir, training_state, checkpoint_flag),
+                inputs=[checkpoint_dir],
+                outputs=output
+            )
+
+        with gr.Tab("Separation"):
+            gr.Markdown("### Perform Separation")
+            checkpoint_dir = gr.Textbox(label="Checkpoint Directory", value="./checkpoints")
+            file_path = gr.Textbox(label="File Path", value='path_to_input_audio.wav')
+            n_mels = gr.Number(label="Number of Mels", value=128)
+            target_length = gr.Number(label="Target Length", value=256)
+            n_fft = gr.Number(label="Number of FFT", value=2048)
+            num_stems = gr.Number(label="Number of Stems", value=7)
+            cache_dir = gr.Textbox(label="Cache Directory", value="./cache")
+            suppress_reading_messages = gr.Checkbox(label="Suppress Reading Messages", value=False)
+            perform_separation_button = gr.Button("Perform Separation")
+            result = gr.Files(label="Separated Stems")
+            perform_separation_button.click(
+                perform_separation_wrapper,
+                inputs=[checkpoint_dir, file_path, n_mels, target_length, n_fft, num_stems, cache_dir, suppress_reading_messages],
+                outputs=result
+            )
+
+        with gr.Tab("Evaluation"):
+            gr.Markdown("### Evaluate Model")
+            eval_checkpoint_dir = gr.Textbox(label="Checkpoint Directory", value="./checkpoints")
+            eval_file_path = gr.Textbox(label="File Path")
+            eval_n_mels = gr.Number(label="Number of Mels", value=128)
+            eval_target_length = gr.Number(label="Target Length", value=256)
+            eval_n_fft = gr.Number(label="Number of FFT", value=2048)
+            eval_num_stems = gr.Number(label="Number of Stems", value=7)
+            eval_cache_dir = gr.Textbox(label="Cache Directory", value="./cache")
+            suppress_reading_messages = gr.Checkbox(label="Suppress Reading Messages", value=False)
+            eval_button = gr.Button("Evaluate")
+            sdr_output = gr.Textbox(label="Signal-to-Distortion Ratio (SDR)")
+            sir_output = gr.Textbox(label="Signal-to-Interference Ratio (SIR)")
+            sar_output = gr.Textbox(label="Signal-to-Artifacts Ratio (SAR)")
+            eval_button.click(
+                evaluate_model,
+                inputs=[eval_file_path, eval_checkpoint_dir, eval_n_mels, eval_target_length, eval_n_fft, eval_num_stems, eval_cache_dir, suppress_reading_messages],
+                outputs=[sdr_output, sir_output, sar_output]
+            )
+
+        with gr.Tab("Prepare Dataset"):
+            gr.Markdown("### Prepare Dataset")
+            input_dir = gr.Textbox(label="Input Directory")
+            output_dir = gr.Textbox(label="Output Directory")
+            num_examples = gr.Number(label="Number of Examples", value=100)
+            target_length = gr.Number(label="Target Length (seconds)", value=60)
+            sample_rate = gr.Number(label="Sample Rate", value=44100)
+            prepare_dataset_button = gr.Button("Prepare Dataset")
+            prepare_output = gr.Textbox(label="Output")
+            prepare_dataset_button.click(
+                organize_and_prepare_dataset_gradio,
+                inputs=[input_dir, output_dir, num_examples, target_length, sample_rate],
+                outputs=prepare_output
+            )
+
+        with gr.Tab("Generate Other Noise"):
+            gr.Markdown("### Generate Shuffled Noise for 'Other' Category")
+            noise_input_dir = gr.Textbox(label="Input Directory")
+            noise_output_dir = gr.Textbox(label="Output Directory")
+            noise_num_examples = gr.Number(label="Number of Examples", value=100)
+            generate_noise_button = gr.Button("Generate Noise")
+            noise_output = gr.Textbox(label="Output")
+            generate_noise_button.click(
+                generate_shuffled_noise_gradio,
+                inputs=[noise_input_dir, noise_output_dir, noise_num_examples],
+                outputs=noise_output
+            )
+
+        with gr.Tab("Parse TensorFlow Event File"):
+            gr.Markdown("### Parse TensorFlow Event File")
+            event_file = gr.Textbox(label="Event File Path")
+            output_file = gr.Textbox(label="Output File Path", value="parsed_output.txt")
+            max_entries_per_tag = gr.Number(label="Max Entries per Tag", value=120)
+            parse_event_button = gr.Button("Parse Event File")
+            parsed_output = gr.Textbox(label="Parsed Output")
+            
+            def parse_and_display_event_file(event_file, output_file, max_entries_per_tag):
+                parse_event_file(event_file, output_file, max_entries_per_tag)
+                with open(output_file, 'r') as file:
+                    return file.read()
+
+            parse_event_button.click(
+                parse_and_display_event_file,
+                inputs=[event_file, output_file, max_entries_per_tag],
+                outputs=parsed_output
+            )
+
     demo.launch(share=False)

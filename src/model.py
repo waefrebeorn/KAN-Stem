@@ -6,6 +6,7 @@ import logging
 import gc
 import math
 import torch.nn.functional as F
+from utils_checkpoint import save_checkpoint, load_checkpoint  # Importing the checkpoint functions from utils_checkpoint.py
 
 logger = logging.getLogger(__name__)
 
@@ -153,7 +154,7 @@ class ContextAggregationNetwork(nn.Module):
             return x
 
 class MemoryEfficientStemSeparationModel(nn.Module):
-    def __init__(self, in_channels=3, out_channels=3, n_mels=32, target_length=22050):
+    def __init__(self, in_channels=3, out_channels=3, n_mels=80, target_length=22050):  # Updated n_mels to 80
         super(MemoryEfficientStemSeparationModel, self).__init__()
         self.n_mels = n_mels
         self.target_length = target_length
@@ -314,7 +315,7 @@ class MemoryEfficientStemSeparationModel(nn.Module):
         return x
 
 class KANDiscriminator(nn.Module):
-    def __init__(self, in_channels=3, out_channels=64, n_mels=32, target_length=22050, device="cuda", channel_multiplier=1.0):
+    def __init__(self, in_channels=3, out_channels=64, n_mels=80, target_length=22050, device="cuda", channel_multiplier=1.0):  # Updated n_mels to 80
         super(KANDiscriminator, self).__init__()
 
         self.device = device
@@ -389,7 +390,7 @@ class KANDiscriminator(nn.Module):
 
 def load_model(checkpoint_path: str, in_channels: int, out_channels: int, n_mels: int, target_length: int, device: str = "cuda") -> nn.Module:
     model = MemoryEfficientStemSeparationModel(in_channels, out_channels, n_mels, target_length).to(device)
-    model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+    model.load_state_dict(torch.load(checkpoint_path, map_location=device)['model_state_dict'])
     model.eval()
     return model
 

@@ -18,7 +18,6 @@ from torchvision.models import mobilenet_v2, MobileNet_V2_Weights
 import gc
 
 logger = logging.getLogger(__name__)
-logger = logging.getLogger(__name__)
 
 def setup_logger(name: str) -> logging.Logger:
     logger = logging.getLogger(name)
@@ -366,38 +365,45 @@ class PerceptualLoss(nn.Module):
         return loss
 
 def log_training_parameters(params: Dict[str, Any]):
-    logger.info("Training Parameters Selected:")
+    logger.debug("Training Parameters Selected:")
     for key, value in params.items():
-        logger.info(f"{key}: {value}")
+        logger.debug(f"{key}: {value}")
 
 def get_optimizer(optimizer_name: str, model_parameters: Any, learning_rate: float, weight_decay: float) -> optim.Optimizer:
-    if optimizer_name == "SGD":
-        return optim.SGD(model_parameters, lr=learning_rate, weight_decay=weight_decay)
+    optimizer_name = optimizer_name.capitalize()  # Ensure the optimizer name is capitalized
+    
+    if optimizer_name == "Sgd":
+        optimizer = optim.SGD(model_parameters, lr=learning_rate, weight_decay=weight_decay)
     elif optimizer_name == "Momentum":
-        return optim.SGD(model_parameters, lr=learning_rate, momentum=0.9, weight_decay=weight_decay)
+        optimizer = optim.SGD(model_parameters, lr=learning_rate, momentum=0.9, weight_decay=weight_decay)
     elif optimizer_name == "Adagrad":
-        return optim.Adagrad(model_parameters, lr=learning_rate, weight_decay=weight_decay)
-    elif optimizer_name == "RMSProp":
-        return optim.RMSprop(model_parameters, lr=learning_rate, alpha=0.99, weight_decay=weight_decay)
+        optimizer = optim.Adagrad(model_parameters, lr=learning_rate, weight_decay=weight_decay)
+    elif optimizer_name == "Rmsprop":
+        optimizer = optim.RMSprop(model_parameters, lr=learning_rate, alpha=0.99, weight_decay=weight_decay)
     elif optimizer_name == "Adadelta":
-        return optim.Adadelta(model_parameters, lr=learning_rate, weight_decay=weight_decay)
+        optimizer = optim.Adadelta(model_parameters, lr=learning_rate, weight_decay=weight_decay)
     elif optimizer_name == "Adam":
-        return optim.Adam(model_parameters, lr=learning_rate, weight_decay=weight_decay)
+        optimizer = optim.Adam(model_parameters, lr=learning_rate, weight_decay=weight_decay)
     else:
         raise ValueError(f"Unknown optimizer: {optimizer_name}")
+    
+    # Add initial_lr to the param_groups
+    for param_group in optimizer.param_groups:
+        param_group['initial_lr'] = learning_rate
 
+    return optimizer
+    
 def purge_vram():
     try:
         torch.cuda.empty_cache()
-        logger.info("Successfully purged GPU cache.")
+        logger.debug("Successfully purged GPU cache.")
     except Exception as e:
         logger.error(f"Error purging GPU cache: {e}", exc_info=True)
     try:
         gc.collect()
-        logger.info("Successfully performed garbage collection.")
+        logger.debug("Successfully performed garbage collection.")
     except Exception as e:
         logger.error(f"Error during garbage collection: {e}", exc_info=True)
-
 
 def load_from_cache(cache_file_path: str, device: torch.device) -> Dict[str, torch.Tensor]:
     try:
@@ -417,6 +423,7 @@ def ensure_dir_exists(directory: str):
     if not os.path.exists(directory):
         os.makedirs(directory)
         logger.info(f"Created directory: {directory}")
+        
 
 # Ensure the logging configuration is properly set up
 setup_logger(__name__)
