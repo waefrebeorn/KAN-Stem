@@ -1,5 +1,5 @@
 import optuna
-from training_loop import start_training
+from train import start_training
 import torch.nn as nn
 from loss_functions import wasserstein_loss
 from multiprocessing import Value

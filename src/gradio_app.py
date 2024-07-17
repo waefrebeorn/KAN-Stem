@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import gradio as gr
 from multiprocessing import Value, Process, Manager
-from train import start_training_wrapper, stop_training_wrapper, save_checkpoint_gradio, resume_training, start_training
+from train import start_training_wrapper, stop_training_wrapper, save_checkpoint_gradio, resume_training, start_training, save_checkpoint
 from separate_stems import perform_separation
 from model import load_model
 import torchaudio.transforms as T
@@ -14,7 +14,6 @@ from prepare_dataset import organize_and_prepare_dataset_gradio
 from generate_other_noise import generate_shuffled_noise_gradio
 from hyperparameter_optimization import objective_optuna, start_optuna_optimization
 from parse_event_file import parse_event_file
-from utils_checkpoint import save_checkpoint
 from model_setup import create_model_and_optimizer, initialize_model
 import warnings
 import tensorflow as tf

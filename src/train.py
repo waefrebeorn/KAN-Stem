@@ -16,7 +16,6 @@ from utils import (
     process_and_cache_dataset, create_dataloader
 )
 from model_setup import create_model_and_optimizer, initialize_model
-from utils_checkpoint import save_checkpoint, load_checkpoint
 import time
 import numpy as np  # For creating zero-filled segments
 from torch.multiprocessing import Manager, Process, Value
@@ -489,6 +488,13 @@ def save_checkpoint_gradio(checkpoint_dir, training_state, checkpoint_flag):
 
     return f"Checkpoint saving triggered. It will be saved after the current segment completes."
 
+def load_checkpoint(checkpoint_path: str):
+    checkpoint = torch.load(checkpoint_path)
+    logger.info(f"Checkpoint loaded: {checkpoint_path}")
+    for key, value in checkpoint.items():
+        logger.info(f"Checkpoint key: {key}, type: {type(value)}")
+    return checkpoint
+
 def start_training(
     data_dir: str, batch_size: int, num_epochs: int, initial_lr_g: float, initial_lr_d: float,
     use_cuda: bool, checkpoint_dir: str, save_interval: int, accumulation_steps: int, num_stems: int,
@@ -839,7 +845,8 @@ def resume_training(checkpoint_dir, device_str, stop_flag, checkpoint_flag, trai
         segments_per_track=checkpoint.get('segments_per_track', 10),
         stop_flag=stop_flag,
         update_cache=checkpoint.get('update_cache', True),
-        training_state=training_state
+        training_state=training_state,
+        current_segment=segment  # Pass the current segment
     )
 
     return f"Resumed training from checkpoint: {latest_checkpoint}"
