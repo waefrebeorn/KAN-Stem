@@ -114,7 +114,8 @@ def start_training_and_log_params(data_dir, batch_size, num_epochs, learning_rat
                                   add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages,
                                   discriminator_update_interval, label_smoothing_real, label_smoothing_fake, perceptual_loss_weight, suppress_detailed_logs,
                                   optimization_method, optuna_trials, use_cache, channel_multiplier, update_cache):
-    global training_state
+    global training_state, training_process, stop_flag
+    stop_flag.value = 0  # Ensure stop flag is reset at the start
     gradio_params = {
         "data_dir": data_dir,
         "batch_size": batch_size,
@@ -163,12 +164,16 @@ def start_training_and_log_params(data_dir, batch_size, num_epochs, learning_rat
     if optimization_method == "Optuna":
         return start_optuna_optimization(optuna_trials, gradio_params)
     else:
-        return start_training_wrapper(data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval,
-                                      accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
-                                      perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, add_noise,
-                                      noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages,
-                                      discriminator_update_interval, label_smoothing_real, label_smoothing_fake, suppress_detailed_logs,
-                                      use_cache, channel_multiplier, segments_per_track, update_cache, training_state, stop_flag, checkpoint_flag)
+        training_process = Process(target=start_training_wrapper, args=(
+            data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval,
+            accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
+            perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, add_noise,
+            noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages,
+            discriminator_update_interval, label_smoothing_real, label_smoothing_fake, suppress_detailed_logs, use_cache, channel_multiplier,
+            segments_per_track, update_cache, training_state, stop_flag, checkpoint_flag
+        ))
+        training_process.start()
+        return "Training started."
 
 class WassersteinLoss(nn.Module):
     def __init__(self):
@@ -191,6 +196,8 @@ def resume_training_wrapper(
     disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages, discriminator_update_interval, label_smoothing_real,
     label_smoothing_fake, perceptual_loss_weight, suppress_detailed_logs, use_cache, channel_multiplier, update_cache
 ):
+    global training_process, stop_flag
+    stop_flag.value = 0  # Ensure stop flag is reset at the start
     try:
         logger.info(f"Loading selected checkpoint: {selected_checkpoint}")
         checkpoint = torch.load(selected_checkpoint, map_location='cpu')
@@ -258,8 +265,8 @@ def resume_training_wrapper(
         scaler_g.load_state_dict(checkpoint['scaler_g_state_dict'])
         scaler_d.load_state_dict(checkpoint['scaler_d_state_dict'])
 
-        model.cpu()
-        discriminator.cpu()
+        model.to(device)
+        discriminator.to(device)
 
         training_state = {
             'model': model,
@@ -289,15 +296,15 @@ def resume_training_wrapper(
         loss_function_d = loss_function_map[loss_function_str_d]()
 
         logger.info("Resuming training.")
-        start_training(
+        training_process = Process(target=start_training, args=(
             data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval,
             accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
             perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, add_noise,
             noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages,
             discriminator_update_interval, label_smoothing_real, label_smoothing_fake, suppress_detailed_logs, stop_flag, checkpoint_flag,
             training_state, use_cache, channel_multiplier, segments_per_track, update_cache, training_state['current_segment']  # Pass current segment
-        )
-
+        ))
+        training_process.start()
         return f"Resumed training from checkpoint: {selected_checkpoint}"
     except KeyError as e:
         logger.error(f"KeyError during checkpoint loading: {e}")
