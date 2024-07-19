@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import gradio as gr
 from multiprocessing import Value, Process, Manager
-from train import start_training_wrapper, stop_training_wrapper, save_checkpoint_gradio, resume_training, start_training, save_checkpoint
+from train import start_training_wrapper, stop_training_wrapper, save_checkpoint_gradio, resume_training, start_training
 from separate_stems import perform_separation
 from model import load_model
 import torchaudio.transforms as T
@@ -170,18 +170,33 @@ def start_training_and_log_params(data_dir, batch_size, num_epochs, learning_rat
                                       discriminator_update_interval, label_smoothing_real, label_smoothing_fake, suppress_detailed_logs,
                                       use_cache, channel_multiplier, segments_per_track, update_cache, training_state, stop_flag, checkpoint_flag)
 
+class WassersteinLoss(nn.Module):
+    def __init__(self):
+        super(WassersteinLoss, self).__init__()
+
+    def forward(self, real_output, fake_output):
+        return torch.mean(fake_output) - torch.mean(real_output)
+loss_functions = {
+    "MSELoss": nn.MSELoss,
+    "L1Loss": nn.L1Loss,
+    "SmoothL1Loss": nn.SmoothL1Loss,
+    "BCEWithLogitsLoss": nn.BCEWithLogitsLoss,
+    "WassersteinLoss": WassersteinLoss  # assuming WassersteinLoss is defined elsewhere
+}
+
 def resume_training_wrapper(
     selected_checkpoint, checkpoint_dir, data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, save_interval,
-    accumulation_steps, num_stems, num_workers, cache_dir, segments_per_track, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
+    accumulation_steps, num_stems, num_workers, cache_dir, segments_per_track, loss_function_str_g, loss_function_str_d, optimizer_name_g, optimizer_name_d,
     perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, add_noise, noise_amount, early_stopping_patience,
     disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages, discriminator_update_interval, label_smoothing_real,
     label_smoothing_fake, perceptual_loss_weight, suppress_detailed_logs, use_cache, channel_multiplier, update_cache
 ):
     try:
-        # Load selected checkpoint
+        logger.info(f"Loading selected checkpoint: {selected_checkpoint}")
         checkpoint = torch.load(selected_checkpoint, map_location='cpu')
 
-        # Ensure model params and other necessary params are passed correctly
+        logger.info("Checkpoint loaded successfully.")
+
         training_params = {
             'data_dir': data_dir,
             'batch_size': batch_size,
@@ -195,8 +210,8 @@ def resume_training_wrapper(
             'num_workers': num_workers,
             'cache_dir': cache_dir,
             'segments_per_track': segments_per_track,
-            'loss_function_g': loss_function_g,
-            'loss_function_d': loss_function_d,
+            'loss_function_str_g': loss_function_str_g,
+            'loss_function_str_d': loss_function_str_d,
             'optimizer_name_g': optimizer_name_g,
             'optimizer_name_d': optimizer_name_d,
             'perceptual_loss_flag': perceptual_loss_flag,
@@ -221,7 +236,7 @@ def resume_training_wrapper(
             'update_cache': update_cache,
         }
 
-        # Create model and optimizer
+        logger.info("Creating model and optimizer.")
         device = torch.device('cuda' if use_cuda and torch.cuda.is_available() else 'cpu')
         target_length = checkpoint.get('target_length', checkpoint.get('segment_length', 22050))
         model, discriminator, optimizer_g, optimizer_d, scaler_g, scaler_d = create_model_and_optimizer(
@@ -235,7 +250,7 @@ def resume_training_wrapper(
             weight_decay=training_params['weight_decay']
         )
 
-        # Load state dictionaries, ignoring unexpected keys
+        logger.info("Loading state dictionaries.")
         model.load_state_dict(checkpoint['model_state_dict'])
         discriminator.load_state_dict(checkpoint['discriminator_state_dict'], strict=False)
         optimizer_g.load_state_dict(checkpoint['optimizer_g_state_dict'])
@@ -243,12 +258,10 @@ def resume_training_wrapper(
         scaler_g.load_state_dict(checkpoint['scaler_g_state_dict'])
         scaler_d.load_state_dict(checkpoint['scaler_d_state_dict'])
 
-        # Move model and discriminator to CPU before updating training_state
         model.cpu()
         discriminator.cpu()
 
-        # Update the training state
-        training_state.update({
+        training_state = {
             'model': model,
             'discriminator': discriminator,
             'optimizer_g': optimizer_g,
@@ -262,24 +275,38 @@ def resume_training_wrapper(
             'current_segment': checkpoint.get('segment', 0),
             'training_started': True,
             'target_length': target_length
-        })
+        }
 
-        # Resume training
+        logger.info("Mapping loss functions from strings to actual functions.")
+        loss_function_map = {
+            "MSELoss": nn.MSELoss,
+            "L1Loss": nn.L1Loss,
+            "SmoothL1Loss": nn.SmoothL1Loss,
+            "BCEWithLogitsLoss": nn.BCEWithLogitsLoss,
+            "WassersteinLoss": WassersteinLoss
+        }
+        loss_function_g = loss_function_map[loss_function_str_g]()
+        loss_function_d = loss_function_map[loss_function_str_d]()
+
+        logger.info("Resuming training.")
         start_training(
             data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval,
             accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
             perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, add_noise,
             noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages,
             discriminator_update_interval, label_smoothing_real, label_smoothing_fake, suppress_detailed_logs, stop_flag, checkpoint_flag,
-            training_state, use_cache, channel_multiplier, segments_per_track, update_cache, checkpoint.get('segment', 0)
+            training_state, use_cache, channel_multiplier, segments_per_track, update_cache, training_state['current_segment']  # Pass current segment
         )
 
         return f"Resumed training from checkpoint: {selected_checkpoint}"
     except KeyError as e:
         logger.error(f"KeyError during checkpoint loading: {e}")
         return f"KeyError during checkpoint loading: {e}"
+    except TypeError as e:
+        logger.error(f"TypeError during checkpoint loading: {e}")
+        return f"TypeError during checkpoint loading: {e}"
     except Exception as e:
-        logger.error(f"Exception during checkpoint loading: {e}")
+        logger.error(f"Exception during checkpoint loading: {e}", exc_info=True)
         return f"Exception during checkpoint loading: {e}"
 
 def update_checkpoint_dropdown(checkpoint_dir):

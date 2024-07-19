@@ -24,6 +24,11 @@ from loss_functions import wasserstein_loss
 
 logger = logging.getLogger(__name__)
 
+# Global training process and stop flag
+training_process = None
+stop_flag = Value('i', 0)
+checkpoint_flag = Value('i', 0)
+
 def validate_tensor_shapes(tensor1, tensor2, message=""):
     if tensor1.shape != tensor2.shape:
         logger.error(f"Shape mismatch: {tensor1.shape} vs {tensor2.shape}. {message}")
@@ -61,8 +66,8 @@ def train_single_stem(
     stop_flag: Value,
     checkpoint_flag: Value,
     training_state: dict,
-    current_segment: int,
-    suppress_reading_messages: bool = False
+    suppress_reading_messages: bool = False,
+    current_segment: int = 0
 ):
     if stem_name == "input":
         logger.info(f"Skipping training for stem: {stem_name} (test input)")
@@ -112,9 +117,11 @@ def train_single_stem(
         for file_id in dataset.file_ids
     )
 
+    # Start from the current segment
     segment_count = current_segment
+    epoch_start = training_state.get('current_epoch', 0)
 
-    for epoch in range(training_state.get('current_epoch', 0), training_params['num_epochs']):
+    for epoch in range(epoch_start, training_params['num_epochs']):
         if stop_flag.value == 1:
             logger.info("Training stopped.")
             return
@@ -157,6 +164,7 @@ def train_single_stem(
 
             full_outputs = []  # Store outputs for the entire track
 
+            # Ensure to start from the correct segment
             for segment_idx in range(segment_count, input_data.size(0)):
                 input_segment = input_data[segment_idx].unsqueeze(0)
                 target_segment = target_data[segment_idx].unsqueeze(0)
@@ -436,7 +444,7 @@ def save_checkpoint(model, discriminator, optimizer_g, optimizer_d, scaler_g, sc
         'loss_d': loss_d,
         'stem_name': stem_name,
         'n_mels': model.n_mels,
-        'target_length': model.target_length,  # Save target_length
+        'target_length': model.target_length,
         'optimizer_name_g': optimizer_g.__class__.__name__,
         'optimizer_name_d': optimizer_d.__class__.__name__,
         'initial_lr_g': optimizer_g.param_groups[0]['initial_lr'],
@@ -492,7 +500,10 @@ def load_checkpoint(checkpoint_path: str):
     checkpoint = torch.load(checkpoint_path)
     logger.info(f"Checkpoint loaded: {checkpoint_path}")
     for key, value in checkpoint.items():
-        logger.info(f"Checkpoint key: {key}, type: {type(value)}")
+        if key.endswith('_state_dict'):
+            logger.info(f"Checkpoint key: {key}, type: {type(value)}")
+        else:
+            logger.info(f"Checkpoint key: {key}, value: {value}")
     return checkpoint
 
 def start_training(
@@ -626,8 +637,8 @@ def start_training(
 
         train_single_stem(
             stem_name, train_dataset, val_dataset, training_params, model_params,
-            sample_rate, n_mels, n_fft, segment_length, stop_flag, checkpoint_flag, training_state, suppress_reading_messages,  # Pass training_state
-            current_segment  # Pass current_segment
+            sample_rate, n_mels, n_fft, segment_length, stop_flag, checkpoint_flag, training_state,
+            suppress_reading_messages=suppress_reading_messages, current_segment=current_segment  # Pass current_segment
         )
 
         end_time = time.time()
@@ -714,7 +725,8 @@ def start_training_wrapper(
         perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, add_noise,
         noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages,
         discriminator_update_interval, label_smoothing_real, label_smoothing_fake, suppress_detailed_logs, stop_flag, checkpoint_flag,
-        training_state, use_cache, channel_multiplier, segments_per_track, update_cache))
+        training_state, channel_multiplier, segments_per_track, use_cache, update_cache  # Ensure only valid args are passed
+    ))
 
     print(f"[start_training_wrapper] training_state type before process start: {type(training_state)}")
     print(f"[start_training_wrapper] training_state value before process start: {training_state}")
@@ -728,11 +740,17 @@ def stop_training_wrapper(stop_flag):
         stop_flag.value = 1  # Set stop flag to request stopping
         training_process.terminate()
         training_process = None
+        stop_flag.value = 0  # Reset stop flag after termination
         return "Training Stopped"
     return "No Training Process Running"
 
 def resume_training(checkpoint_dir, device_str, stop_flag, checkpoint_flag, training_state):
+    global training_process
     logger.info(f"Resuming training from checkpoint at {checkpoint_dir}")
+
+    # Reset the stop flag
+    stop_flag.value = 0
+
     checkpoint_files = [f for f in os.listdir(checkpoint_dir) if f.endswith('.pt')]
     if not checkpoint_files:
         return "No checkpoints found in the specified directory."
@@ -741,112 +759,174 @@ def resume_training(checkpoint_dir, device_str, stop_flag, checkpoint_flag, trai
     checkpoint_path = os.path.join(checkpoint_dir, latest_checkpoint)
 
     try:
-        checkpoint = load_checkpoint(checkpoint_path)
+        logger.info(f"Loading checkpoint from {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location=device_str)
     except Exception as e:
         logger.error(f"Error loading checkpoint {checkpoint_path}: {e}", exc_info=True)
         return f"Error loading checkpoint: {e}"
 
-    n_mels = checkpoint.get('n_mels', 32)
-    target_length = checkpoint.get('target_length', 22050)
-    optimizer_name_g = checkpoint.get('optimizer_name_g', 'Adam')
-    optimizer_name_d = checkpoint.get('optimizer_name_d', 'RMSprop')
-    initial_lr_g = checkpoint.get('initial_lr_g', 1e-4)
-    initial_lr_d = checkpoint.get('initial_lr_d', 1e-4)
-    weight_decay = checkpoint.get('weight_decay', 1e-5)
+    try:
+        # Extract necessary parameters from the checkpoint
+        n_mels = checkpoint.get('n_mels', 32)
+        target_length = checkpoint.get('target_length', 22050)
+        optimizer_name_g = checkpoint.get('optimizer_name_g', 'Adam')
+        optimizer_name_d = checkpoint.get('optimizer_name_d', 'RMSprop')
+        initial_lr_g = checkpoint.get('initial_lr_g', 1e-4)
+        initial_lr_d = checkpoint.get('initial_lr_d', 1e-4)
+        weight_decay = checkpoint.get('weight_decay', 1e-5)
 
-    model, discriminator, optimizer_g, optimizer_d, scaler_g, scaler_d = create_model_and_optimizer(
-        device=device_str,
-        n_mels=n_mels,
-        target_length=target_length,
-        initial_lr_g=initial_lr_g,
-        initial_lr_d=initial_lr_d,
-        optimizer_name_g=optimizer_name_g,
-        optimizer_name_d=optimizer_name_d,
-        weight_decay=weight_decay
-    )
+        logger.info("Creating model and optimizer")
+        # Creating model and optimizers
+        model, discriminator, optimizer_g, optimizer_d, scaler_g, scaler_d = create_model_and_optimizer(
+            device=device_str,
+            n_mels=n_mels,
+            target_length=target_length,
+            initial_lr_g=initial_lr_g,
+            initial_lr_d=initial_lr_d,
+            optimizer_name_g=optimizer_name_g,
+            optimizer_name_d=optimizer_name_d,
+            weight_decay=weight_decay
+        )
 
-    if 'model_state_dict' in checkpoint:
-        filtered_checkpoint = {k: v for k, v in checkpoint['model_state_dict'].items() if k in model.state_dict()}
-        model.load_state_dict(filtered_checkpoint, strict=False)
-    else:
-        logger.error("Checkpoint does not contain model_state_dict")
-        return "Checkpoint does not contain model_state_dict"
-
-    if 'discriminator_state_dict' in checkpoint:
-        discriminator.load_state_dict(checkpoint['discriminator_state_dict'], strict=False)
-    else:
-        logger.error("Checkpoint does not contain discriminator_state_dict")
-        return "Checkpoint does not contain discriminator_state_dict"
-
-    if 'optimizer_g_state_dict' in checkpoint:
+        logger.info("Loading model and optimizer states")
+        # Loading model and optimizer states
+        model.load_state_dict(checkpoint['model_state_dict'])
+        discriminator.load_state_dict(checkpoint['discriminator_state_dict'])
         optimizer_g.load_state_dict(checkpoint['optimizer_g_state_dict'])
-    else:
-        logger.error("Checkpoint does not contain optimizer_g_state_dict")
-        return "Checkpoint does not contain optimizer_g_state_dict"
-
-    if 'optimizer_d_state_dict' in checkpoint:
-        try:
-            optimizer_d.load_state_dict(checkpoint['optimizer_d_state_dict'])
-        except ValueError as e:
-            logger.warning(f"Error loading optimizer_d state_dict: {e}. Attempting to adapt state_dict.")
-            optimizer_d_state = checkpoint['optimizer_d_state_dict']
-            optimizer_d_state['param_groups'] = optimizer_d.state_dict()['param_groups']
-            optimizer_d.load_state_dict(optimizer_d_state)
-    else:
-        logger.error("Checkpoint does not contain optimizer_d_state_dict")
-        return "Checkpoint does not contain optimizer_d_state_dict"
-
-    if 'scaler_g_state_dict' in checkpoint:
+        optimizer_d.load_state_dict(checkpoint['optimizer_d_state_dict'])
         scaler_g.load_state_dict(checkpoint['scaler_g_state_dict'])
-    else:
-        logger.error("Checkpoint does not contain scaler_g_state_dict")
-        return "Checkpoint does not contain scaler_g_state_dict"
-
-    if 'scaler_d_state_dict' in checkpoint:
         scaler_d.load_state_dict(checkpoint['scaler_d_state_dict'])
-    else:
-        logger.error("Checkpoint does not contain scaler_d_state_dict")
-        return "Checkpoint does not contain scaler_d_state_dict"
 
-    epoch = checkpoint['epoch']
-    segment = checkpoint.get('segment', 0)
+        epoch = checkpoint['epoch']
+        segment = checkpoint.get('segment', 0)
 
-    start_training(
-        data_dir=checkpoint['data_dir'],
-        batch_size=checkpoint['batch_size'],
-        num_epochs=checkpoint['num_epochs'] - epoch,
-        initial_lr_g=initial_lr_g,
-        initial_lr_d=initial_lr_d,
-        use_cuda='cuda' in device_str,
-        checkpoint_dir=checkpoint['checkpoint_dir'],
-        save_interval=checkpoint['save_interval'],
-        accumulation_steps=checkpoint['accumulation_steps'],
-        num_stems=checkpoint['num_stems'],
-        num_workers=checkpoint['num_workers'],
-        cache_dir=checkpoint['cache_dir'],
-        loss_function_g=checkpoint['loss_function_g'],
-        loss_function_d=checkpoint['loss_function_d'],
-        optimizer_name_g=optimizer_name_g,
-        optimizer_name_d=optimizer_name_d,
-        perceptual_loss_flag=checkpoint['perceptual_loss_flag'],
-        perceptual_loss_weight=checkpoint['perceptual_loss_weight'],
-        clip_value=checkpoint['clip_value'],
-        scheduler_step_size=checkpoint['scheduler_step_size'],
-        scheduler_gamma=checkpoint['scheduler_gamma'],
-        tensorboard_flag=checkpoint['tensorboard_flag'],
-        add_noise=checkpoint['add_noise'],
-        noise_amount=checkpoint['noise_amount'],
-        early_stopping_patience=checkpoint['early_stopping_patience'],
-        disable_early_stopping=checkpoint['disable_early_stopping'],
-        weight_decay=weight_decay,
-        suppress_warnings=checkpoint['suppress_warnings'],
-        suppress_reading_messages=checkpoint['suppress_reading_messages'],
-        channel_multiplier=checkpoint['channel_multiplier'],
-        segments_per_track=checkpoint.get('segments_per_track', 10),
-        stop_flag=stop_flag,
-        update_cache=checkpoint.get('update_cache', True),
-        training_state=training_state,
-        current_segment=segment  # Pass the current segment
-    )
+        logger.info("Mapping loss function names to actual functions")
+        # Map loss function names to actual loss functions
+        loss_function_map = {
+            'L1Loss': nn.L1Loss(),
+            'MSELoss': nn.MSELoss(),
+            'WassersteinLoss': wasserstein_loss,
+            'BCELoss': nn.BCELoss()
+        }
 
-    return f"Resumed training from checkpoint: {latest_checkpoint}"
+        loss_function_g = loss_function_map.get(checkpoint['loss_function_g'])
+        loss_function_d = loss_function_map.get(checkpoint['loss_function_d'])
+        if not loss_function_g or not loss_function_d:
+            raise ValueError("Unsupported loss function")
+
+        # Ensure training_state is a dictionary-like object
+        training_state = dict(training_state) if isinstance(training_state, DictProxy) else training_state
+
+        logger.info("Updating training_state with parameters")
+        # Update training_state with parameters
+        training_state.update({
+            'model': model,
+            'optimizer_g': optimizer_g,
+            'optimizer_d': optimizer_d,
+            'scaler_g': scaler_g,
+            'scaler_d': scaler_d,
+            'stem_name': checkpoint['stem_name'],
+            'model_params': {
+                'optimizer_name_g': optimizer_name_g,
+                'optimizer_name_d': optimizer_name_d,
+                'loss_function_g': loss_function_g,
+                'loss_function_d': loss_function_d,
+                'perceptual_loss_flag': checkpoint.get('perceptual_loss_flag', False),
+                'perceptual_loss_weight': checkpoint.get('perceptual_loss_weight', 0.1),
+                'clip_value': checkpoint.get('clip_value', 1),
+                'tensorboard_flag': checkpoint.get('tensorboard_flag', False),
+                'channel_multiplier': checkpoint.get('channel_multiplier', 0.5),
+            },
+            'training_params': {
+                'data_dir': checkpoint['data_dir'],
+                'batch_size': checkpoint['batch_size'],
+                'num_epochs': checkpoint['num_epochs'],
+                'learning_rate_g': initial_lr_g,
+                'learning_rate_d': initial_lr_d,
+                'use_cuda': 'cuda' in device_str,
+                'save_interval': checkpoint['save_interval'],
+                'accumulation_steps': checkpoint['accumulation_steps'],
+                'num_stems': checkpoint['num_stems'],
+                'num_workers': checkpoint['num_workers'],
+                'cache_dir': checkpoint['cache_dir'],
+                'segments_per_track': checkpoint.get('segments_per_track', 1),
+                'scheduler_step_size': checkpoint['scheduler_step_size'],
+                'scheduler_gamma': checkpoint['scheduler_gamma'],
+                'add_noise': checkpoint['add_noise'],
+                'noise_amount': checkpoint['noise_amount'],
+                'early_stopping_patience': checkpoint['early_stopping_patience'],
+                'disable_early_stopping': checkpoint['disable_early_stopping'],
+                'weight_decay': checkpoint['weight_decay'],
+                'suppress_warnings': checkpoint['suppress_warnings'],
+                'suppress_reading_messages': checkpoint['suppress_reading_messages'],
+                'discriminator_update_interval': checkpoint['discriminator_update_interval'],
+                'label_smoothing_real': checkpoint['label_smoothing_real'],
+                'label_smoothing_fake': checkpoint['label_smoothing_fake'],
+                'suppress_detailed_logs': checkpoint['suppress_detailed_logs'],
+                'use_cache': checkpoint['use_cache'],
+                'update_cache': checkpoint.get('update_cache', True)
+            },
+            'current_epoch': epoch,
+            'current_segment': segment,
+            'training_started': True,
+            'discriminator': discriminator,
+            'target_length': checkpoint['target_length']
+        })
+
+        logger.info("Starting the training")
+        # Starting the training
+        training_process = Process(target=start_training, args=(
+            training_state['training_params']['data_dir'],
+            training_state['training_params']['batch_size'],
+            training_state['training_params']['num_epochs'],
+            training_state['training_params']['learning_rate_g'],
+            training_state['training_params']['learning_rate_d'],
+            training_state['training_params']['use_cuda'],
+            training_state['training_params']['checkpoint_dir'],
+            training_state['training_params']['save_interval'],
+            training_state['training_params']['accumulation_steps'],
+            training_state['training_params']['num_stems'],
+            training_state['training_params']['num_workers'],
+            training_state['training_params']['cache_dir'],
+            training_state['model_params']['loss_function_g'],
+            training_state['model_params']['loss_function_d'],
+            training_state['model_params']['optimizer_name_g'],
+            training_state['model_params']['optimizer_name_d'],
+            training_state['model_params']['perceptual_loss_flag'],
+            training_state['model_params']['perceptual_loss_weight'],
+            training_state['model_params']['clip_value'],
+            training_state['training_params']['scheduler_step_size'],
+            training_state['training_params']['scheduler_gamma'],
+            training_state['model_params']['tensorboard_flag'],
+            training_state['training_params']['add_noise'],
+            training_state['training_params']['noise_amount'],
+            training_state['training_params']['early_stopping_patience'],
+            training_state['training_params']['disable_early_stopping'],
+            training_state['training_params']['weight_decay'],
+            training_state['training_params']['suppress_warnings'],
+            training_state['training_params']['suppress_reading_messages'],
+            training_state['training_params']['discriminator_update_interval'],
+            training_state['training_params']['label_smoothing_real'],
+            training_state['training_params']['label_smoothing_fake'],
+            training_state['training_params']['suppress_detailed_logs'],
+            stop_flag,
+            checkpoint_flag,
+            training_state,
+            training_state['model_params']['channel_multiplier'],
+            training_state['training_params']['segments_per_track'],
+            training_state['training_params']['use_cache'],
+            training_state['training_params']['update_cache'],
+            segment  # Ensure the current segment is passed
+        ))
+
+        training_process.start()
+        return f"Resumed training from checkpoint: {latest_checkpoint}"
+    except KeyError as e:
+        logger.error(f"KeyError during resume: {e}. Checkpoint content: {checkpoint}")
+        return f"KeyError during resume: {e}. Checkpoint content: {checkpoint}"
+    except TypeError as e:
+        logger.error(f"TypeError during resume: {e}. Checkpoint content: {checkpoint}")
+        return f"TypeError during resume: {e}. Checkpoint content: {checkpoint}"
+    except Exception as e:
+        logger.error(f"Unexpected error during resume: {e}. Checkpoint content: {checkpoint}", exc_info=True)
+        return f"Unexpected error during resume: {e}. Checkpoint content: {checkpoint}"
