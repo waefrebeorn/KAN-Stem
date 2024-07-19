@@ -476,7 +476,7 @@ def save_checkpoint(model, discriminator, optimizer_g, optimizer_d, scaler_g, sc
         'update_cache': kwargs.get('update_cache'),
         'segment': segment
     }
-    checkpoint_path = os.path.join(checkpoint_dir, f'checkpoint_epoch_{epoch}_segment_{segment}.pt' if segment is not None else f'checkpoint_epoch_{epoch}.pt')
+    checkpoint_path = os.path.join(checkpoint_dir, f'checkpoint_{stem_name}_epoch_{epoch}_segment_{segment}.pt' if segment is not None else f'checkpoint_{stem_name}_epoch_{epoch}.pt')
     torch.save(checkpoint, checkpoint_path)
     logger.info(f"Checkpoint saved: {checkpoint_path}")
 
@@ -516,9 +516,11 @@ def start_training(
     disable_early_stopping: bool, weight_decay: float, suppress_warnings: bool, suppress_reading_messages: bool,
     discriminator_update_interval: int, label_smoothing_real: float, label_smoothing_fake: float,
     suppress_detailed_logs: bool, stop_flag: Value, checkpoint_flag: Value, training_state: dict,
-    channel_multiplier: float, segments_per_track: int = 5, use_cache: bool = True, update_cache: bool = False,
-    current_segment: int = 0
+    channel_multiplier: float, segments_per_track: int, use_cache: bool, update_cache: bool,
+    selected_stems: list,  # This is the 41st parameter
+    current_segment: int  # This is the 42nd parameter
 ):
+
     # Log the training parameters to confirm they are being used correctly
     logger.info(f"Training Parameters from training_state:")
     logger.info(training_state)
@@ -554,7 +556,8 @@ def start_training(
         'suppress_detailed_logs': suppress_detailed_logs,
         'use_cache': use_cache,
         'update_cache': update_cache,
-        'device_str': 'cuda' if use_cuda and torch.cuda.is_available() else 'cpu'
+        'device_str': 'cuda' if use_cuda and torch.cuda.is_available() else 'cpu',
+        'selected_stems': selected_stems
     }
 
     model_params = {
@@ -621,7 +624,7 @@ def start_training(
     # Ensure training_state is a dictionary-like object
     training_state = dict(training_state) if isinstance(training_state, DictProxy) else training_state
 
-    for stem_name in ['vocals', 'drums', 'bass', 'kick', 'keys', 'guitar']:
+    for stem_name in selected_stems:  # Use selected stems
         if stop_flag.value == 1:
             logger.info("Training stopped.")
             return
@@ -638,7 +641,7 @@ def start_training(
         train_single_stem(
             stem_name, train_dataset, val_dataset, training_params, model_params,
             sample_rate, n_mels, n_fft, segment_length, stop_flag, checkpoint_flag, training_state,
-            suppress_reading_messages=suppress_reading_messages, current_segment=current_segment  # Pass current_segment
+            suppress_reading_messages=suppress_reading_messages, current_segment=0
         )
 
         end_time = time.time()
@@ -653,18 +656,12 @@ def start_training_wrapper(
     optimizer_name_d, perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma,
     tensorboard_flag, add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay,
     suppress_warnings, suppress_reading_messages, discriminator_update_interval, label_smoothing_real, label_smoothing_fake,
-    suppress_detailed_logs, use_cache, channel_multiplier, segments_per_track, update_cache, training_state, stop_flag, checkpoint_flag
+    suppress_detailed_logs, use_cache, channel_multiplier, segments_per_track, update_cache, training_state, stop_flag, 
+    checkpoint_flag, selected_stems
 ):
     global training_process
     stop_flag.value = 0  # Reset stop flag
     checkpoint_flag.value = 0  # Reset checkpoint flag
-
-    # Ensure proper capitalization for optimizers
-    optimizer_name_g = optimizer_name_g.capitalize()
-    optimizer_name_d = optimizer_name_d.capitalize()
-
-    print(f"[start_training_wrapper] training_state type before assert: {type(training_state)}")
-    print(f"[start_training_wrapper] training_state value before assert: {training_state}")
 
     assert isinstance(training_state, (dict, DictProxy)), "training_state must be a dictionary or DictProxy object"
 
@@ -716,20 +713,20 @@ def start_training_wrapper(
         'suppress_detailed_logs': suppress_detailed_logs,
         'use_cache': use_cache,
         'channel_multiplier': channel_multiplier,
-        'update_cache': update_cache
+        'update_cache': update_cache,
+        'selected_stems': selected_stems,
+        'current_segment': training_state.get('current_segment', 0)  # Add current_segment from training_state
     })
 
     training_process = Process(target=start_training, args=(
         data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval,
-        accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
-        perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, add_noise,
-        noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages,
-        discriminator_update_interval, label_smoothing_real, label_smoothing_fake, suppress_detailed_logs, stop_flag, checkpoint_flag,
-        training_state, channel_multiplier, segments_per_track, use_cache, update_cache  # Ensure only valid args are passed
+        accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g,
+        optimizer_name_d, perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma,
+        tensorboard_flag, add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay,
+        suppress_warnings, suppress_reading_messages, discriminator_update_interval, label_smoothing_real, label_smoothing_fake,
+        suppress_detailed_logs, stop_flag, checkpoint_flag, training_state, channel_multiplier, segments_per_track,
+        use_cache, update_cache, selected_stems, training_state.get('current_segment', 0)  # Ensure current_segment is passed
     ))
-
-    print(f"[start_training_wrapper] training_state type before process start: {type(training_state)}")
-    print(f"[start_training_wrapper] training_state value before process start: {training_state}")
 
     training_process.start()
     return f"Training Started with {loss_function_str_g} for Generator and {loss_function_str_d} for Discriminator, using {optimizer_name_g} for Generator Optimizer and {optimizer_name_d} for Discriminator Optimizer"
@@ -864,7 +861,8 @@ def resume_training(checkpoint_dir, device_str, stop_flag, checkpoint_flag, trai
                 'label_smoothing_fake': checkpoint['label_smoothing_fake'],
                 'suppress_detailed_logs': checkpoint['suppress_detailed_logs'],
                 'use_cache': checkpoint['use_cache'],
-                'update_cache': checkpoint.get('update_cache', True)
+                'update_cache': checkpoint.get('update_cache', True),
+                'stem_name': checkpoint['stem_name']  # Use stem_name instead of selected_stems
             },
             'current_epoch': epoch,
             'current_segment': segment,
@@ -916,17 +914,10 @@ def resume_training(checkpoint_dir, device_str, stop_flag, checkpoint_flag, trai
             training_state['training_params']['segments_per_track'],
             training_state['training_params']['use_cache'],
             training_state['training_params']['update_cache'],
-            segment  # Ensure the current segment is passed
+            training_state['training_params']['stem_name']  # Ensure stem_name is passed here
         ))
-
         training_process.start()
-        return f"Resumed training from checkpoint: {latest_checkpoint}"
-    except KeyError as e:
-        logger.error(f"KeyError during resume: {e}. Checkpoint content: {checkpoint}")
-        return f"KeyError during resume: {e}. Checkpoint content: {checkpoint}"
-    except TypeError as e:
-        logger.error(f"TypeError during resume: {e}. Checkpoint content: {checkpoint}")
-        return f"TypeError during resume: {e}. Checkpoint content: {checkpoint}"
+        return f"Resumed training from {checkpoint_path}"
     except Exception as e:
-        logger.error(f"Unexpected error during resume: {e}. Checkpoint content: {checkpoint}", exc_info=True)
-        return f"Unexpected error during resume: {e}. Checkpoint content: {checkpoint}"
+        logger.error(f"Error resuming training: {e}", exc_info=True)
+        return f"Error resuming training: {e}"

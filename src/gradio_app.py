@@ -113,9 +113,8 @@ def start_training_and_log_params(data_dir, batch_size, num_epochs, learning_rat
                                   perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, 
                                   add_noise, noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages,
                                   discriminator_update_interval, label_smoothing_real, label_smoothing_fake, perceptual_loss_weight, suppress_detailed_logs,
-                                  optimization_method, optuna_trials, use_cache, channel_multiplier, update_cache):
-    global training_state, training_process, stop_flag
-    stop_flag.value = 0  # Ensure stop flag is reset at the start
+                                  optimization_method, optuna_trials, use_cache, channel_multiplier, update_cache, selected_stems):
+    global training_state
     gradio_params = {
         "data_dir": data_dir,
         "batch_size": batch_size,
@@ -153,7 +152,8 @@ def start_training_and_log_params(data_dir, batch_size, num_epochs, learning_rat
         "suppress_detailed_logs": suppress_detailed_logs,
         "use_cache": use_cache,
         "channel_multiplier": channel_multiplier,  
-        "update_cache": update_cache  
+        "update_cache": update_cache,
+        "selected_stems": selected_stems
     }
     log_training_parameters(gradio_params)
     training_state.update({
@@ -164,16 +164,12 @@ def start_training_and_log_params(data_dir, batch_size, num_epochs, learning_rat
     if optimization_method == "Optuna":
         return start_optuna_optimization(optuna_trials, gradio_params)
     else:
-        training_process = Process(target=start_training_wrapper, args=(
-            data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval,
-            accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
-            perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, add_noise,
-            noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages,
-            discriminator_update_interval, label_smoothing_real, label_smoothing_fake, suppress_detailed_logs, use_cache, channel_multiplier,
-            segments_per_track, update_cache, training_state, stop_flag, checkpoint_flag
-        ))
-        training_process.start()
-        return "Training started."
+        return start_training_wrapper(data_dir, batch_size, num_epochs, learning_rate_g, learning_rate_d, use_cuda, checkpoint_dir, save_interval,
+                                      accumulation_steps, num_stems, num_workers, cache_dir, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
+                                      perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, add_noise,
+                                      noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages,
+                                      discriminator_update_interval, label_smoothing_real, label_smoothing_fake, suppress_detailed_logs,
+                                      use_cache, channel_multiplier, segments_per_track, update_cache, training_state, stop_flag, checkpoint_flag, selected_stems)
 
 class WassersteinLoss(nn.Module):
     def __init__(self):
@@ -181,6 +177,7 @@ class WassersteinLoss(nn.Module):
 
     def forward(self, real_output, fake_output):
         return torch.mean(fake_output) - torch.mean(real_output)
+
 loss_functions = {
     "MSELoss": nn.MSELoss,
     "L1Loss": nn.L1Loss,
@@ -194,10 +191,8 @@ def resume_training_wrapper(
     accumulation_steps, num_stems, num_workers, cache_dir, segments_per_track, loss_function_str_g, loss_function_str_d, optimizer_name_g, optimizer_name_d,
     perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, add_noise, noise_amount, early_stopping_patience,
     disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages, discriminator_update_interval, label_smoothing_real,
-    label_smoothing_fake, perceptual_loss_weight, suppress_detailed_logs, use_cache, channel_multiplier, update_cache
+    label_smoothing_fake, perceptual_loss_weight, suppress_detailed_logs, use_cache, channel_multiplier, update_cache, selected_stems
 ):
-    global training_process, stop_flag
-    stop_flag.value = 0  # Ensure stop flag is reset at the start
     try:
         logger.info(f"Loading selected checkpoint: {selected_checkpoint}")
         checkpoint = torch.load(selected_checkpoint, map_location='cpu')
@@ -241,6 +236,7 @@ def resume_training_wrapper(
             'use_cache': use_cache,
             'channel_multiplier': channel_multiplier,
             'update_cache': update_cache,
+            'selected_stems': selected_stems
         }
 
         logger.info("Creating model and optimizer.")
@@ -302,9 +298,11 @@ def resume_training_wrapper(
             perceptual_loss_flag, perceptual_loss_weight, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, add_noise,
             noise_amount, early_stopping_patience, disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages,
             discriminator_update_interval, label_smoothing_real, label_smoothing_fake, suppress_detailed_logs, stop_flag, checkpoint_flag,
-            training_state, use_cache, channel_multiplier, segments_per_track, update_cache, training_state['current_segment']  # Pass current segment
+            training_state, use_cache, channel_multiplier, segments_per_track, update_cache, selected_stems,  # Pass selected_stems
+            training_state['current_segment']  # Pass current_segment
         ))
         training_process.start()
+
         return f"Resumed training from checkpoint: {selected_checkpoint}"
     except KeyError as e:
         logger.error(f"KeyError during checkpoint loading: {e}")
@@ -399,6 +397,13 @@ if __name__ == "__main__":
             save_checkpoint_button = gr.Button("Save Checkpoint")
             output = gr.Textbox(label="Output")
 
+            # Stem selection
+            stem_selector = gr.CheckboxGroup(
+                label="Select Stems to Train",
+                choices=["vocals", "drums", "bass", "kick", "keys", "guitar"],
+                value=["vocals"]  # Default value
+            )
+
             start_training_button.click(
                 start_training_and_log_params,
                 inputs=[
@@ -406,7 +411,8 @@ if __name__ == "__main__":
                     accumulation_steps, num_stems, num_workers, cache_dir, segments_per_track, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
                     perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, add_noise, noise_amount, early_stopping_patience,
                     disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages, discriminator_update_interval, label_smoothing_real, 
-                    label_smoothing_fake, perceptual_loss_weight, suppress_detailed_logs, optimization_method, optuna_trials, use_cache, channel_multiplier, update_cache
+                    label_smoothing_fake, perceptual_loss_weight, suppress_detailed_logs, optimization_method, optuna_trials, use_cache, channel_multiplier, update_cache,
+                    stem_selector
                 ],
                 outputs=output
             )
@@ -430,7 +436,7 @@ if __name__ == "__main__":
                     accumulation_steps, num_stems, num_workers, cache_dir, segments_per_track, loss_function_g, loss_function_d, optimizer_name_g, optimizer_name_d,
                     perceptual_loss_flag, clip_value, scheduler_step_size, scheduler_gamma, tensorboard_flag, add_noise, noise_amount, early_stopping_patience,
                     disable_early_stopping, weight_decay, suppress_warnings, suppress_reading_messages, discriminator_update_interval, label_smoothing_real,
-                    label_smoothing_fake, perceptual_loss_weight, suppress_detailed_logs, use_cache, channel_multiplier, update_cache
+                    label_smoothing_fake, perceptual_loss_weight, suppress_detailed_logs, use_cache, channel_multiplier, update_cache, stem_selector
                 ],
                 outputs=output
             )
