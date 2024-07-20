@@ -208,7 +208,7 @@ def train_single_stem(
                 scaler_d.scale(loss_d).backward()
                 purge_vram()
 
-                if (i + 1) % training_params['accumulation_steps'] == 0:
+                if (segment_count + 1) % training_params['accumulation_steps'] == 0:
                     scaler_d.step(optimizer_d)
                     scaler_d.update()
                     optimizer_d.zero_grad(set_to_none=True)
@@ -289,9 +289,6 @@ def train_single_stem(
                         update_cache=training_params['update_cache']
                     )
                     checkpoint_flag.value = 0  # Reset the flag after saving
-
-            # Reset the segment count to 0 after each file
-            segment_count = 0
 
             # Assemble the full output for the entire track
             full_output = torch.cat(full_outputs, dim=0)
@@ -624,6 +621,9 @@ def start_training(
     # Ensure training_state is a dictionary-like object
     training_state = dict(training_state) if isinstance(training_state, DictProxy) else training_state
 
+    # Initialize segment_count for continuation
+    segment_count = training_state.get('current_segment', 0)
+
     for stem_name in selected_stems:  # Use selected stems
         if stop_flag.value == 1:
             logger.info("Training stopped.")
@@ -641,7 +641,7 @@ def start_training(
         train_single_stem(
             stem_name, train_dataset, val_dataset, training_params, model_params,
             sample_rate, n_mels, n_fft, segment_length, stop_flag, checkpoint_flag, training_state,
-            suppress_reading_messages=suppress_reading_messages, current_segment=0
+            suppress_reading_messages=suppress_reading_messages, current_segment=segment_count  # Start with segment_count
         )
 
         end_time = time.time()
@@ -914,7 +914,8 @@ def resume_training(checkpoint_dir, device_str, stop_flag, checkpoint_flag, trai
             training_state['training_params']['segments_per_track'],
             training_state['training_params']['use_cache'],
             training_state['training_params']['update_cache'],
-            training_state['training_params']['stem_name']  # Ensure stem_name is passed here
+            training_state['training_params']['stem_name'],  # Ensure stem_name is passed here
+            segment  # Start from the correct segment
         ))
         training_process.start()
         return f"Resumed training from {checkpoint_path}"

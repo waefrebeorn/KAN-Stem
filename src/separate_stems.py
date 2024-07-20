@@ -1,28 +1,23 @@
 import os
 import torch
-import torch.nn as nn
-import torchaudio.transforms as T
+import torch.nn.functional as F
 import logging
 import soundfile as sf
+import numpy as np
 import librosa
-from model import load_model  # Ensure the model script is accessible
-import gc
+from typing import List
+from model import load_model
+from utils import ensure_dir_exists, segment_audio, purge_vram
+import torchaudio.transforms as T
+from torch.utils.checkpoint import checkpoint
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
+# Suppress warnings
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, message="expandable_segments not supported on this platform")
+warnings.filterwarnings("ignore", category=UserWarning, message="None of the inputs have requires_grad=True")
+warnings.filterwarnings("ignore", category=UserWarning, message="torch.utils.checkpoint: please pass in use_reentrant=True or use_reentrant=False explicitly")
+
 logger = logging.getLogger(__name__)
-
-def purge_vram():
-    try:
-        torch.cuda.empty_cache()
-        logger.info("Successfully purged GPU cache.")
-    except Exception as e:
-        logger.error(f"Error purging GPU cache: {e}", exc_info=True)
-    try:
-        gc.collect()
-        logger.info("Successfully performed garbage collection.")
-    except Exception as e:
-        logger.error(f"Error during garbage collection: {e}", exc_info=True)
 
 def read_audio(file_path, suppress_messages=False):
     try:
@@ -45,7 +40,33 @@ def write_audio(file_path, data, samplerate):
     except Exception as e:
         logger.error(f"Error writing audio file {file_path}: {e}")
 
-def perform_separation(checkpoints, file_path, n_mels, target_length, n_fft, num_stems, cache_dir, suppress_reading_messages):
+def process_segment(segment_tensor, sr, n_mels, n_fft, model, device):
+    mel_spectrogram = T.MelSpectrogram(
+        sample_rate=sr, n_mels=n_mels, n_fft=n_fft, hop_length=n_fft // 4
+    ).to(device)(segment_tensor)
+
+    harmonic, percussive = librosa.decompose.hpss(mel_spectrogram.squeeze().cpu().numpy())
+    harmonic_tensor = torch.tensor(harmonic).unsqueeze(0).to(device)
+    percussive_tensor = torch.tensor(percussive).unsqueeze(0).to(device)
+    
+    input_mel = torch.cat([mel_spectrogram, harmonic_tensor, percussive_tensor], dim=1)
+
+    with torch.cuda.amp.autocast():
+        with torch.no_grad():
+            output_mel = checkpoint(model, input_mel, use_reentrant=False)
+
+    # Ensure the types match for InverseMelScale
+    output_mel = output_mel.float()
+
+    inverse_mel_transform = T.InverseMelScale(n_stft=n_fft // 2 + 1, n_mels=n_mels).to(device)
+    griffin_lim_transform = T.GriffinLim(n_fft=n_fft, n_iter=32).to(device)
+
+    audio = griffin_lim_transform(inverse_mel_transform(output_mel.squeeze(0))).cpu().numpy()
+    
+    purge_vram()
+    return audio
+
+def perform_separation(checkpoints, file_path, n_mels, target_length, n_fft, num_stems, cache_dir, suppress_reading_messages, batch_size, segment_length):
     logger.info("Loading model for separation...")
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -54,8 +75,8 @@ def perform_separation(checkpoints, file_path, n_mels, target_length, n_fft, num
         logger.error(f"Error reading input audio from {file_path}")
         return []
 
-    segment_length_samples = 60 * sr  # 1-minute segments
-    num_segments = int(np.ceil(input_audio.size(-1) / segment_length_samples))
+    segment_length_samples = segment_length  # Use the provided segment length
+    segments = segment_audio(input_audio.squeeze().numpy(), chunk_size=segment_length_samples)
 
     output_audio = []
 
@@ -63,36 +84,24 @@ def perform_separation(checkpoints, file_path, n_mels, target_length, n_fft, num
         model = load_model(checkpoint_path, 3, 3, n_mels, target_length, device=device)
         model.eval()
         
-        for seg_idx in range(num_segments):
-            start = seg_idx * segment_length_samples
-            end = start + segment_length_samples
-            input_segment = input_audio[..., start:end]
+        for i, segment in enumerate(segments):
+            logger.info(f"Processing segment {i+1}/{len(segments)}")
+            segment_tensor = torch.tensor(segment).float().unsqueeze(0).to(device)
 
-            if input_segment.size(-1) < segment_length_samples:
-                input_segment = torch.cat([input_segment, torch.zeros(1, segment_length_samples - input_segment.size(-1))], dim=-1)
+            if segment_tensor.size(-1) < segment_length_samples:
+                segment_tensor = F.pad(segment_tensor, (0, segment_length_samples - segment_tensor.size(-1)))
 
-            with torch.no_grad():
-                mel_spectrogram = T.MelSpectrogram(
-                    sample_rate=sr, n_mels=n_mels, n_fft=n_fft, hop_length=n_fft // 4
-                )(input_segment.float()).unsqueeze(0).to(device)
-                
-                # Calculate harmonic and percussive content and stack into 4D spectrogram
-                spectrogram_np = mel_spectrogram.cpu().detach().numpy()
-                harmonic, percussive = librosa.decompose.hpss(spectrogram_np[0])
-                harmonic_t = torch.from_numpy(harmonic).unsqueeze(0).to(device)
-                percussive_t = torch.from_numpy(percussive).unsqueeze(0).to(device)
-                
-                input_mel = torch.stack([mel_spectrogram, harmonic_t, percussive_t], dim=-1)
-                
-                output_mel = model(input_mel).cpu()
-                inverse_mel_transform = T.InverseMelScale(n_stft=n_fft // 2 + 1, n_mels=n_mels)
-                griffin_lim_transform = T.GriffinLim(n_fft=n_fft, n_iter=32)
-                audio = griffin_lim_transform(inverse_mel_transform(output_mel.squeeze(0))).numpy()
-                output_audio.append(audio)
+            audio = process_segment(segment_tensor, sr, n_mels, n_fft, model, device)
+            output_audio.append(audio)
+
+            # Clear memory after processing each segment
+            del segment_tensor
+            del audio
+            torch.cuda.empty_cache()
+            purge_vram()
 
     result_paths = []
-    if not os.path.exists(cache_dir):
-        os.makedirs(cache_dir)
+    ensure_dir_exists(cache_dir)
     
     # Combine segments and write to file
     full_audio = np.concatenate(output_audio, axis=-1)
@@ -105,12 +114,14 @@ def perform_separation(checkpoints, file_path, n_mels, target_length, n_fft, num
 if __name__ == '__main__':
     checkpoints = ['path_to_checkpoint_1', 'path_to_checkpoint_2']
     file_path = 'path_to_input_audio.wav'
-    n_mels = 128
-    target_length = 256
-    n_fft = 2048
+    n_mels = 80
+    target_length = 22050
+    n_fft = 1024
     num_stems = 6
     cache_dir = './cache'
     suppress_reading_messages = False
+    batch_size = 1  # Add this line
+    segment_length = 22050  # Add this line
     
-    separated_files = perform_separation(checkpoints, file_path, n_mels, target_length, n_fft, num_stems, cache_dir, suppress_reading_messages)
+    separated_files = perform_separation(checkpoints, file_path, n_mels, target_length, n_fft, num_stems, cache_dir, suppress_reading_messages, batch_size, segment_length)
     logger.info(f'Separated files: {separated_files}')

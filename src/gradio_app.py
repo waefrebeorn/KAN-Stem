@@ -2,6 +2,7 @@ import os
 import torch
 import torch.nn as nn
 import gradio as gr
+import glob
 from multiprocessing import Value, Process, Manager
 from train import start_training_wrapper, stop_training_wrapper, save_checkpoint_gradio, resume_training, start_training
 from separate_stems import perform_separation
@@ -57,11 +58,11 @@ def calculate_metrics(true_audio, predicted_audio, sample_rate):
     sdr, sir, sar, _ = mir_eval.separation.bss_eval_sources(true_audio, predicted_audio)
     return sdr, sir, sar
 
-def perform_separation_wrapper(checkpoint_dir, file_path, n_mels, target_length, n_fft, num_stems, cache_dir, suppress_reading_messages):
-    logger.info("Starting separation...")
-    result_paths = perform_separation(checkpoint_dir, file_path, n_mels, target_length, n_fft, num_stems, cache_dir, suppress_reading_messages)
-    logger.info("Separation completed.")
-    return result_paths
+def perform_separation_wrapper(checkpoint_files, file_path, n_mels, target_length, n_fft, num_stems, cache_dir, suppress_reading_messages, batch_size, segment_length):
+    return perform_separation(checkpoint_files, file_path, n_mels, target_length, n_fft, num_stems, cache_dir, suppress_reading_messages, batch_size, segment_length)
+
+def list_checkpoint_files(directory):
+    return glob.glob(os.path.join(directory, "*.pt"))
 
 def get_checkpoints(checkpoint_dir="./checkpoints"):
     if not os.path.exists(checkpoint_dir):
@@ -449,21 +450,33 @@ if __name__ == "__main__":
 
         with gr.Tab("Separation"):
             gr.Markdown("### Perform Separation")
-            checkpoint_dir = gr.Textbox(label="Checkpoint Directory", value="./checkpoints")
+        
+            checkpoint_dir = './checkpoints'
+            checkpoint_files_list = list_checkpoint_files(checkpoint_dir)
+        
+            checkpoint_files = gr.CheckboxGroup(
+                choices=checkpoint_files_list, 
+                label="Select Checkpoint Files"
+            )
+        
             file_path = gr.Textbox(label="File Path", value='path_to_input_audio.wav')
-            n_mels = gr.Number(label="Number of Mels", value=128)
-            target_length = gr.Number(label="Target Length", value=256)
-            n_fft = gr.Number(label="Number of FFT", value=2048)
-            num_stems = gr.Number(label="Number of Stems", value=7)
+            n_mels = gr.Number(label="Number of Mels", value=80)
+            target_length = gr.Number(label="Target Length", value=22050)
+            n_fft = gr.Number(label="Number of FFT", value=1024)
+            num_stems = gr.Number(label="Number of Stems", value=6)
             cache_dir = gr.Textbox(label="Cache Directory", value="./cache")
             suppress_reading_messages = gr.Checkbox(label="Suppress Reading Messages", value=False)
+            batch_size = gr.Number(label="Batch Size", value=1)
+            segment_length = gr.Number(label="Segment Length", value=22050)
             perform_separation_button = gr.Button("Perform Separation")
             result = gr.Files(label="Separated Stems")
+        
             perform_separation_button.click(
                 perform_separation_wrapper,
-                inputs=[checkpoint_dir, file_path, n_mels, target_length, n_fft, num_stems, cache_dir, suppress_reading_messages],
+                inputs=[checkpoint_files, file_path, n_mels, target_length, n_fft, num_stems, cache_dir, suppress_reading_messages, batch_size, segment_length],
                 outputs=result
             )
+
 
         with gr.Tab("Evaluation"):
             gr.Markdown("### Evaluate Model")
